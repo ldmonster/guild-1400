@@ -1,0 +1,12 @@
+./3d_resource_dll/d3_resource.dll
+./gilde_dll/gilde.dll
+./gildestp_dll/gildestp.dll
+./reimpl/europe_guild_1400_original
+./reimpl/*.md
+./reimpl/build
+./reimpl/build-vk
+./reimpl/Testing
+./server_dll/server.dll
+./vibe_progress
+gilde.exe
+plan
