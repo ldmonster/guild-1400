@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "guild-reimpl",
+  "version": "0.1.0",
+  "description": "Die Gilde (gilde.exe) reconstruction — real backends: Vulkan (graphics), SDL2 (audio + window/input). Movie DLL is stubbed (videos skipped); copy-protection is skipped.",
+  "builtin-baseline": "059d760472984042e1b4db0d40efd935a1adcbc9",
+  "dependencies": [
+    "sdl2",
+    "vulkan-headers",
+    "vulkan-loader"
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Portable headless (no third-party deps)",
+      "description": "The reconstruction + full test suite against the portable shim backends (FileDump/Memory graphics, Null audio/platform). No SDL2/Vulkan needed.",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "GUILD_BACKEND": "OFF" }
+    },
+    {
+      "name": "vulkan-sdl",
+      "displayName": "Real backends: Vulkan + SDL2 (vcpkg)",
+      "description": "Builds the Vulkan graphics backend + SDL2 audio/window/input backend, pulling deps via the vcpkg manifest. Movie DLL stubbed (videos skipped); copy-protection skipped. Set VCPKG_ROOT (or ~/vcpkg) before configuring.",
+      "binaryDir": "${sourceDir}/build-vk",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "GUILD_BACKEND": "ON"
+      }
+    },
+    {
+      "name": "vulkan-sdl-system",
+      "displayName": "Real backends: Vulkan + SDL2 (system packages, no vcpkg)",
+      "description": "Same as vulkan-sdl but resolves SDL2/Vulkan via system find_package instead of vcpkg — for environments where the dev packages are already installed.",
+      "binaryDir": "${sourceDir}/build-vk",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "GUILD_BACKEND": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "vulkan-sdl", "configurePreset": "vulkan-sdl" },
+    { "name": "vulkan-sdl-system", "configurePreset": "vulkan-sdl-system" }
+  ],
+  "testPresets": [
+    { "name": "default", "configurePreset": "default", "output": { "outputOnFailure": true } },
+    { "name": "vulkan-sdl", "configurePreset": "vulkan-sdl", "output": { "outputOnFailure": true } },
+    { "name": "vulkan-sdl-system", "configurePreset": "vulkan-sdl-system", "output": { "outputOnFailure": true } }
+  ]
+}
