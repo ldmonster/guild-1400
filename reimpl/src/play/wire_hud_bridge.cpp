@@ -10,9 +10,11 @@
 #include "play/hud_render.h"              // HudRenderHooks + SetHudRenderHooks (public)
 #include "render/sprite_scale.h"          // ShapeShowFromBank (0x5d861c)
 #include "render/shape_blit.h"            // ColorBlitTarget16, ShapeBlitColored16
+#include "render/shape_convert16.h"       // ShapeBankConvertNew (0x5d80a8) + leaves9 install
 #include "render/animation_decode.h"      // FrameBlitState
 #include "render/types.h"                 // render::Surface
 
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -161,6 +163,50 @@ const u8* DefaultHudSpriteBank(std::size_t* outSize) {
 }
 
 void SetHudSpriteBank(const u8* bank) { g_bank = bank; }
+
+// ---------------------------------------------------------------------------
+// THE GAP IS CLOSED (see header): real depth-2/-0 gilde.gfx banks now convert
+// to depth-1 through the REAL VIBE chain and feed the REAL blit leaf.
+namespace {
+u8* g_convertedBank = nullptr;   // ShapeBankConvertNew result (malloc'd, owned here)
+}
+
+const u8* SetHudSpriteBankFromGfx(const u8* bankBlob, std::size_t blobSize) {
+    // Release the previously converted bank (and detach it if active).
+    if (g_convertedBank) {
+        if (g_bank == g_convertedBank) g_bank = nullptr;
+        std::free(g_convertedBank);
+        g_convertedBank = nullptr;
+    }
+    if (!bankBlob || blobSize == 0)
+        return nullptr;                       // revert-only call
+
+    // Loader-edge validation (not engine logic): ShapeBankConvertNew copies the
+    // 0x845-byte bank header region, so a shorter blob never reaches it.
+    if (blobSize < 0x845 || std::memcmp(bankBlob, "SHAPBANK", 8) != 0)
+        return nullptr;
+
+    // Rule-13 wiring: the converters must sit in the RenderLeaves9Hooks slots so
+    // the 0x5d8080 driver dispatches the REAL 0x5d7c0c / 0x5d7924. Idempotent.
+    render::InstallShapeConvertersIntoLeaves9();
+
+    // Own a malloc copy so the real free path of ShapeBankConvertNew (the
+    // original's `if (!ebx) VIBE_Memory_FreeDebug(bank)`) runs faithfully.
+    u8* raw = static_cast<u8*>(std::malloc(blobSize));
+    if (!raw) return nullptr;
+    std::memcpy(raw, bankBlob, blobSize);
+
+    u8* converted = render::ShapeBankConvertNew(raw, 1, /*keepSource=*/false);
+    if (!converted) {                         // writeCursor == 0 — not converted,
+        std::free(raw);                       // source NOT freed by the original
+        return nullptr;
+    }
+    // (converted == raw means the bank was already pixel-format 1 — it is then
+    //  owned here verbatim, exactly the original's pass-through return.)
+    g_convertedBank = converted;
+    g_bank = g_convertedBank;
+    return g_convertedBank;
+}
 
 int BlitHudSprite(int x, int y, int shapeIndex, u16* pixels, int widthPx,
                   const render::ColorFormat& fmt) {

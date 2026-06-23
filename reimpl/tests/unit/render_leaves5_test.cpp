@@ -35,7 +35,9 @@ float F(double x) { return static_cast<float>(x); }
 
 // ---------------------------------------------------------------------------
 // InitColors — RNG per-slot colour seeding. Golden vectors computed with the
-// LCG oracle (Srand(12345)). Loop seeds count-1 slots (verbatim guard).
+// LCG oracle (Srand(12345)). HARDEN: the do-while seeds ALL `count` slots (the
+// post-increment compare `ecx < count` @0x42beb6 runs the body `count` times,
+// not count-1). So all 5 slots are seeded and ret == the 5th R byte (69).
 // ---------------------------------------------------------------------------
 TEST(RenderLeaves5_InitColors, GoldenSeed12345) {
     render::ResetSpawnStats();
@@ -45,18 +47,14 @@ TEST(RenderLeaves5_InitColors, GoldenSeed12345) {
     CHECK(sys != nullptr);
     if (!sys) return;
 
-    // Snapshot slot 4's colour bytes (InitColors must NOT touch the last slot).
-    Particle* pp = static_cast<Particle*>(sys->particles);
-    u8 s4r = Get<u8>(&pp[4], 0x4C), s4g = Get<u8>(&pp[4], 0x4D), s4b = Get<u8>(&pp[4], 0x4E);
-
     crt::Srand(12345);
     u8 ret = render::InitColors(sys, 0, 0, 0, 5);
 
-    const u8 expB[4] = {218, 232, 219, 227};
-    const u8 expG[4] = {104, 131, 126, 144};
-    const u8 expR[4] = {87, 95, 76, 77};
+    const u8 expB[5] = {218, 232, 219, 227, 220};
+    const u8 expG[5] = {104, 131, 126, 144, 131};
+    const u8 expR[5] = {87, 95, 76, 77, 69};
     Particle* p = static_cast<Particle*>(sys->particles);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         u8 b = Get<u8>(&p[i], 0x4E);
         u8 g = Get<u8>(&p[i], 0x4D);
         u8 r = Get<u8>(&p[i], 0x4C);
@@ -65,12 +63,13 @@ TEST(RenderLeaves5_InitColors, GoldenSeed12345) {
         CHECK_EQ((int)r, (int)expR[i]);
         CHECK_EQ((int)(Get<u8>(&p[i], 0x51) & 1), 0);  // active bit cleared
     }
-    CHECK_EQ((int)ret, 77);
-    // Slot 4 (the last) is NOT seeded by InitColors (guard i+1<count): its colour
-    // bytes are byte-for-byte unchanged from the pre-call snapshot.
-    CHECK_EQ((int)Get<u8>(&p[4], 0x4C), (int)s4r);
-    CHECK_EQ((int)Get<u8>(&p[4], 0x4D), (int)s4g);
-    CHECK_EQ((int)Get<u8>(&p[4], 0x4E), (int)s4b);
+    CHECK_EQ((int)ret, 69);  // 5th slot's R byte (al residue)
+
+    // count <= 0 -> body skipped, returns baseW2's low byte (result = a4 @0x42be75).
+    crt::Srand(7);
+    u8 ret0 = render::InitColors(sys, 0, 0, 0xABCD, 0);
+    CHECK_EQ((int)ret0, 0xCD);
+    render::FreeAllSpawnAllocations(); // wave-12: reclaim AllocSystem blocks (no leak)
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +112,7 @@ TEST(RenderLeaves5_SpawnBloodEffect, GoldenSeed777) {
         // slot+16/20/24 mirror slot+56/60/64 (which were 0/s60/0 pre-rand).
         CHECK(FEq(Get<float>(&p[i], 0x14), s60));
     }
+    render::FreeAllSpawnAllocations(); // wave-12: reclaim AllocSystem blocks (no leak)
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +140,7 @@ TEST(RenderLeaves5_SpawnBlood, HeaderAndSlotClear) {
     ParticleSystem* s2 = render::SpawnBlood(9, 0, 0, 0, 0, 0, hdr2, 4, 0);
     CHECK(s2 != nullptr);
     if (s2) CHECK_EQ(hdr2.i(32), 1);
+    render::FreeAllSpawnAllocations(); // wave-12: reclaim AllocSystem blocks (no leak)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +167,7 @@ TEST(RenderLeaves5_SpawnDebris, HeaderLayout) {
     CHECK(FEq(sys->position[0], 1.0f));
     CHECK(FEq(sys->position[1], 2.0f));
     CHECK(FEq(sys->position[2], 3.0f));
+    render::FreeAllSpawnAllocations(); // wave-12: reclaim AllocSystem blocks (no leak)
 }
 
 // ---------------------------------------------------------------------------
@@ -175,20 +177,26 @@ TEST(RenderLeaves5_SpawnDebris, HeaderLayout) {
 TEST(RenderLeaves5_SpawnExplosion, RingMathSlot0) {
     render::ResetSpawnStats();
     const int slots = 12;
-    const float radius = 4.0f;
+    const float radius = 80.0f;       // a4 / sys+4 — velocity & yprof scale
+    // hdr0 (sys+0) is REINTERPRETED as a float for the sqrt's first term
+    // (fld dword ptr [esi] @0x42ca5a). Mirror the real caller @0x486822 which
+    // passes hdr0=1123024896 (== 119.0f bits), radius=1117782016 (== 80.0f).
+    const int hdr0 = 1123024896;      // 119.0f bit pattern
+    float hdr0f; std::memcpy(&hdr0f, &hdr0, 4);
     crt::Srand(5150);
     EffectHeader hdr;
-    ParticleSystem* sys = render::SpawnExplosion(/*owner*/ 3, /*hdr0*/ 1, radius,
+    ParticleSystem* sys = render::SpawnExplosion(/*a1 userTag*/ 0, /*a2 owner*/ 3,
+                                                 hdr0, radius,
                                                  /*hdr2*/ 2, /*life*/ 2.0f,
                                                  /*hdr8*/ 7, hdr, slots, 0);
     CHECK(sys != nullptr);
     if (!sys) return;
     CHECK(FEq(hdr.f(4), radius));
-    CHECK_EQ(hdr.i(0), 1);
+    CHECK_EQ(hdr.i(0), hdr0);
     CHECK_EQ(hdr.i(8), 2);
     CHECK_EQ(hdr.i(32), 7);
 
-    // Oracle for slot 0.
+    // Oracle for slot 0 (matches the x87 80-bit chain, modelled in double).
     crt::Srand(5150);
     int sextant = slots / 6;
     float inv = 1.0f / static_cast<float>(slots);
@@ -200,13 +208,13 @@ TEST(RenderLeaves5_SpawnExplosion, RingMathSlot0) {
     float b = radius * render::kExpScaleHalf2;
     float c = render::kExpScaleHalf * b;
     float ox = vx - c, oy = vy - b * render::kExpAxisDampZ, oz = vz - c;
-    float angle = static_cast<float>(crt::RandNext()) * render::kExpRandNorm * render::kExpTwoPi;
+    double angle = static_cast<double>(crt::RandNext()) * render::kExpTwoPi * render::kExpRandNorm;
     float yprof = F(std::sin(static_cast<double>(0) * render::kExpHalfPi * inv) * radius);
-    float ring = F(std::sqrt(static_cast<double>(radius) * radius
-                    - static_cast<double>(yprof) * yprof));
-    float ex = F(std::sin(angle)) * ring + ox;
+    double ring = std::sqrt(static_cast<double>(hdr0f) * hdr0f
+                    - static_cast<double>(yprof) * yprof);
+    float ex = F(std::sin(angle) * ring) + ox;
     float ey = yprof + oy;
-    float ez = F(std::cos(angle)) * ring + oz;
+    float ez = F(std::cos(angle) * ring) + oz;
     if (sextant != 0 && (0 % sextant) == 0) {
         ex = ex * render::kExpRingScaleX;
         ey = ey * render::kExpRingScaleY;
@@ -217,6 +225,7 @@ TEST(RenderLeaves5_SpawnExplosion, RingMathSlot0) {
     CHECK(FEq(Get<float>(&p[0], 0x14), ey));
     CHECK(FEq(Get<float>(&p[0], 0x18), ez));
     CHECK_EQ((int)(Get<u8>(&p[0], 0x51) & 1), 1);  // active bit set
+    render::FreeAllSpawnAllocations(); // wave-12: reclaim AllocSystem blocks (no leak)
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +279,7 @@ TEST(RenderLeaves5_SpawnSmoke, DriftAndFadeSlot0) {
     u8 rb = static_cast<u8>(crt::RandNext());
     u8 eb = static_cast<u8>(((col >> 24) & rb) + ((col >> 16) & 0xFF));
     CHECK_EQ((int)Get<u8>(&p[0], 0x4E), (int)eb);
+    render::FreeAllSpawnAllocations(); // wave-12: reclaim AllocSystem blocks (no leak)
 }
 
 // ---------------------------------------------------------------------------
@@ -303,15 +313,15 @@ TEST(RenderLeaves5_UpdateRainStep, IntegrateAndRespawn) {
     crt::Srand(2);
     render::UpdateRainStep(sys, now);
 
-    // Oracle slot 0 (no respawn).
+    // Oracle slot 0 (no respawn). dt stays double (80-bit on the x87 stack).
     {
-        float dt = F(static_cast<double>(now) * render::kRainDtScale);
+        double dt = static_cast<double>(now) * render::kRainDtScale;
         float s56 = 1.0f + 0.1f;
         float s60 = 50.0f + 0.2f;
         float s64 = 3.0f + 0.3f;
         (void)s56; (void)s64;
-        // slot+72(0x48) = dt*2 + 0; slot+4 = 0.2 - dt
-        float s48 = F(static_cast<double>(dt) * render::kRainGravity) + 0.0f;
+        // slot+72(0x48) = dt*2 + 0; slot+4 = 0.2 - dt  (double then round to float)
+        float s48 = F(dt * render::kRainGravity + 0.0f);
         // not falling -> slot+16/20/24 = s56/s60/s64; fade from s60
         double fade = static_cast<double>(s60) * render::kRainFadeScale + render::kRainFadeBias;
         double fc = (fade >= 0.0) ? fade : 0.0;
@@ -327,6 +337,7 @@ TEST(RenderLeaves5_UpdateRainStep, IntegrateAndRespawn) {
         CHECK(FEq(Get<float>(&p[1], 0x48), 9.0f));
         CHECK_EQ((int)Get<std::uint32_t>(&p[1], 0x30), (int)now);
     }
+    render::FreeAllSpawnAllocations(); // wave-12: reclaim AllocSystem blocks (no leak)
 }
 
 // ---------------------------------------------------------------------------

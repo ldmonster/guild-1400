@@ -181,11 +181,13 @@ int FindTwoPeopleInRange(const AiActionActor& actor, AiActionResult& out);
 // gilde.exe 0x47bb88 — VIBE_AiAction_FindNearbyEntityByLevel.
 int FindNearbyEntityByLevel(const AiActionActor& actor, AiActionResult& out);
 
-// gilde.exe 0x47bcd8 — VIBE_AiAction_CheckObjectState.
-//   return BuildingGroup(target)==7 && RandomModulo(n) || !RandomModulo(n);
-// The original's two RandomModulo calls share the same operands (edx/ecx); `n` is
-// that shared modulo. Returns 0/1.
-bool CheckObjectState(i32 targetBuildingPtr, u16 n);
+// gilde.exe 0x47bcd8 — VIBE_AiAction_CheckObjectState (__thiscall, this=record).
+//   net: (BuildingGroup(code)==7 && RandomModulo(3)!=0) || RandomModulo(4)==0.
+// The two RandomModulo calls use DISTINCT hard-coded moduli (3 then 4) — verified
+// against disasm (mov eax,3 @0x47bcea; mov eax,4 @0x47bcf9). `buildingTypeCode` is
+// the caller-derived (*(i32*)(record+0x161))>>24 byte fed to GroupFromCode.
+// Returns 0/1.
+bool CheckObjectState(i32 buildingTypeCode);
 
 // gilde.exe 0x47bf98 — VIBE_AiAction_FindFactionPerson.
 int FindFactionPerson(const AiActionActor& actor, AiActionResult& out);

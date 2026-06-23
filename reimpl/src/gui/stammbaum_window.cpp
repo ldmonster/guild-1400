@@ -11,11 +11,14 @@ constexpr int kSpouseObj   = 2501;
 constexpr int kParentObj0  = 2510;
 constexpr int kChildObj0   = 2520;
 
-TreeNode MakeNode(int entity, int x, int objectId, int scale) {
+// `anchor` is the pre-centering X; the binary stores the node x as anchor + nw/2 (the
+// AddCenteredLabel x, 0x55ae32) and places the portrait sprite at anchor + 2 (v146,
+// 0x55bbda) — so portraitX = node.x - nw/2 + 2, NOT node.x + 2.
+TreeNode MakeNode(int entity, int anchor, int half, int objectId, int scale) {
     TreeNode n{};
     n.entity = entity;
-    n.x = x;
-    n.portraitX = x + 2;       // every node's portrait is placed at frame_x + 2
+    n.x = anchor + half;       // = node.x (centered)
+    n.portraitX = anchor + 2;  // portrait sprite at anchor + 2
     n.objectId = (entity != 0) ? objectId : -1; // empty slots get the 1190 placeholder
     n.scale = scale;
     n.empty = (entity == 0);
@@ -25,11 +28,17 @@ TreeNode MakeNode(int entity, int x, int objectId, int scale) {
 } // namespace
 
 // gilde.exe 0x55ab84 (layout half).
-//   v8 = window.w >> 16;  v152 = v8/2;  v132 = v152;  v134 = node.w >> 16;  v28 = v134/2.
-//   self : v23 = v132 - (v134 + 90); spouse : v132 + 90.
-//   parents (both): left v132-(v134+16), right v132+16; (one): v132 - v134/2.
-//   children odd : center v132 - v134/2, then outward by (v134+40);
-//   children even: v132 - v134 - 20, v132 + 20, then outward by (v134+40).
+//   v8 = window.w >> 16;  center v121 = v8/2;  nw v123 = node.w >> 16;  half = nw/2.
+//   Every node's STORED x is `anchor + nw/2` (the v111/v25/v123/2 centering term that the
+//   binary adds at AddCenteredLabel time — 0x55ae0e: ax = nw/2 + center - nw - 90):
+//     self          : center - (nw + 90) + nw/2            (v97)
+//     spouse        : center + 90 + nw/2                    (v101)
+//     parents (2)   : father center - (nw+16) + nw/2 (v86), mother center + 16 + nw/2 (v90)
+//     parent  (1)   : (center - nw/2) + nw/2 = center       (v126 + v25)
+//     children odd  : anchors {center-nw/2, center-nw/2-40-nw, nw+center-nw/2+40,
+//                     v104-40-nw, nw+v105+40}, each + nw/2 (read in this memory order)
+//     children even : anchors {center-nw-20, center+20, v108[0]-nw-40, nw+center+20+40},
+//                     each + nw/2
 FamilyTreeLayout Stammbaum_BuildLayout(const Family& fam, int canvasWidth, int nodeWidth,
                                        int titleArg) {
     FamilyTreeLayout l{};
@@ -44,56 +53,62 @@ FamilyTreeLayout Stammbaum_BuildLayout(const Family& fam, int canvasWidth, int n
     l.center = center;
 
     // --- self / spouse row ---------------------------------------------------
-    l.self = MakeNode(fam.focus.entity, center - (nw + kStammSelfGap), kSelfObj,
+    // anchors: self = center-(nw+90), spouse = center+90 (node x = anchor + nw/2).
+    l.self = MakeNode(fam.focus.entity, center - (nw + kStammSelfGap), half, kSelfObj,
                       kStammSelfScale);
     const bool married = fam.spouse.entity != 0;
     if (married)
-        l.spouse = MakeNode(fam.spouse.entity, center + kStammSelfGap, kSpouseObj,
+        l.spouse = MakeNode(fam.spouse.entity, center + kStammSelfGap, half, kSpouseObj,
                             kStammSelfScale);
     else
-        l.spouse = MakeNode(0, center + kStammSelfGap, kSpouseObj, kStammSelfScale);
+        l.spouse = MakeNode(0, center + kStammSelfGap, half, kSpouseObj, kStammSelfScale);
 
     // --- parents -------------------------------------------------------------
     const bool twoParents = (fam.father.entity != 0) && (fam.mother.entity != 0);
     if (twoParents) {
-        // left = center-(nw+16) (father), right = center+16 (mother)
+        // father anchor = center-(nw+16) (v86), mother anchor = center+16 (v90)
         l.parents.push_back(MakeNode(fam.father.entity, center - (nw + kStammParentGap),
-                                     kParentObj0, kStammParentScale));
-        l.parents.push_back(MakeNode(fam.mother.entity, center + kStammParentGap,
+                                     half, kParentObj0, kStammParentScale));
+        l.parents.push_back(MakeNode(fam.mother.entity, center + kStammParentGap, half,
                                      kParentObj0 + 1, kStammParentScale));
     } else {
-        // single parent (whichever is present) centred at center - nw/2
+        // single parent anchor = center - nw/2 (v126); node x = center.
         int p = fam.father.entity ? fam.father.entity : fam.mother.entity;
-        l.parents.push_back(MakeNode(p, center - half, kParentObj0, kStammParentScale));
+        l.parents.push_back(MakeNode(p, center - half, half, kParentObj0,
+                                     kStammParentScale));
     }
 
     // --- children ------------------------------------------------------------
     int n = (int)fam.children.size();
-    // The original arranges children symmetrically; we reproduce the X-anchor table.
+    // The X-anchor table, read in the binary's memory order; node x = anchor + nw/2.
     std::vector<int> xs;
     if (n > 0) {
         if (n & 1) {
-            // odd: a centred child then outward pairs.
-            //   slot0 = center - nw/2; slotL = slot0 - 40 - nw; slotR = nw+center-nw/2+40; ...
-            xs.push_back(center - half);                       // v113
-            if (n >= 2) xs.push_back(nw + center - half + kStammChildSpread);          // v115
-            if (n >= 3) xs.push_back(center - half - kStammChildSpread - nw);          // v114
-            if (n >= 4) xs.push_back(nw + (nw + center - half + kStammChildSpread)
-                                        + kStammChildSpread);                          // v117
-            if (n >= 5) xs.push_back((center - half - kStammChildSpread - nw)
-                                        - kStammChildSpread - nw);                     // v116
+            // odd anchors v103..v107 (read v103,v104,v105,v106,v107 sequentially).
+            const int a103 = center - half;                              // v103
+            const int a104 = center - half - kStammChildSpread - nw;     // v104
+            const int a105 = nw + center - half + kStammChildSpread;     // v105
+            const int a106 = a104 - kStammChildSpread - nw;              // v106
+            const int a107 = nw + a105 + kStammChildSpread;              // v107
+            xs.push_back(a103);
+            if (n >= 2) xs.push_back(a104);
+            if (n >= 3) xs.push_back(a105);
+            if (n >= 4) xs.push_back(a106);
+            if (n >= 5) xs.push_back(a107);
         } else {
-            // even: two inner children then outward pairs.
-            xs.push_back(center - nw - kStammChildEvenGap);    // v118[0]
-            if (n >= 2) xs.push_back(center + kStammChildEvenGap);                     // v118[1]
-            if (n >= 3) xs.push_back((center - nw - kStammChildEvenGap)
-                                        - nw - kStammChildSpread);                     // v118[2]
-            if (n >= 4) xs.push_back(nw + center + kStammChildEvenGap
-                                        + kStammChildSpread);                          // v119
+            // even anchors v108[0..3] (read in order).
+            const int e0 = center - nw - kStammChildEvenGap;            // v108[0]
+            const int e1 = center + kStammChildEvenGap;                 // v108[1]
+            const int e2 = e0 - nw - kStammChildSpread;                 // v108[2]
+            const int e3 = nw + center + kStammChildEvenGap + kStammChildSpread; // v108[3]
+            xs.push_back(e0);
+            if (n >= 2) xs.push_back(e1);
+            if (n >= 3) xs.push_back(e2);
+            if (n >= 4) xs.push_back(e3);
         }
     }
     for (int i = 0; i < n && i < (int)xs.size(); ++i)
-        l.children.push_back(MakeNode(fam.children[i].entity, xs[i], kChildObj0 + i,
+        l.children.push_back(MakeNode(fam.children[i].entity, xs[i], half, kChildObj0 + i,
                                       kStammChildScale));
 
     return l;

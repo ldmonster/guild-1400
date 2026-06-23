@@ -10,7 +10,31 @@
 #include "sim/gametime.h"           // GameTimeAdvance, GameTimeCompare
 #include "sim/npcaction.h"          // NpcClock(), GetNpcLeafHooks()
 
+#include <cstring>                  // std::memcpy
+
 namespace guild::sim {
+
+// Byte-exact, alignment-safe loads/stores at arbitrary byte offsets. The x86
+// binary reads/writes He-record fields via unaligned `*(int*)(rec+N)` at offsets
+// that are not naturally aligned (e.g. +1, +2, +93, +59, +36, +97). Binding an
+// i32&/HeRecord*& reference to those addresses is UB in portable C++ (UBSAN).
+// These move the identical little-endian bytes without forming a misaligned ref.
+namespace {
+inline i32 LoadI32At(const HeRecord* h, int off) {
+    i32 v; std::memcpy(&v, reinterpret_cast<const u8*>(h) + off, sizeof(v)); return v;
+}
+inline void StoreI32At(HeRecord* h, int off, i32 v) {
+    std::memcpy(reinterpret_cast<u8*>(h) + off, &v, sizeof(v));
+}
+// The transport endpoint people/objects resolved by VIBE_Person_QueryBegin /
+// VIBE_Object_FindObjectById store their entity id at byte offset +1 (a misaligned
+// dword), NOT at the +4 used by the He_* record family. Every id comparison/emit in
+// the original transport code reads *(rec+1) (disasm: `mov eax,[edi+1]` @0x4de0ae,
+// `cmp ...,[Begin+1]` @0x4df8a1, etc.). Use this for those records.
+inline i32 PersonId(const HeRecord* rec) {
+    return rec ? LoadI32At(rec, 1) : 0;
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Hook table plumbing (inert default — every leaf reports "absent"/no-op/0).
@@ -190,7 +214,7 @@ HeRecord* AllocTransport(HeRecord* h) {
     // resolve the cart, scale its speed, flag it, and roll the escort type.
     He_SeqId(h) = *reinterpret_cast<i32*>(HeBytes(start) + 48) +
                   *reinterpret_cast<i32*>(HeBytes(goal) + 48);   // +184
-    Cas7_OriginId(h) = He_Id(start);          // (+196) = *(start+1)... id mirror
+    Cas7_OriginId(h) = PersonId(start);       // (+196) = *(start+1)  (disasm 0x4de0ae)
     Cas7_Started(h) = 0;                      // (+208) = 0
     GameTimeAdvance(&He_ApptTime(h), 0, 1, 0); // VIBE_GameTime_Advance(+82,0,1,0): +1 second
 
@@ -202,10 +226,13 @@ HeRecord* AllocTransport(HeRecord* h) {
     HeRecord* bld = k.buildingFindById(*reinterpret_cast<i32*>(HeBytes(cart) + 28));
     // cart speed = (i16)cart[+18] * scale * factor + base, into vehicle[+416].
     int classByte = *reinterpret_cast<u8*>(HeBytes(cart) + 18);
-    HeRecord* veh = *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59);
+    HeRecord* veh; std::memcpy(&veh, HeBytes(cart) + 59, sizeof(veh));
     if (veh) {
-        float spd = static_cast<float>(static_cast<short>(classByte) * kCartSpeedScale *
-                                       kCartSpeedFactor + kCartSpeedBase);
+        // binary: (double)(__int16)cls * (double)flt_61F244 * dbl_61F248 + dbl_61F250
+        float spd = static_cast<float>(
+            static_cast<double>(static_cast<short>(classByte)) *
+                static_cast<double>(kCartSpeedScale) * kCartSpeedFactor +
+            kCartSpeedBase);
         *reinterpret_cast<float*>(HeBytes(veh) + 416) = spd;
         u16 cls = *reinterpret_cast<u16*>(HeBytes(cart));   // *(_WORD*)v20
         if (cls == 310)
@@ -225,9 +252,9 @@ HeRecord* AllocTransport(HeRecord* h) {
     }
     *reinterpret_cast<u8*>(HeBytes(cart) + 19) |= 0x40u;     // mark in-transit
     if ((He_Flags(h) & 2) != 0)
-        k.cmdRequestArgs25(*reinterpret_cast<i32*>(HeBytes(cart) + 2), 19, 64, 1, 0);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 36) = h;   // cart owner = h
-    He_CityId(h) = *reinterpret_cast<i32*>(HeBytes(cart) + 2);  // *(a1+16) = cart id
+        k.cmdRequestArgs25(LoadI32At(cart, 2), 19, 64, 1, 0);
+    { HeRecord* _p = h; std::memcpy(HeBytes(cart) + 36, &_p, sizeof(_p)); }  // cart owner = h
+    StoreI32At(h, 16, LoadI32At(cart, 2));  // *(a1+16) = cart id  (disasm: mov [ebp+10h],eax)
 
     // escort-type roll from the production volume (only when the cart is "loaded").
     if (cart && (*reinterpret_cast<u8*>(HeBytes(cart) + 32) & 1) != 0) {
@@ -276,39 +303,44 @@ i32 RunTransportLocal(HeRecord* h) {
     ApplyTransportSpeed(h, cart);
     if (!Cas7_Started(h)) {
         // first leg: queue the move and flag started.
-        k.cmdRequestSingle49(*reinterpret_cast<i32*>(HeBytes(cart) + 2));
-        k.cmdRequestNamedObject53(*reinterpret_cast<i32*>(HeBytes(cart) + 2),
-                                  goalp ? He_Id(goalp) : 0, 0, -1, 1, "trans");
-        i32 pkt = k.cmdRequest19(begin ? He_Id(begin) : 0,
-                                 startp ? He_Id(startp) : 0, 0,
-                                 *reinterpret_cast<i32*>(HeBytes(cart) + 2));
+        k.cmdRequestSingle49(LoadI32At(cart, 2));
+        k.cmdRequestNamedObject53(LoadI32At(cart, 2),
+                                  PersonId(goalp), 0, -1, 1, "Trans");
+        i32 pkt = k.cmdRequest19(PersonId(begin),
+                                 PersonId(startp), 0,
+                                 LoadI32At(cart, 2));
         Cas7_Started(h) = 1;
         Cas7_MovePkt(h) = pkt;
     } else {
         // arrived? gate on the cart's near-target tolerance / the lap watchdog.
-        HeRecord* veh = *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59);
+        // binary 0x4de677: arrived only when veh && veh[+296]==0 && ((veh[+136]==
+        // &byte_13ECEC8 && WithinTolerance(...,100.0)) || lap>6). When veh is null or
+        // veh[+296]!=0 the whole `if` is false (NO arrival path). The earlier recon
+        // fabricated `arrived = lap>6` in the else, which the binary does not do.
+        // BOUNDARY: veh[+136]==&byte_13ECEC8 compares a render-state pointer to a
+        // cross-cluster global sentinel; modelled as matching so the tolerance gate
+        // is preserved (the only data not reachable from this cluster).
+        HeRecord* veh; std::memcpy(&veh, HeBytes(cart) + 59, sizeof(veh));
         bool arrived = false;
         if (veh && *reinterpret_cast<i32*>(HeBytes(veh) + 296) == 0) {
             int near = k.withinTolerance(
                 reinterpret_cast<const float*>(*reinterpret_cast<i32*>(HeBytes(veh) + 52) + 76),
                 &Cas7_TgtX(h), 100.0f);
             arrived = near || Cas7_Lap(h) > 6;
-        } else {
-            arrived = Cas7_Lap(h) > 6;
         }
         if (arrived) {
             if (!k.isStorageType(goalp)) {
-                Cas7_MovePkt(h) = k.cmdRequest19(goalp ? He_Id(goalp) : 0,
-                                                 0, 0, *reinterpret_cast<i32*>(HeBytes(cart) + 2));
-                k.cmdRequestPair51(*reinterpret_cast<i32*>(HeBytes(cart) + 2), 0);
+                Cas7_MovePkt(h) = k.cmdRequest19(PersonId(goalp),
+                                                 0, 0, LoadI32At(cart, 2));
+                k.cmdRequestPair51(LoadI32At(cart, 2), 0);
             }
-            k.cmdRequestArgs25(*reinterpret_cast<i32*>(HeBytes(cart) + 2), 19, 0, 1, 64);
+            k.cmdRequestArgs25(LoadI32At(cart, 2), 19, 0, 1, 64);
             // narrative push gated on the city category (6/7).
             u8 cat = k.cityCategory(He_CityIndex(h));
             if (cat == 6 || cat == 7) {
                 HeRecord* prod = k.findWorkProduct(goalp);
                 k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)),
-                                *reinterpret_cast<i32*>(HeBytes(cart) + 2),
+                                LoadI32At(cart, 2),
                                 prod ? 1421 : 1421);
             }
             He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(-1, h);
@@ -329,28 +361,28 @@ i32 RunTransportDoor(HeRecord* h) {
         return 0;
     ApplyTransportSpeed(h, cart);
     if (!Cas7_Started(h)) {
-        k.cmdRequestSingle49(*reinterpret_cast<i32*>(HeBytes(cart) + 2));
+        k.cmdRequestSingle49(LoadI32At(cart, 2));
         if (!k.isStorageType(startp))
-            k.cmdRequestPair51(*reinterpret_cast<i32*>(HeBytes(cart) + 2), 1);
-        k.cmdRequestNamedObject53(*reinterpret_cast<i32*>(HeBytes(cart) + 2),
-                                  startp ? He_Id(startp) : 0, 0, -1, 0, "trans");
+            k.cmdRequestPair51(LoadI32At(cart, 2), 1);
+        k.cmdRequestNamedObject53(LoadI32At(cart, 2),
+                                  PersonId(startp), 0, -1, 0, "Trans");
         if (!k.isStorageType(startp))
-            Cas7_MovePkt(h) = k.cmdRequest19(begin ? He_Id(begin) : 0,
-                                             startp ? He_Id(startp) : 0, 0,
-                                             *reinterpret_cast<i32*>(HeBytes(cart) + 2));
+            Cas7_MovePkt(h) = k.cmdRequest19(PersonId(begin),
+                                             PersonId(startp), 0,
+                                             LoadI32At(cart, 2));
         Cas7_Started(h) = 1;
         return k.universeSwitchSlot(0, 1);
     }
     if (!k.isNearDoor(cart, goalp))
         return k.universeSwitchSlot(0, 1);
     // reached the door: queue the unload move + the narrative push, re-arm cmd29.
-    Cas7_MovePkt(h) = k.cmdRequest19(goalp ? He_Id(goalp) : 0,
-                                     begin ? He_Id(begin) : 0, 0,
-                                     *reinterpret_cast<i32*>(HeBytes(cart) + 2));
+    Cas7_MovePkt(h) = k.cmdRequest19(PersonId(goalp),
+                                     PersonId(begin), 0,
+                                     LoadI32At(cart, 2));
     u8 cat = k.cityCategory(He_CityIndex(h));
     if (cat == 6 || cat == 7)
         k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)),
-                        *reinterpret_cast<i32*>(HeBytes(cart) + 2), 1421);
+                        LoadI32At(cart, 2), 1421);
     He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(-1, h);
     return k.universeSwitchSlot(0, 1);
 }
@@ -367,22 +399,22 @@ i32 RunTransportEntry(HeRecord* h) {
         return 0;
     ApplyTransportSpeed(h, cart);
     if (!Cas7_Started(h)) {
-        k.cmdRequestSingle49(*reinterpret_cast<i32*>(HeBytes(cart) + 2));
-        k.cmdRequestNamedObject53(*reinterpret_cast<i32*>(HeBytes(cart) + 2),
-                                  goalp ? He_Id(goalp) : 0, 0, -1, 1, "trans");
-        Cas7_MovePkt(h) = k.cmdRequest19(begin ? He_Id(begin) : 0,
-                                         startp ? He_Id(startp) : 0, 0,
-                                         *reinterpret_cast<i32*>(HeBytes(cart) + 2));
+        k.cmdRequestSingle49(LoadI32At(cart, 2));
+        k.cmdRequestNamedObject53(LoadI32At(cart, 2),
+                                  PersonId(goalp), 0, -1, 1, "Trans");
+        Cas7_MovePkt(h) = k.cmdRequest19(PersonId(begin),
+                                         PersonId(startp), 0,
+                                         LoadI32At(cart, 2));
         Cas7_Started(h) = 1;
         return k.universeSwitchSlot(0, 1);
     }
     if (!k.isNearDoor(cart, goalp)) {
         // not yet at the entry; the lap-16 watchdog re-issues the move.
         if (Cas7_Started(h) && Cas7_Lap(h) > 16) {
-            HeRecord* veh = *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59);
+            HeRecord* veh; std::memcpy(&veh, HeBytes(cart) + 59, sizeof(veh));
             if (veh && *reinterpret_cast<i32*>(HeBytes(veh) + 296) == 0) {
-                k.cmdRequestNamedObject53(*reinterpret_cast<i32*>(HeBytes(cart) + 2),
-                                          goalp ? He_Id(goalp) : 0, 0, -1, 1, "trans");
+                k.cmdRequestNamedObject53(LoadI32At(cart, 2),
+                                          PersonId(goalp), 0, -1, 1, "Trans");
                 Cas7_Lap(h) = 0;
             }
         }
@@ -390,18 +422,18 @@ i32 RunTransportEntry(HeRecord* h) {
     }
     // at the entry: queue the move into the building, request the avatar, then the
     // narrative push (the variant-specific 6216/6218/6220 templates), re-arm cmd29.
-    Cas7_MovePkt(h) = k.cmdRequest19(goalp ? He_Id(goalp) : 0,
-                                     begin ? He_Id(begin) : 0, 0,
-                                     *reinterpret_cast<i32*>(HeBytes(cart) + 2));
-    k.cmdRequestChrMove(*reinterpret_cast<i32*>(HeBytes(cart) + 2),
-                        goalp ? He_Id(goalp) : 0, 0, -1);
+    Cas7_MovePkt(h) = k.cmdRequest19(PersonId(goalp),
+                                     PersonId(begin), 0,
+                                     LoadI32At(cart, 2));
+    k.cmdRequestChrMove(LoadI32At(cart, 2),
+                        PersonId(goalp), 0, -1);
     // PickRandomTransporter waypoint (opaque destination snap) — preserved as a call.
     PickRandomTransporter(nullptr);
-    k.cmdRequestArgs25(*reinterpret_cast<i32*>(HeBytes(cart) + 2), 19, 0, 1, 64);
+    k.cmdRequestArgs25(LoadI32At(cart, 2), 19, 0, 1, 64);
     u8 cat = k.cityCategory(He_CityIndex(h));
     if (cat == 6 || cat == 7)
         k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)),
-                        *reinterpret_cast<i32*>(HeBytes(cart) + 2), 1421);
+                        LoadI32At(cart, 2), 1421);
     He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(-1, h);
     return k.universeSwitchSlot(0, 1);
 }
@@ -413,18 +445,20 @@ i32 RunTransportStadtStadt(HeRecord* h) {
     k.personQueryBegin(0, 1, 0, 69);
     HeRecord* startp = k.personQueryBegin(0, 1, 1, Cas7_StartId(h));   // v3 / v29
     HeRecord* goalp  = k.personQueryBegin(0, 1, 1, Cas7_GoalId(h));    // v5
-    (void)goalp;
 
     // The driver: when the leg origin (+196) still equals the start endpoint and the
     // cart has NOT started, arm the cross-city leg (resolve a waypoint transporter,
     // snap the target coords, queue the move). Otherwise gate on arrival.
-    if (Cas7_OriginId(h) == (startp ? He_Id(startp) : 0) && !Cas7_Started(h)) {
+    // binary 0x4dece8: gate is `+196 == *(v3+1) && !+208` (v3 = startp, id @+1).
+    if (Cas7_OriginId(h) == PersonId(startp) && !Cas7_Started(h)) {
         k.universeSwitchSlot(0, 1);
-        HeRecord* way = PickRandomTransporter(
-            *reinterpret_cast<HeRecord**>(HeBytes(startp) + 97));
+        // binary 0x4ded41: PickRandomTransporter(*(v5+97)) where v5 = goalp (the
+        // GoalId query), NOT startp. (earlier recon read startp+97.)
+        HeRecord* _wpsrc; std::memcpy(&_wpsrc, HeBytes(goalp) + 97, sizeof(_wpsrc));
+        HeRecord* way = PickRandomTransporter(_wpsrc);
         (void)way;
         HeRecord* obj = k.objectQueryFind(
-            startp ? *reinterpret_cast<i32*>(HeBytes(startp) + 93) : 0,
+            startp ? LoadI32At(startp, 93) : 0,
             1, 1, 0, Cas7_CartId(h));
         if (!obj)
             obj = k.findObjectById(Cas7_CartId(h));
@@ -434,51 +468,64 @@ i32 RunTransportStadtStadt(HeRecord* h) {
             // snap the target coords (the heightmap world-to-tile result).
             Cas7_TgtX(h) = 0.0f; Cas7_TgtY(h) = 0.0f; Cas7_TgtZ(h) = 0.0f;
             if (!k.isStorageType(startp))
-                k.cmdRequestPair51(*reinterpret_cast<i32*>(HeBytes(obj) + 2), 1);
-            k.cmdRequestQuad46(*reinterpret_cast<i32*>(HeBytes(obj) + 2), 0, 0, 0);
+                k.cmdRequestPair51(LoadI32At(obj, 2), 1);
+            k.cmdRequestQuad46(LoadI32At(obj, 2), 0, 0, 0);
             if (!k.isStorageType(startp))
-                Cas7_MovePkt(h) = k.cmdRequest19(begin ? He_Id(begin) : 0,
+                Cas7_MovePkt(h) = k.cmdRequest19(PersonId(begin),
                                                  Cas7_StartId(h), 0, Cas7_CartId(h));
         } else {
             k.objectQueryFind(0, 2, 7, 1, Cas7_CartId(h));
         }
-        Cas7_OriginId(h) = begin ? He_Id(begin) : 0;   // (+196) = begin id
+        Cas7_OriginId(h) = PersonId(begin);   // (+196) = *(Begin+1)  (binary 0x4deeb7)
         return Cas7_OriginId(h);
     }
 
     // running leg: when the leg origin reached the start endpoint, resolve the cart
     // in-scene and, once within tolerance (or past the watchdog), queue the unload.
-    if (Cas7_OriginId(h) == (begin ? He_Id(begin) : 0)) {
+    if (Cas7_OriginId(h) == PersonId(begin)) {
         HeRecord* obj = k.objectQueryFind(
-            begin ? *reinterpret_cast<i32*>(HeBytes(begin) + 93) : 0,
+            begin ? LoadI32At(begin, 93) : 0,
             1, 1, 0, Cas7_CartId(h));
         if (!obj)
             obj = k.objectQueryFind(0, 2, 7, 1, Cas7_CartId(h));
         if (obj) {
-            HeRecord* veh = *reinterpret_cast<HeRecord**>(HeBytes(obj) + 59);
+            HeRecord* veh; std::memcpy(&veh, HeBytes(obj) + 59, sizeof(veh));
             ApplyTransportSpeed(h, obj);
             if (veh) {
                 i32 anim = *reinterpret_cast<i32*>(HeBytes(veh) + 296);
-                if (anim && *reinterpret_cast<u8*>(reinterpret_cast<u8*>(static_cast<uintptr_t>(anim)) + 9) == 45) {
-                    // copy the anim's target coords into +216..+224.
+                if (anim) {
+                    // binary 0x4defa2: if *(anim+9)==45 copy anim's target coords
+                    // (anim[+308/+312/+316]) into the He target slots (+216/+220/+224).
+                    u8* a = reinterpret_cast<u8*>(static_cast<uintptr_t>(
+                                static_cast<u32>(anim)));
+                    if (a[9] == 45) {
+                        std::memcpy(HeBytes(h) + 216, a + 308, 4);
+                        std::memcpy(HeBytes(h) + 220, a + 312, 4);
+                        std::memcpy(HeBytes(h) + 224, a + 316, 4);
+                    }
                 }
                 if (veh && *reinterpret_cast<i32*>(HeBytes(veh) + 296) == 0) {
                     int near = k.withinTolerance(
                         reinterpret_cast<const float*>(*reinterpret_cast<i32*>(HeBytes(veh) + 52) + 76),
                         &Cas7_TgtX(h), 300.0f);
                     if (near || Cas7_Lap(h) > 6) {
-                        k.cmdRequestArgs25(*reinterpret_cast<i32*>(HeBytes(obj) + 1),
+                        k.cmdRequestArgs25(LoadI32At(obj, 1),
                                            19, 0, 1, 64);
-                        if (!k.isStorageType(startp)) {
-                            k.cmdRequestPair51(*reinterpret_cast<i32*>(HeBytes(obj) + 1), 0);
-                            Cas7_MovePkt(h) = k.cmdRequest19(Cas7_StartId(h) ? Cas7_StartId(h) : 0,
-                                                             begin ? He_Id(begin) : 0, 0,
+                        // binary 0x4df01b/0x4df04e: running-leg storage checks key on
+                        // IsStorageType(v5)=goalp, not startp.
+                        if (!k.isStorageType(goalp)) {
+                            k.cmdRequestPair51(LoadI32At(obj, 1), 0);
+                            // binary 0x4df046: QueueRequest19(*(v5+1), *(Begin+1), ..,
+                            // *(a1+172)) where v5 = goalp (GoalId query). (earlier
+                            // recon passed the raw +176 StartId field for arg1.)
+                            Cas7_MovePkt(h) = k.cmdRequest19(PersonId(goalp),
+                                                             PersonId(begin), 0,
                                                              Cas7_CartId(h));
                         }
                         u8 cat = k.cityCategory(He_CityIndex(h));
                         if (cat == 6 || cat == 7)
                             k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)),
-                                            *reinterpret_cast<i32*>(HeBytes(obj) + 1), 1421);
+                                            LoadI32At(obj, 1), 1421);
                         Cas7_OriginId(h) = Cas7_GoalId(h);   // (+196) = (+180)
                         He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(-1, h);
                     }
@@ -504,12 +551,13 @@ void RunTransport(HeRecord* h) {
         He_ReqHandle(h) = -1;
     }
     HeRecord* begin = k.personQueryBegin(0, 1, 0, 68);
-    k.personQueryBegin(0, 1, 0, 69);
+    HeRecord* begin69 = k.personQueryBegin(0, 1, 0, 69);   // v6 — also null-checked
     i32 startKey = Cas7_StartId(h);
     HeRecord* startp = k.personQueryBegin(startKey, 1, 1, startKey);   // v7
     HeRecord* goalp  = k.personQueryBegin(startKey, 1, 1, Cas7_GoalId(h)); // v8
-    // any endpoint missing -> force the finish phase (-1).
-    if (!startp || !goalp || !begin)
+    // any endpoint missing -> force the finish phase (-1). binary 0x4df84e/0x4df8e7:
+    // tests Begin(68), then startp, goalp, AND the query-69 result (v6=begin69).
+    if (!begin || !startp || !goalp || !begin69)
         He_State(h) = -1;
 
     if (!k.findObjectById(Cas7_CartId(h))) {
@@ -520,12 +568,18 @@ void RunTransport(HeRecord* h) {
 
     switch (He_State(h)) {
         case -2: {  // 0xFFFFFFFE — arrival
-            // SetTargetCityRef(h, currentSceneCity).
-            He_CityId(h) = k.currentSceneCity();
+            // VIBE_NpcAction_SetTargetCityRef(h, currentSceneCity) @0x4c9484:
+            //   *(u16*)(h+8) = city ; if city==0xFFFF -> *(h+12) = -1
+            //   else *(h+12) = dword_12CE914[134*city]  (== cityRecipientId(city)).
+            u16 city = k.currentSceneCity();
+            He_CityIndex(h) = city;
+            He_CityId(h) = (city == 0xFFFF) ? -1 : k.cityRecipientId(city);
             i32 origin = Cas7_OriginId(h);
-            if (origin == (begin ? He_Id(begin) : 0) ||
-                origin == (goalp ? He_Id(goalp) : 0) ||
-                origin == (startp ? He_Id(startp) : 0)) {
+            // binary 0x4df8a1/0x4df8aa/0x4df8ba: compares +196 against *(Begin+1),
+            // *(goalp+1), *(startp+1) — the person-record id at +1.
+            if (origin == PersonId(begin) ||
+                origin == PersonId(goalp) ||
+                origin == PersonId(startp)) {
                 He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(1, h);
             }
             return;
@@ -534,7 +588,7 @@ void RunTransport(HeRecord* h) {
             HeRecord* obj = k.objectQueryFind(0, 2, 7, 1, Cas7_CartId(h));
             if ((He_Flags(h) & 2) != 0 && obj) {
                 if ((k.randomModulo(100) & 0xFFFF) > 50)
-                    k.requestChangeZustand(*reinterpret_cast<i32*>(HeBytes(obj) + 1), -2);
+                    k.requestChangeZustand(LoadI32At(obj, 1), -2);
                 i32 win = Cas7_Window(h);
                 if (win != -1) {
                     // VIBE_Window_RemoveIfActive — opaque; clearing the handle is the
@@ -592,7 +646,7 @@ void RunTransport(HeRecord* h) {
                     // highwayman ambush narrative + drop.
                     if (obj) {
                         k.sendEntityMessage(k.cityRecipientId(He_CityIndex(h)), 1421);
-                        k.cmdRequestBuildOp74(He_Id(obj));
+                        k.cmdRequestBuildOp74(PersonId(obj));  // *(v35+1) (binary 0x4dfc93)
                     }
                     He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(-1, h);
                     return;
@@ -609,15 +663,20 @@ void RunTransport(HeRecord* h) {
             float prob = 0.0f;
             if (bld) {
                 int n = k.sumWorkstation(bld, 2, 1);
-                prob = static_cast<float>(n + kAmbushBase);
+                // binary: v40 = (double)v39 + flt_61F3A8
+                prob = static_cast<float>(static_cast<double>(n) +
+                                          static_cast<double>(kAmbushBase));
             }
             if (k.fastFrameCounter() > 100)
                 prob = static_cast<float>(prob + kAmbushFast);
             else if (k.medFrameCounter() > 200)
                 prob = static_cast<float>(prob + kAmbushMed);
             int cls = obj ? *reinterpret_cast<u8*>(HeBytes(obj) + 18) : 0;
-            prob = static_cast<float>(prob * kAmbushScale);
-            float threshold = static_cast<float>(static_cast<short>(cls) * prob);
+            prob = static_cast<float>(prob * kAmbushScale);  // v40 = v40 * dbl_61F3B8
+            // binary: *(float*)&v39 = (double)(__int16)v41 * v40
+            float threshold = static_cast<float>(
+                static_cast<double>(static_cast<short>(cls)) *
+                static_cast<double>(prob));
             int roll = k.randomModulo(105) & 0xFFFF;
             if (static_cast<double>(roll) <= threshold) {
                 Cas7_Delivered(h) = 1;
@@ -628,7 +687,7 @@ void RunTransport(HeRecord* h) {
                     k.sendEntityMessage(k.cityRecipientId(He_CityIndex(h)), 1421);
                 }
                 if (obj)
-                    k.requestChangeZustand(*reinterpret_cast<i32*>(HeBytes(obj) + 2), -15);
+                    k.requestChangeZustand(LoadI32At(obj, 2), -15);
                 Cas7_Delivered(h) = 2;
             }
             return;

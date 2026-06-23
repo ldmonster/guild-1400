@@ -65,9 +65,19 @@ static_assert(sizeof(SnowFlake) == 40, "SnowFlake stride must be 40 bytes");
 //   [36] texture      texture handle (Schneeflocke) — not needed for the math
 // ---------------------------------------------------------------------------
 struct SnowSystem {
-    i32 count = 0;       // dword[0]
+    i32 count = 0;       // dword[0]   (*(int*)a1)
     i32 capacity = 0;    // dword[1]
-    SnowFlake* flakes = nullptr; // dword[14]
+    // Per-system wind velocity, read by VIBE_Snow_UpdateFlake @0x42a644:
+    //   a1+68 = sysVelX (dword[17]), a1+72 = sysVelZ (dword[18]).
+    // (These alias dirX/dirZ that VIBE_Snow_Render @0x42b5b0 interpolates.)
+    float sysVelX = 0.0f; // a1+68
+    float sysVelZ = 0.0f; // a1+72
+    SnowFlake* flakes = nullptr; // dword[14] (a1+56)
+    // Frame-to-frame camera snapshots the update integrates against (stateful):
+    //   a1+112/116/120 = previous anchor; a1+128/132/136 = previous eye.
+    // UpdateFlake reads (prev - current) deltas, then overwrites with current.
+    float prevAnchor[3] = {0.0f, 0.0f, 0.0f}; // a1+112,+116,+120
+    float prevEye[3]    = {0.0f, 0.0f, 0.0f}; // a1+128,+132,+136
 };
 
 // ---------------------------------------------------------------------------
@@ -83,14 +93,119 @@ struct SnowSystem {
 struct SnowCamera {
     float eye[3];      // +76,+80,+84
     float anchor[3];   // +132,+136,+140
-    // view rotation, indexed [r][c]; the multiply reads m[c][r] groupings.
-    // m[0..2] = +396,+400,+404 ; m[3..5] = +412,+416,+420 ; m[6..8]=+428,+432,+436
+    // view rotation. The kernel reads twelve floats at +396..+436 (a 4x3 block,
+    // skipping +408/+424/+440). We pack the nine USED entries row-major:
+    //   m[0]=+396 m[1]=+400 m[2]=+404
+    //   m[3]=+412 m[4]=+416 m[5]=+420
+    //   m[6]=+428 m[7]=+432 m[8]=+436
+    // A "column" of the multiply is col0=(m[0],m[3],m[6]) = (+396,+412,+428),
+    // col1=(m[1],m[4],m[7]) = (+400,+416,+432), col2=(m[2],m[5],m[8]) = (+404,+420,+436).
     float m[9];
 };
 
 struct SnowViewport {
     i32 x0, y0, x1, y1; // dword_13ECE58, _5C, _60, _64
 };
+
+// ---------------------------------------------------------------------------
+// Snow system time-interpolation header (gilde.exe 0x42a014 Snow_Create layout).
+// These are the dword slots VIBE_Snow_Render @0x42b5b0 reads/writes per frame to
+// blend the snow direction + a "count" ramp over a time window. They are kept on
+// the same SnowSystem so the faithful renderer (SnowRender) can drive them; the
+// simplified SnowUpdateFlake path (used by the headless atmos bridge) ignores
+// them and remains byte-stable. dword indices (×4 = byte offset):
+//   [0..3] count fields (all = requested flake count; [0] is the live loop bound)
+//   [17]=dirX  [18]=dirZ      current interpolated direction (a1+68 / a1+72)
+//   [19]=tgtX  [20]=tgtZ      target direction              (a1+76 / a1+80)
+//   [15]=oldX  [16]=oldZ      previous direction snapshot   (a1+60 / a1+64)
+//   [23] lastUpdateMs         (a1+92)  — drives dt = (now-last)*0.1
+//   [24]=cBeg [25]=cEnd       count-ramp time window        (a1+96 / a1+100)
+//   [26]=dBeg [27]=dEnd       direction-ramp time window     (a1+104 / a1+108)
+//   [2]=cFrom [3]=cTo         count-ramp endpoints           (a1+8 / a1+12)
+// All times are the engine ms clock dword_62EB38, supplied to SnowRender as `now`.
+// ---------------------------------------------------------------------------
+struct SnowSystemHdr {
+    i32 count = 0;     // [0]  live flake count (loop bound)
+    i32 capacity = 0;  // [1]
+    i32 cFrom = 0;     // [2]
+    i32 cTo = 0;       // [3]
+    float oldX = 1.0f; // [15]
+    float oldZ = 0.0f; // [16]
+    float dirX = 1.0f; // [17]
+    float dirZ = 0.0f; // [18]
+    float tgtX = 1.0f; // [19]
+    float tgtZ = 0.0f; // [20]
+    i32 lastUpdateMs = 0; // [23]
+    i32 cBeg = 0;      // [24]
+    i32 cEnd = 0;      // [25]
+    i32 dBeg = 0;      // [26]
+    i32 dEnd = 0;      // [27]
+    SnowFlake* flakes = nullptr; // [14]
+};
+
+// One snow vertex as VIBE_Snow_Render builds it: a D3D TLVERTEX, 8 dwords / 32
+// bytes (the renderer indexes the temp buffer with `shl eax,5` = ×32). The FVF is
+// D3DFVF_TLVERTEX (0x1C4); the original passes 28 as the DrawPrimitive stride arg
+// but steps the buffer by 32 — we reproduce the 32-byte record bit-for-bit.
+//   [0] sx  (float)  screen x       [1] sy (float)  screen y
+//   [2] sz  (float)  depth (= (1-pz)*0.025)
+//   [3] rhw (0x3F800000 = 1.0)      [4] diffuse (D3DCOLOR 0x50646464)
+//   [5] specular (0)                [6] tu (float)  [7] tv (float)
+struct SnowVertex {
+    float x;        // +0x00
+    float y;        // +0x04
+    float z;        // +0x08
+    u32   rhw;      // +0x0C  (1.0f bits)
+    u32   color;    // +0x10  (diffuse)
+    u32   specular; // +0x14  (0)
+    float u;        // +0x18
+    float v;        // +0x1C
+};
+static_assert(sizeof(SnowVertex) == 32, "SnowVertex (TLVERTEX) stride must be 32 bytes");
+
+// gilde.exe 0x42b5b0 — VIBE_Snow_Render header interpolation (the math the renderer
+// runs before emitting quads). Updates the system's count ramp ([0]) and direction
+// ([17]/[18]) from the two time windows, given the engine clock `now` (dword_62EB38),
+// then returns the per-frame integration dt = (now - lastUpdate) * 0.1 (flt_611990)
+// and advances lastUpdate := now. This is the exact 1:1 of 0x42b5c9..0x42b648.
+float SnowRenderStepHeader(SnowSystemHdr& h, i32 now);
+
+// gilde.exe 0x42b5b0 inner loop (0x42b689..0x42b7c8) — build the snow quad vertex
+// stream. For each flake whose projected screen segment (sx,sy)->(sx2,sy2) lies
+// inside the viewport rect (dword_13ECE58/5C/60/64), emit THREE vertices forming
+// the flake's triangle (the original's degenerate quad-as-triangle). Writes into
+// `out` (caller-sized) and returns the number of vertices written; `cap` caps the
+// output. The depth/v-coord = (1 - pz) * 0.025 (flt_611994); the x of the first
+// vertex = (sx + sx2) * 0.5 (flt_611998). The diffuse + uv bit patterns are the
+// originals (kSnowColor / 0.5 / 0 / 1.0). Pure + testable: no DDraw.
+int SnowBuildQuads(const SnowSystem& sys, const SnowViewport& vp,
+                   SnowVertex* out, int cap);
+
+// gilde.exe 0x58339c — VIBE_GameTime_GetSeasonFromDay: season = day % 4. Snow/rain
+// weather is only created when season == 3 (winter): see VIBE_Sky_InitScene
+// @0x4b1e94 (`if (season == 3)`). Helper for the seasonal render gate.
+inline int SnowSeasonFromDay(int day) { return day % 4; }
+inline bool SnowIsWinterDay(int day) { return SnowSeasonFromDay(day) == 3; }
+
+// ---------------------------------------------------------------------------
+// gilde.exe 0x42a2cc — VIBE_Snow_UpdateScene. Despite the name this is the snow
+// TEARDOWN / floor-texture restore run by VIBE_Sky_InitScene @0x4b1e94 when the
+// season leaves winter (weather mode 0) while a snow system still exists. It:
+//   1. releases the snow system's texture entry        (VIBE_Texture_ReleaseEntry)
+//   2. frees the flake list                            ([+56], FreeDebug)
+//   3. walks the global texture table (dword_1406A84, stride 128, count
+//      dword_1406A80): for each "DC_"-prefixed (byte_6117C8) opaque texture, sets
+//      its transparency flag to (!winterFlag && level>8) and clears [+88]
+//   4. resets the texture cache, reloads the floor textures for the 64 active
+//      universe slots, then frees the system block.
+// winterFlag is dword_140809C (snow/winter texture flag set by the texture loader,
+// VIBE_Texture_LoadByName @0x5da714 / CreateRecord @0x5db724). The per-texture and
+// floor-reload steps depend on the engine texture table + universe slots, which are
+// owned by other modules; this entry reconstructs the PURE, testable decision the
+// original makes per texture (the transparency-flag rule), and documents the rest
+// as inert hooks (rule 8). `winterFlag` is dword_140809C; `texLevel` is *(u8*)(v4+125).
+// Returns the transparency flag the original would assign for one texture entry.
+bool SnowResetSceneTexTransparency(int winterFlag, int texLevel);
 
 // gilde.exe 0x42a014 — VIBE_Snow_Create (seed path only). Fills `capacity`
 // flake slots with RandNext()-jittered positions/velocities in the exact draw

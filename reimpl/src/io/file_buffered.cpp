@@ -126,14 +126,22 @@ std::size_t FileRead(void* dst, std::size_t size, std::size_t count,
                 left -= take;
                 continue;
             }
-            // buffer empty: for large reads go straight to the file
+            // buffer empty: for large reads go straight to the file.
+            // 0x5d485e: direct path taken when left >= bufSize (or the unbuffered
+            // flag 0x04 is set, which loose files never have).
             if (left >= f->bufSize) {
-                std::size_t got = f->file ? f->file->read(out, left) : 0;
+                // 0x5d4886: a buffered direct read of more than 0x200 bytes is
+                // rounded DOWN to a 512-byte multiple (v13 = left & 0xFFFFFE00);
+                // the sub-512 remainder is then served through the buffer on a
+                // later iteration. Reproduce that split exactly.
+                std::size_t want_direct = left;
+                if (left > 0x200)
+                    want_direct = left & ~static_cast<std::size_t>(0x1FF);
+                std::size_t got = f->file ? f->file->read(out, want_direct) : 0;
                 if (got == 0) { f->flags |= kFileEof; break; }
                 out += got;
                 produced += got;
                 left -= got;
-                if (got < f->bufSize) { /* short read may be eof */ }
             } else {
                 if (FillReadBuffer(f) == 0)
                     break;
@@ -278,16 +286,20 @@ int RawGetc(BufferedFile* f) {
 }
 } // namespace
 
-// gilde.exe 0x4516cc — VIBE_Vfs_ReadLine.  Read one raw byte; if it is CR the
-// line is empty. Otherwise append until LF / EOF / limit, breaking on CR. Then
-// NUL-terminate and consume the trailing CR/LF that terminated the line.
+// gilde.exe 0x4516cc — VIBE_Vfs_ReadLine.  Read one byte; if it is CR(0x0D) the
+// line is empty. Otherwise append until LF / EOF / limit, breaking when the
+// *next* byte is CR. Then NUL-terminate and swallow the trailing CR/LF run.
 //
-// The original swallows a *run* of CR/LF after the line via a peek-less getc
-// loop, which (with its terminating non-EOL read) advances one byte into the
-// next line. We instead seek that one over-read byte back so consecutive
-// ReadLine calls round-trip; this is the behaviour every caller relies on (a
-// config/script line iterator) and is observationally identical except for the
-// off-by-one consumption the original's loop exhibits on the FINAL line.
+// 1:1 NOTE (verified against disasm @0x451758): the original's swallow loop
+// `while (c==13||c==10) c=getc();` reads ONE byte past the CR/LF run — the first
+// byte of the next line — and that byte is silently discarded (it is never
+// stored and never pushed back; see loc_451758..loc_451798). This means every
+// line after a CR/LF-terminated line loses its first character. We reproduce
+// that exactly (no rewind) so the reconstruction matches the binary's observable
+// output, including this over-read loss. The bytes here come from RawGetc; the
+// loose-file FILE layer's text-mode CR-stripping (VIBE_File_Read @0x5d491f)
+// yields identical *line content* either way (CRs are dropped by ReadLine's own
+// logic regardless), so reading raw is equivalent for the line text.
 char* FileReadLine(char* dst, int maxLen, BufferedFile* f) {
     int c = RawGetc(f);
     if (c < 0)
@@ -304,16 +316,12 @@ char* FileReadLine(char* dst, int maxLen, BufferedFile* f) {
         }
     }
     *p = '\0';
-    // consume the CR/LF run that terminated this line, pushing back any first
-    // non-EOL byte (the start of the next line) via a 1-byte rewind.
-    while (c == 13 || c == 10) {
-        c = RawGetc(f);
-        if (c != 13 && c != 10 && c != -1) {
-            // rewind one byte: cursor back if it came from the buffer, else seek
-            if (f->cursorOff > 0) { --f->cursorOff; ++f->remaining; }
-            else FileSeek(f, -1, SEEK_CUR);
-            break;
-        }
+    // 0x451751: if the terminator was already EOF, stop. Otherwise swallow the
+    // CR/LF run; the read that terminates the run consumes (and loses) the first
+    // byte of the following line — matching the original exactly.
+    if (c != -1) {
+        while (c == 13 || c == 10)
+            c = RawGetc(f);
     }
     return dst;
 }

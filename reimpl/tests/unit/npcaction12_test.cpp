@@ -354,15 +354,23 @@ TEST(NpcAction12, FormAllianceGroupPicksAndBroadcasts) {
     h.field = [](void* p, int off) -> i32 { return reinterpret_cast<i32*>(p)[off/4]; };
     SetNpcAction12Hooks(&h);
 
-    // self: a GRec with marker 500, kind 6, id 555; group field 0.
-    static GRec self; self.marker = 500; self.k = 6; self.id = 555;
+    // self: a GRec with marker 500, kind 6, id 555.
+    // The source reads the alliance-group word at byte +6 (*(int*)(a1+3), a1 being
+    // unsigned __int16*), i.e. field(self,6) -> the GRec id dword (555); 555>>24 == 0,
+    // which differs from the peers' group (7), so the picks remain eligible. Back the
+    // synthetic self with trailing storage so the read stays in-bounds (ASAN).
+    static struct { GRec rec; i32 groupWord; } selfStore{};
+    GRec& self = selfStore.rec; self.marker = 500; self.k = 6; self.id = 555;
+    selfStore.groupWord = 0;
     i32 rc = NpcAction12_FormAllianceGroup(&self, selfBuf);
     CHECK_EQ(rc, 1);
     CHECK_EQ(selfBuf[4], 1);                 // ctx[4] = 1
     CHECK_EQ((int)g_sink.coord27.size(), 3); // three approaches
     for (int d : g_sink.coord27) CHECK_EQ(d, 20);
     CHECK_EQ((int)g_sink.entityText.size(), 3); // three host peers notified
-    for (int t : g_sink.entityText) CHECK_EQ(t, 3252);
+    // gilde.exe 0x5691e6: He_SendEntityMessage(..., msgId=1418) — the transmitted
+    // message-id is 1418 (text 3252 is the pre-rendered body, not the send id).
+    for (int t : g_sink.entityText) CHECK_EQ(t, 1418);
     CHECK_EQ(g_sink.panelAlliance, 1);       // self is host kind 6
     SetNpcAction12Hooks(nullptr);
 }
@@ -451,7 +459,10 @@ TEST(NpcAction12, MasterExamStepAppointmentGate) {
     reinterpret_cast<GameTime*>(r.b + 82)->day = 10;
     *reinterpret_cast<i32*>(r.b + 112) = -1;
     i32 rc = NpcAction12_MasterExamStep(AsHe(r));
-    CHECK_EQ(rc, 0);
+    // gilde.exe 0x4e5c36: result = GameTime_Compare(clock, appt); if (result >= 0) {..};
+    // return result. clock day 5 < appt day 10 -> Compare returns -1, which is the
+    // function's return value (NOT 0).
+    CHECK_EQ(rc, -1);
     CHECK_EQ(g_sink.frees, 0);   // gate not reached -> nothing freed
     SetNpcAction12Hooks(nullptr);
 }

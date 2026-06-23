@@ -54,7 +54,9 @@ struct MockGridEnv : GridEnv {
     }
 };
 
-// Reference ring cell list (matches the original clamp/visit order).
+// Reference ring cell list (matches the original clamp/visit order). These are
+// the SOURCE cells the inner loop iterates (cx in [x-1,x+1] clamped, cy in
+// [y-1,y+1] clamped).
 std::vector<std::pair<int,int>> Ring(int x, int y) {
     std::vector<std::pair<int,int>> cells;
     int rowHi = x + 1; if (rowHi > 8) rowHi = 8;
@@ -66,6 +68,17 @@ std::vector<std::pair<int,int>> Ring(int x, int y) {
             for (int cy = colLo; cy <= colHi; ++cy)
                 cells.emplace_back(cx, cy);
         }
+    return cells;
+}
+
+// gilde.exe 0x5780d2: the crime-AREA store target. The inner loop PRE-increments
+// the cell pointer by 24 (one cell in y) before the store, so each source cell
+// (cx,cy) writes the area field of cell (cx, cy+1). The golden vectors below
+// assert against these shifted targets (verified against the disasm).
+std::vector<std::pair<int,int>> AreaRing(int x, int y) {
+    std::vector<std::pair<int,int>> cells;
+    for (auto& c : Ring(x, y))
+        cells.emplace_back(c.first, c.second + 1);
     return cells;
 }
 
@@ -107,10 +120,11 @@ TEST(CitySatGrid, AddCrimeCentreAndRing) {
 
     // Centre crime field == 3.
     CHECK_EQ(static_cast<int>(GridCrimeCentre(4, 4)), 3);
-    // Every ring cell's crimeArea == 3 (9 cells, none overlap themselves twice).
-    for (auto& c : Ring(4, 4))
+    // Every AREA cell (source cell shifted +1 in y by the +24 pre-increment)
+    // == 3 (9 cells, none overlap themselves twice).
+    for (auto& c : AreaRing(4, 4))
         CHECK_EQ(static_cast<int>(GridCrimeArea(c.first, c.second)), 3);
-    // A cell outside the ring is untouched.
+    // A cell outside the area ring is untouched.
     CHECK_EQ(static_cast<int>(GridCrimeArea(0, 0)), 0);
 }
 
@@ -157,7 +171,9 @@ TEST(CitySatGrid, AddCrimeEdgeRingClamps) {
     env.playerX = 0.0f; env.playerZ = 0.0f;
     env.weight = 2;
     CityAddCrimeToGrid(env, 0, nullptr, nullptr);
-    auto cells = Ring(0, 0);
+    // Source ring at (0,0) is the 2x2 block {(0,0),(0,1),(1,0),(1,1)}; the area
+    // writes land at +1 in y: {(0,1),(0,2),(1,1),(1,2)} (0x5780d2 pre-increment).
+    auto cells = AreaRing(0, 0);
     CHECK_EQ(static_cast<int>(cells.size()), 4);
     for (auto& c : cells)
         CHECK_EQ(static_cast<int>(GridCrimeArea(c.first, c.second)), 2);
@@ -167,9 +183,10 @@ TEST(CitySatGrid, AddCrimeEdgeRingClamps) {
 // BuildSatisfactionGrid golden vector: one resident at tile (3,6).
 //   v6 = scaled13/scale19 * weight18 = 10/2*4 = 20.
 //   centre SatWeight(3,6) += v6*0.5 = 10.
-//   PLUS the INTENTIONAL field overlap: SatWeight(3,6) @+36 aliases SatA(3,7)
-//   @+12, and the 3x3 ring's SatA(3,7) += v6*0.5 = 10. So the faithful result
-//   is 10 + 10 == 20 (the original's named globals genuinely share storage).
+//   The 3x3 ring (0x578a7f) reads +40/writes +16 of the next cell, which the +24
+//   pre-increment collapses to SatWeight(cx,cy) += v6*0.5 and SatDenom(cx,cy) +=
+//   v6 of the SOURCE cell. Cell (3,6) is in its own ring, so SatWeight(3,6) gets
+//   another +10. Faithful result == 10 + 10 == 20 (verified against the disasm).
 // ---------------------------------------------------------------------------
 TEST(CitySatGrid, BuildSatisfactionWeightGolden) {
     CityGridReset();

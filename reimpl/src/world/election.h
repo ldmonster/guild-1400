@@ -65,12 +65,24 @@ struct ElectionOutcome {
 // table). `incumbentId` is the current office holder (v17[1]); the winner is
 // installed only when it exists and differs from the incumbent.
 //
-// Winner rule (the v9/v12 loop): scan collected candidates; the winner is the one
-// whose totalWealth is STRICTLY greater than the running best (so the first of
-// equal-wealth candidates wins). `memberCount` is every employed/non-flagged
+// Winner rule (the v9/v12 loop @0x4812ff): the running-best wealth (ecx) is SEEDED
+// with the INCUMBENT's ComputeTotalWealth (`incumbentWealth`) when the incumbent
+// record exists, or with 0 when it does not (`incumbentValid == false`; the
+// loc_4813AB `xor ecx,ecx` path). The winner pointer (v10) starts NULL and the
+// loop runs over ALL collected candidates from index 0, replacing the winner only
+// when a candidate's totalWealth is STRICTLY greater than the running best. So a
+// candidate must out-earn the incumbent to win; if none does, there is NO winner
+// (winnerIndex == -1) and no install. `memberCount` is every employed/non-flagged
 // person in the pool (the v2 quorum counter).
+//
+// NOTE the original always computes the incumbent's wealth (and only runs the loop
+// at all when it reached this point); a missing incumbent record seeds 0, NOT a
+// "no incumbent" abort. The caller supplies `incumbentWealth`/`incumbentValid`
+// exactly as the original's ComputeTotalWealth(RecordById)/(RecordById != 0) would.
 ElectionOutcome ElectionRunGuildMaster(const ElectionCandidate* pool,
-                                       int poolCount, i32 incumbentId);
+                                       int poolCount, i32 incumbentId,
+                                       i32 incumbentWealth = 0,
+                                       bool incumbentValid = false);
 
 // ===========================================================================
 // Mutation (command) hook — mock. The original installs the winner via

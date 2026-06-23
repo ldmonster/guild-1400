@@ -29,13 +29,14 @@ TEST(GuiStatisticsE2E, GeneralAndTaxFlow) {
 
     StatGeneralPlan gen = Statistics_BuildGeneralPlan(s, left, right);
     CHECK(std::string(gen.form) == kFormStatGeneral);
-    CHECK_EQ((int)gen.headerIds.size(), 28);          // 2096..2123
+    CHECK_EQ((int)gen.headerIds.size(), 27);          // 2096..2122 (2123 = exit sentinel)
     CHECK_EQ(gen.modeHeaderId, 2 + kStatGenModeTextBase); // 2097
     CHECK_EQ((int)gen.headerLines.size(), 5);
     CHECK(gen.headerLines[2] == "Geb Ratio: 3.000");
-    CHECK_EQ((int)gen.colLeft.size(), 28);
-    CHECK_EQ((int)gen.colRight.size(), 28);
-    CHECK(gen.colRight[10] == "10.000");
+    // 27 entries per column; the byte loop starts at offset 16 so entry n reads col[n+1].
+    CHECK_EQ((int)gen.colLeft.size(), 27);
+    CHECK_EQ((int)gen.colRight.size(), 27);
+    CHECK(gen.colRight[10] == "11.000"); // == right[11]
     CHECK_EQ(gen.loopForm, kStatLoopForm);            // RunFrameLoop 423879
 
     // --- tax window ------------------------------------------------------

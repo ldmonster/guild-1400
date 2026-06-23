@@ -56,6 +56,9 @@ struct InflateHuft {
 class Inflater {
 public:
     explicit Inflater(int windowBits = 15);
+    // inflate_blocks_free @0x5ffa80 / inflateEnd: release the owned Blocks state
+    // (and its codes). Out-of-line because Blocks is an incomplete type here.
+    ~Inflater();
 
     // Reset to start of a fresh stream (keeps the allocated window).
     void Reset();

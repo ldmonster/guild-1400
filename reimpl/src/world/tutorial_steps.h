@@ -114,6 +114,7 @@ static_assert(sizeof(TutorialChapterNode) == 116, "chapter node is 0x74 bytes");
 struct TutorialNodeSpec {
     i32              kind;
     const char*      name;
+    u8               nameByte8;   // +8 (idx2 low byte): the builders' v[8] = N write
     i32              mainTextId;
     const char*      mainRes;
     i32              remindTextId;

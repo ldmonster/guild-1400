@@ -229,6 +229,8 @@ struct StockSeller {
     bool   hasObject = false;    // dword_12CD6D8[i] (the seller's stock object)
     int    deficit = 0;          // dword_12CD6DC[i] (seller's available surplus)
     bool   sameOwner = false;    // owner matches AI player (free transfer)
+    void*  building = nullptr;   // dword_12CD6D0[i] (seller building; ReserveWs sets
+                                 // item.sourceBuilding = this)
 };
 struct StockNeedQuery {
     // For an item id, the list of candidate sellers (the EvaluateStockNeeds scan).

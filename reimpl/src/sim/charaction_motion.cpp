@@ -557,8 +557,12 @@ void WalkOnPathStep(MotionCharacter* ch) {
     // and re-flag the anim; else advance normally.
     int next = ch->waypointIdx + 1;
     {
+        // NB: the bound (next < waypointCap) is tested BEFORE dereferencing w[],
+        // so we never read past the 512-byte waypoint buffer when waypointIdx is at
+        // the last slot (next == cap). On valid in-range input every term is still
+        // evaluated, so this is behaviour-identical to the original's gap-skip gate.
         u8* w = ch->waypoints + 2 * next;
-        if (ch->waypoints && w[0] == 0 && w[1] == 0 && next < ch->waypointCap) {
+        if (ch->waypoints && next < ch->waypointCap && w[0] == 0 && w[1] == 0) {
             int j = ch->waypointIdx + 1;
             int cap = (ch->waypointIdx + 33 <= 256) ? (ch->waypointIdx + 33) : 256;
             int found = next;

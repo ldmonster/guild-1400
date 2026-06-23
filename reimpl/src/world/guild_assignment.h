@@ -130,13 +130,16 @@ GuildAssignmentResult ComputeGuildAssignment(OfficeHolder* holders, int count,
 // ===========================================================================
 // 2. PersonHasOfficeObject — gilde.exe 0x480abc.
 // ===========================================================================
-// For a state-2 holder entry `entry`, with the entry's secondary (+20) id and
-// primary (+4) id, returns true iff: the entry is state 2, the secondary person
-// exists & has a building & is NOT excluded, the primary person exists & has a
-// building, AND an object in `objects` carries the secondary id (i.e. the member's
-// office object is present). `category` is the office category passed to the
-// underlying CollectByCategory; here it just bounds `objects`.
-bool PersonHasOfficeObject(const OfficeHolder& entry, GuildAssignContext& gx);
+// For a state-2 holder entry `entry`, returns true iff: the entry is state 2, the
+// secondary (+20) person exists & has a building & is NOT excluded, the primary (+4)
+// person exists & has a building, AND one of the CollectByCategory-collected holder
+// entries has PrimaryId (+4) == the entry's secondary id. The original collects the
+// category buffer internally (VIBE_Office_CollectByCategory) and scans THAT buffer's
+// +4 fields — NOT the office-object table; `collected`/`collectedCount` model that
+// buffer. (gilde.exe 0x480abc: `v12[v10/4+1] == *(v9+20)`.)
+bool PersonHasOfficeObject(const OfficeHolder& entry,
+                           const OfficeHolder* collected, int collectedCount,
+                           GuildAssignContext& gx);
 
 // ===========================================================================
 // 3. CheckGuildMastersPresent — gilde.exe 0x48091c.

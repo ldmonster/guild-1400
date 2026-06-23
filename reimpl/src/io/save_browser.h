@@ -25,8 +25,9 @@ namespace guild::io {
 // --- recovered browser-record layout ---------------------------------------
 // Both functions work on a flat 528-byte (0x210) record, but they read its +9 name
 // field with DIFFERENT semantics (recovered from the disassembly):
-//   * EnumerateSaveFiles @0x569530 fills +9 with the loose FILE NAME (incl. its
-//     extension) and +265 with "basePath/name" truncated at the first '.'.
+//   * EnumerateSaveFiles @0x569530 fills +9 with the loose FILE NAME truncated at its
+//     '.' (extension dropped) and +265 with the verbatim "basePath/name" (extension
+//     kept; NOT truncated). NOTE: the original truncates the +9 NAME field, not +265.
 //   * FindSaveSlot @0x569c50 reads +9 as the in-game SAVE NAME (the user-entered
 //     name, e.g. "QUICKSAVE"/"AUTOSAVE") — in the real flow this record is the
 //     loaded save HEADER metadata (see VIBE_Save_LoadHeaderAndThumbnail), a SEPARATE
@@ -63,13 +64,19 @@ extern const char kAutoSaveTag[9];    // "AUTOSAVE"
 //   (__usercall, eax=basePath, ecx=caseMode, ebx=outRecords, edx=extFilter)
 // Resolve `basePath` to a VFS directory node, then for every file entry whose
 // extension (the substring from its first '.') case-insensitively equals
-// `extFilter`, emit a SaveBrowserRecord into `outRecords[i]`: the raw name at +9
-// and "basePath/name" (truncated at the first '.') at +265. Returns the count
-// emitted. `caseMode` is forwarded to NormalizeDirPath. Returns 0 if the path does
-// not resolve.
+// `extFilter`, emit a SaveBrowserRecord into `outRecords[i]`: the name (truncated at
+// its '.') at +9 and the verbatim "basePath/name" (extension kept) at +265. Returns
+// the count emitted. `caseMode` is forwarded to NormalizeDirPath. Returns 0 if the
+// path does not resolve.
+// `maxRecords` bounds how many records are written into `outRecords` (the
+// original was unbounded — it trusted the saves dir to fit the caller's fixed
+// buffer; a real install with >capacity .SAV files would overflow it). Default
+// -1 keeps the unbounded 1:1 behavior for callers with a big-enough buffer;
+// pass the buffer capacity to fail safe (extra files skipped, return clamped).
 int SaveBrowserEnumerateSaveFiles(const char* basePath, VfsNode* startDir,
                                   const char* extFilter,
-                                  SaveBrowserRecord* outRecords);
+                                  SaveBrowserRecord* outRecords,
+                                  int maxRecords = -1);
 
 // VIBE_SaveBrowser_FindSaveSlot @0x569c50  (__usercall, edx=slotTable, ecx=record,
 //   ebx=preferredSlot)

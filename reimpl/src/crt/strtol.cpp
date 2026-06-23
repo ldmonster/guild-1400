@@ -22,11 +22,17 @@ int Atoi(const char* sp) {
         c = *p++;
     int acc = 0;
     while (MbcsCodePageActive() ? CharTypeQuery(c, 4) : (kPctype[c] & 4)) {
-        acc = c + 10 * acc - 48; // intentional int wraparound, matches original
+        // Intentional 2's-complement wraparound, matches the original's 32-bit
+        // imul/add. Compute in u32 (the exact bit pattern the CPU produces) and
+        // cast back to avoid signed-overflow UB while keeping bytes identical.
+        acc = static_cast<int>(
+            static_cast<u32>(c) + 10u * static_cast<u32>(acc) - 48u);
         c = *p++;
     }
     if (sign == '-')
-        return -acc;
+        // Negate in u32 (2's-complement) so INT_MIN negates to itself without
+        // signed-overflow UB — matches the original's 32-bit `neg`.
+        return static_cast<int>(0u - static_cast<u32>(acc));
     return acc;
 }
 
@@ -115,7 +121,7 @@ u32 StrToLong(const char* str, const char** endptr, int signed_flag, int base) {
     }
 
     if (sign == '-')
-        return static_cast<u32>(-static_cast<i32>(acc));
+        return 0u - acc; // 2's-complement negate (no signed-overflow UB)
     return acc;
 }
 
@@ -232,7 +238,7 @@ u32 Strtol_Parse(const char* str, const char** endptr, unsigned base, int mode) 
     if (endptr)
         *endptr = reinterpret_cast<const char*>(end);
     if ((flags & 2) != 0)
-        return static_cast<u32>(-static_cast<i32>(acc));
+        return 0u - acc; // 2's-complement negate (no signed-overflow UB)
     return acc;
 }
 

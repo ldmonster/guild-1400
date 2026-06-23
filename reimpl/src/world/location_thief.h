@@ -83,9 +83,10 @@ bool ThiefBurglaryStartAllowed(bool activeCharFlag);
 // is NO active ransom-pending handler (type 62). The price:
 //
 //   cut = by captivity-state byte (person+433): 1->0.02, 2->0.04, 3->0.06, >=4->0.1
-//   wealth = ComputeTotalWealth(hostage);
-//   rngVal = (rand01 * dbl_622848 + dbl_622850) * dbl_622858;   // 0.75..1.25 * 1.6M
-//   base   = (wealth <= rngVal) ? wealth : (fresh rngVal roll); // capped by a roll
+//   wealth   = ComputeTotalWealth(hostage);
+//   firstRoll  = (rand01_a * dbl_622848 + dbl_622850) * dbl_622858;  // FIRST draw
+//   secondRoll = (rand01_b * dbl_622848 + dbl_622850) * dbl_622858;  // SECOND draw
+//   base   = (wealth <= firstRoll) ? wealth : secondRoll; // else branch re-rolls
 //   ransom = (int)((double)(int)base * cut);
 //
 // On "pay": the hostage is freed (BuildOp91 with -captivityState) and the ransom
@@ -104,11 +105,13 @@ struct RansomDecision {
 //   ransomPending  : handler type 62 present (already in ransom flow -> not offered)
 //   captivityState : person+433
 //   wealth         : ComputeTotalWealth(hostage)
-//   rngRoll        : (rand01*0.5 + 0.75) * 1600000 already evaluated by caller
+//   firstRoll      : (rand01_a*0.5 + 0.75) * 1600000 — the comparison roll
+//   secondRoll     : (rand01_b*0.5 + 0.75) * 1600000 — used iff wealth > firstRoll
 //   accept         : player clicked "pay ransom"
 RansomDecision ThiefComputeRansom(bool hostageExists, bool hasKidnapCmd,
                                   bool ransomPending, int captivityState,
-                                  int wealth, double rngRoll, bool accept);
+                                  int wealth, double firstRoll, double secondRoll,
+                                  bool accept);
 
 // gilde.exe 0x5259f8 ransom-cut helper: maps the captivity-state byte to its
 // cut fraction (case 1/2/3, default for 0 and >=4).

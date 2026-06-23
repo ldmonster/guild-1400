@@ -21,9 +21,12 @@ i32       g_eventTableCount = 0;
 u32       g_missionLcgState = 0;
 
 // Recovered static image of the shipped descriptor table (gilde.exe @0x63CD48,
-// 48 records x 24 bytes = 1152 bytes). In this image the free sentinel (row 0)
-// has category 0xFF and every populated row has category 0x17; the game rebuilds
-// the table at runtime from script. Kept as a byte-exact golden blob.
+// 48 records x 24 bytes = 1152 bytes; dword_5383F0 == 0x30 == 48). The accessors
+// read the category from the byte at record+5: in this image row 0 is the free
+// sentinel (category 0xFF, value 0) and the 47 populated rows carry the 0..5 book
+// grouping (4x cat0, 8x cat1, 8x cat2, 8x cat3, 12x cat4, 7x cat5). The 0x17 byte
+// that recurs at record+9 is the low byte of paramA, NOT the category. Byte-exact
+// golden blob verified against get_bytes @0x63CD48.
 static const u8 kDefaultImage[1152] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,

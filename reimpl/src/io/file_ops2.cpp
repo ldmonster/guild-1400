@@ -39,6 +39,12 @@ static inline int& Errno() { return guild::crt::Errno(); }
 static FdOsHooks g_hooks;                  // inert defaults
 FdOsHooks& OsHooks() { return g_hooks; }
 
+// dword_1452BE4 — std-stream rebind-notify gate. The original only fires the
+// notify hook (dword_146777C) when this equals 1; in the shipped binary the
+// static initializer leaves it at 2 (get_bytes 0x1452BE4 -> 02 00 00 00), so the
+// notify path in SetOsHandle/FreeHandle is dead. Modeled as the binary's value.
+static const int kStdNotifyMode = 2;       // dword_1452BE4 (== 2 in gilde.exe)
+
 // inert-default wrappers (match "no console / regular disk file" semantics)
 static int hookOpenStd(int stdId) {
     return g_hooks.openStd ? g_hooks.openStd(stdId) : -1;
@@ -145,10 +151,13 @@ int AllocHandle(FdTable& t) {
 int SetOsHandle(FdTable& t, unsigned int fd, int osHandle) {
     FdEntry* e = (fd < static_cast<unsigned>(t.count)) ? t.Entry(static_cast<int>(fd)) : nullptr;
     if (e && e->osHandle == -1) {
-        // dword_1452BE4 == 1 (notify rebind of a std stream)
-        if (fd == 0)      hookNotify(-10, osHandle);
-        else if (fd == 1) hookNotify(-11, osHandle);
-        else if (fd == 2) hookNotify(-12, osHandle);
+        // Original: if ( dword_1452BE4 == 1 ) { notify rebind of a std stream }.
+        // dword_1452BE4 is 2 in the binary, so this branch never executes.
+        if (kStdNotifyMode == 1) {
+            if (fd == 0)      hookNotify(-10, osHandle);
+            else if (fd == 1) hookNotify(-11, osHandle);
+            else if (fd == 2) hookNotify(-12, osHandle);
+        }
         e->osHandle = osHandle;
         return 0;
     }
@@ -177,9 +186,12 @@ int FreeHandle(FdTable& t, unsigned int fd) {
         Errno() = kEBADF;
         return -1;
     }
-    if (fd == 0)      hookNotify(-10, 0);
-    else if (fd == 1) hookNotify(-11, 0);
-    else if (fd == 2) hookNotify(-12, 0);
+    // Original: if ( dword_1452BE4 == 1 ) { notify }. dword_1452BE4 is 2 -> dead.
+    if (kStdNotifyMode == 1) {
+        if (fd == 0)      hookNotify(-10, 0);
+        else if (fd == 1) hookNotify(-11, 0);
+        else if (fd == 2) hookNotify(-12, 0);
+    }
     e->osHandle = -1;                      // *(_DWORD *)(...) = -1 (flags untouched)
     return 0;
 }

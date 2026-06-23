@@ -275,22 +275,35 @@ int GameObjectAddObjekt(i32 location, i16 prototype, i32 amount, int ownerHint) 
     ObSetSibling(newNode, -1);                       // *(a4+63) = 0
     ++g_sceneNodeCount;                              // dword_6498C0++
 
-    // Prototype-specific type fields (the +28/+32/+36/+40 dwords). The cart and
-    // horse render/avatar construction is DEFERRED; we set the deterministic
-    // record fields and call the stubs so the structure is faithful.
-    if (prototype == 308) {                          // 0x134-range carrier base
-        ObSetAmount(newNode, ObGetPrototype(newNode) - 307);
-    } else if (prototype >= 0x134 && prototype <= 0x136) {
-        // Cart variants: spawn an embedded "477" capacity child, then attach a
-        // transport model (render leaf). We reproduce the embedded-child create
-        // and DEFER the model build.
-        int capChild = GameObjectAddObjekt(ObGetId(newNode), 477, 1, newNode);
-        if (capChild >= 0) {
-            ObSetAmount(capChild, ObGetPrototype(capChild) - 307);
-        }
-        StubSpawnTransportModel(newNode, prototype);
-        StubAttachAvatar(newNode);
-    }
+    // Prototype-specific type-field block (gilde.exe 0x585c79..0x586297, the
+    // big jump table on the prototype dispatched right after SetGrayColorThunk).
+    //
+    // BOUNDARY (DEFERRED): every arm of this dispatch is dominated by render /
+    // Character / Universe leaves and/or by the loaded prototype-definition
+    // table (base dword_13CE27C, stride 65) that is NOT present in the static
+    // call tree:
+    //
+    //   * +0x1C/+0x20/+0x24/+0x28 type-field stores depend on the prototype
+    //     class (184 -> +0x1C=6; 0x12C -> -1,-1,-1,(qword_13CE852-1); 0x12D ->
+    //     -1*4; 0x15E/0x174/0x176 -> +0x20=15 or 6) — pure record writes, but
+    //     keyed on prototype classes that no test exercises and that read
+    //     loaded data (qword_13CE852).
+    //   * 308 / 0x134-0x136 / 310 (carts & horse) run the LABEL_35 path:
+    //     ResolveOwnerOrParentB, an embedded AddObjekt(.,477,1,.) child whose
+    //     amount(+14)=*a4-307 and +28=*a4-51, Person_QueryBegin, Character_*,
+    //     Universe_SwitchActiveSlot, Object_AttachToUniverseNode, RandNext-based
+    //     model-name selection — all render/scene leaves (rules 3-5 territory).
+    //   * The universal LABEL_22 tail (0x585c95): v7 = *(dword_13CE27C +
+    //     65 * prototype) (typedef category byte); if it is 23/32/37 the +0x1C
+    //     field is zeroed. Reads the prototype-definition table (not in tree).
+    //
+    // The deterministic record core above (prototype/id/location/owner/amount/
+    // fill/childHead/sibling + the live-count bump) is faithful; the dispatch
+    // body is intentionally NOT reconstructed here to avoid a cheap analogue
+    // (rule 8). The previous revision fabricated a 308 amount-set and a partial
+    // 477-child spawn that do not match the binary; both are removed.
+    (void)&StubSpawnTransportModel;
+    (void)&StubAttachAvatar;
 
     EmitCmd(ObjectCmd::kAdd, newNode, prototype, location, amount);
     return newNode;

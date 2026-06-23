@@ -63,8 +63,11 @@ TEST(WorldEventsE2E, RollMissionHistoryFlow) {
     CHECK(MissionRequirementAdvance(slotB, 23));
     CHECK(MissionRequirementAdvance(slotB, 23));
     CHECK_EQ(g_missionSlots[slotB].fieldAt28, 2);   // two recorded progress hits
-    // A non-matching crime does not advance.
-    CHECK(!MissionRequirementAdvance(slotB, 19));
+    // A trackable-but-non-matching crime is acknowledged (returns true — the
+    // binary's unconditional `mov eax,1` after the trackable-type gate) but does
+    // NOT advance: the +0x1C increment is gated on an exact type match. Crime 19
+    // is trackable yet != the slot's tracked type 23, so true with fieldAt28 kept.
+    CHECK(MissionRequirementAdvance(slotB, 19));
     CHECK_EQ(g_missionSlots[slotB].fieldAt28, 2);
 
     // --- 5. Record dated outcomes in the chronicle and query chronologically. --

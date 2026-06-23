@@ -30,10 +30,16 @@ TEST(NpcDaily, SeasonTablesByteFaithful) {
     CHECK_EQ(kWorkEndHour[3], 19.0f);
     CHECK_EQ(kWorkStartSlack, -1.0f);
     CHECK_EQ(kEveningOffset, 2.0f);
-    // season = day % 4
+    // VIBE_GameTime_GetSeasonFromDay @0x58339c: signed (char)(day % 4).
     CHECK_EQ(SeasonFromDay(0), 0);
     CHECK_EQ(SeasonFromDay(7), 3);
     CHECK_EQ(SeasonFromDay(10), 2);
+    // SIGNED remainder (idiv): a negative day yields a NEGATIVE season — exactly
+    // the original (disasm: idiv ecx; mov al,dl). No `& 3` masking anywhere.
+    CHECK_EQ(SeasonFromDay(-1), -1);
+    CHECK_EQ(SeasonFromDay(-3), -3);
+    CHECK_EQ(SeasonFromDay(-4), 0);
+    CHECK_EQ(SeasonFromDay(-7), -3);
 }
 
 static DailyPersonRow LiveRow(i32 home, i32 work, i32 dest, u32 bits) {
@@ -143,6 +149,111 @@ TEST(NpcDaily, DirectorState0WorkDispatch) {
     // stays 0.
     CHECK_EQ(He_State(&rec), 0);
     SetNpcDailyHooks(nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// W10-SIM hardening edges for the director + rule.
+// ---------------------------------------------------------------------------
+
+// ZERO persons: personCount() == 0 means the director sweeps nothing and never
+// indexes the (absent) person rows. State 0 returns the record unchanged unless
+// the clock is past the work-start hour (then it transitions to state 1 even with
+// no workers — the second sweep loop also runs zero iterations).
+namespace { int DPZero() { return 0; } }
+TEST(NpcDaily, DirectorZeroPersons) {
+    SetNpcClock(GameTime{ /*day*/0, /*hour*/6, /*minute*/0, /*second*/0 });
+    NpcDailyHooks h{};
+    h.personCount = DPZero;            // no persons; row hook never called
+    SetNpcDailyHooks(&h);
+
+    HeRecord rec{};
+    He_State(&rec) = 0;
+    HeRecord* out = NpcDaily_DailyRoutineStep(&rec);
+    CHECK(out == &rec);
+    CHECK_EQ(He_State(&rec), 0);       // hour 6 < workStart(8) -> stays state 0
+
+    // No personCount hook at all (null) -> count defaults to 0, still safe.
+    NpcDailyHooks h2{};
+    SetNpcDailyHooks(&h2);
+    He_State(&rec) = 0;
+    out = NpcDaily_DailyRoutineStep(&rec);
+    CHECK(out == &rec);
+    SetNpcDailyHooks(nullptr);
+}
+
+// DATA-ABSENT path: persons present but missing the home/work/dest columns. The
+// director's gates (homeBld==0 / destBld==0) skip every person; no command emits.
+// This is the documented "data-absent" branch — drive it so ASAN walks the row
+// reads without any dispatch.
+TEST(NpcDaily, DirectorPersonsMissingColumns) {
+    g_rec = DailyRec{};
+    g_rows[0] = LiveRow(0, 0, 0, 0);   // no home, no work, no dest (data absent)
+    g_rows[1] = LiveRow(10, 20, 0, 0); // home+work but NO dest -> still skipped
+    SetNpcClock(GameTime{ /*day*/1, /*hour*/6, /*minute*/0, /*second*/0 });
+
+    NpcDailyHooks h{};
+    h.personCount = DPCount; h.personRow = DPRow; h.setTurnBits = DPSetBits;
+    h.findCarryTarget = DPCarry; h.destDoorIds = DPDoor;
+    h.homeIsProduction = DPProd; h.homeHasMesh = DPMesh;
+    h.requestBuildOp77 = DPOp77; h.requestChrMoveToUniverse = DPChrMove;
+    h.queueRequestString47 = DPStr47; h.queueRequestNamedObject53 = DPNamed;
+    h.queueRequestArgs25 = DPArgs;
+    SetNpcDailyHooks(&h);
+
+    HeRecord rec{};
+    He_State(&rec) = 0;
+    NpcDaily_DailyRoutineStep(&rec);
+    // Nothing dispatched (every row gated out by the absent columns).
+    CHECK_EQ(g_rec.op77, 0);
+    CHECK_EQ(g_rec.chrmove, 0);
+    CHECK_EQ(g_rec.named53, 0);
+    SetNpcDailyHooks(nullptr);
+}
+
+// HOUR BOUNDARIES of the schedule RULE: the morning window edge (hour ==
+// workStart-1 is NOT < window) and the work-start transition hour, plus the
+// evening edge (hour == workEnd+2 is NOT > window) across all four seasons.
+TEST(NpcDaily, RuleHourBoundariesAllSeasons) {
+    DailyPersonRow r = LiveRow(1, 2, 3, 0);
+    for (int s = 0; s < 4; ++s) {
+        const int ws = (int)kWorkStartHour[s];   // 8,7,8,9
+        const int we = (int)kWorkEndHour[s];      // 20,21,20,19
+        // morning window is (ws - 1): hour < ws-1 -> work; hour == ws-1 -> none.
+        CHECK(SelectDailyActivity(0, s, ws - 2, r, false) == DailyActivity::kGoToWork);
+        CHECK(SelectDailyActivity(0, s, ws - 1, r, false) == DailyActivity::kNone);
+        CHECK(SelectDailyActivity(0, s, ws,     r, false) == DailyActivity::kNone);
+        // evening window is (we + 2): hour > we+2 -> home; hour == we+2 -> in-window.
+        CHECK(SelectDailyActivity(1, s, we + 3, r, false) == DailyActivity::kGoHome);
+        CHECK(SelectDailyActivity(1, s, we + 2, r, false) == DailyActivity::kGoHome); // in-window, not eligible
+        CHECK(SelectDailyActivity(1, s, we + 2, r, true)  == DailyActivity::kGoToTavern);
+    }
+}
+
+// SEASON indexing is 1:1 with the binary (wave-16): the original indexes the
+// 4-entry season tables with the RAW sign-extended GetSeasonFromDay byte (signed
+// day % 4), with NO `& 3` mask and no clamp (disasm @0x4e80c3:
+// `sar eax,18h; fld flt_6476FC[eax*4]`). GetSeasonFromDay's domain on the engine's
+// real day>=0 is exactly 0..3, so every season passed to the rule is in-bounds.
+// This pins all four valid seasons' work-start windows (8/7/8/9, slack -1) and the
+// go-home windows (20/21/20/19, +2) — the faithful table lookups, unmasked.
+TEST(NpcDaily, RuleSeasonAllFourUnmasked) {
+    DailyPersonRow r = LiveRow(1, 2, 3, 0);
+    // Morning: workStart-1 = {7,6,7,8}. hour < window -> GoToWork.
+    const int startWin[4] = { 7, 6, 7, 8 };
+    for (int s = 0; s < 4; ++s) {
+        CHECK(SelectDailyActivity(0, s, startWin[s] - 1, r, false)
+              == DailyActivity::kGoToWork);
+        CHECK(SelectDailyActivity(0, s, startWin[s], r, false)
+              == DailyActivity::kNone);
+    }
+    // Evening: workEnd+2 = {22,23,22,21}. hour > window -> GoHome.
+    const int homeWin[4] = { 22, 23, 22, 21 };
+    for (int s = 0; s < 4; ++s) {
+        CHECK(SelectDailyActivity(1, s, homeWin[s] + 1, r, false)
+              == DailyActivity::kGoHome);
+        CHECK(SelectDailyActivity(1, s, homeWin[s], r, false)
+              == DailyActivity::kGoHome); // in-window -> not-eligible falls home
+    }
 }
 
 // ---------------------------------------------------------------------------

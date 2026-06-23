@@ -109,8 +109,11 @@ struct ObjLife3Hooks {
     void (*matrixFromEuler)(const float* angles, SceneNode3* node) = nullptr;
     // VIBE_Object_DetachAndRelease(node) — KillObject path.
     void (*detachAndRelease)(SceneNode3* node) = nullptr;
-    // VIBE_Object_RebindParentMesh(node, prototype) — ReplaceObject path.
-    void (*rebindParentMesh)(SceneNode3* node, int prototype) = nullptr;
+    // VIBE_Object_RebindParentMesh(node, prototype, meshName) — ReplaceObject
+    // path. The original at 0x5b4420 takes THREE args (eax=node, edi=prototype,
+    // edx=meshName); ReplaceObject passes *a3 (the resolved mesh-name string).
+    void (*rebindParentMesh)(SceneNode3* node, int prototype,
+                             const char* meshName) = nullptr;
     // VIBE_Sound3d_SetListenerOrientation(...) — MoveObject path.
     void (*sound3dMove)(SceneNode3* node, float x, float y, float z,
                         float wx, float wy, float wz, int extra) = nullptr;
@@ -165,8 +168,8 @@ int ObjectKillObject(SceneNode3* node);
 int ObjectSetPos(SceneNode3* node, float x, float y, float z);
 // 0x43e804 — MoveObject: 3d-sound listener move. ret 0.
 int ObjectMoveObject(SceneNode3* node, int x, int y, int z, int extra);
-// 0x43ea48 — ReplaceObject: rebindParentMesh(node, prototype). ret 1.
-int ObjectReplaceObject(SceneNode3* node, int prototype);
+// 0x43ea48 — ReplaceObject: rebindParentMesh(node, prototype, meshName). ret 1.
+int ObjectReplaceObject(SceneNode3* node, int prototype, const char* meshName);
 // 0x43f844 — rain create thunk. returns rainCreate result.
 void* ObjectCmdSetObjectStateThunk(SceneNode3* node, int a, int b);
 // 0x43f84c — rain destroy thunk. ret 0.

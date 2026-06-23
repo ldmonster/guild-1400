@@ -35,6 +35,19 @@ inline i32 SlotSeed(const CutsceneSlot* s) {
     return *reinterpret_cast<const i32*>(
         reinterpret_cast<const u8*>(s) + 120);
 }
+// Fetch the per-type table entry for a slot's type byte. The slot type (+8) is a
+// u8 (0..255); the recovered table holds exactly kCutsceneTypeCount (12) types.
+// A malformed slot with type >= 12 would index past our std::array (OOB read of
+// stale fn pointers — the same garbage the original's dword_11AE5C0[5*type] would
+// read, except our bounded array makes it a hard overflow). Treat an out-of-range
+// type as having no main/step fn: valid types (0..11) are byte-identical, and a
+// garbage type can no longer dispatch through an OOB function pointer.
+inline const CutsceneTypeEntry* SlotTypeEntry(const CutsceneTypeTable* types,
+                                              u8 type) {
+    if (!types || type >= kCutsceneTypeCount)
+        return nullptr;
+    return &(*types)[type];
+}
 }
 
 // ===========================================================================
@@ -46,7 +59,13 @@ inline i32 SlotSeed(const CutsceneSlot* s) {
 // ===========================================================================
 bool CutsceneActorHasParticipant(const CutsceneContext& ctx,
                                  i32 personId, const CutsceneSlot* slot) {
+    // partCount (+48) is a u8 (0..255); the participant id array (+52) holds
+    // exactly kMaxParticipants (16). AddParticipant enforces that bound, but a
+    // malformed slot (e.g. AllocSlot from a bad template) could carry a larger
+    // count — clamp so we never read past partIds[] (OOB). Valid slots are
+    // unaffected.
     int count = slot->partCount;
+    if (count > kMaxParticipants) count = kMaxParticipants;
     for (int i = 0; i < count; ++i) {
         if (personId == slot->partIds[i]) {
             if (!ctx.personKind) return true;                  // resolves always
@@ -164,8 +183,8 @@ int CutsceneExecMainFunc(CutsceneContext& ctx, CutsceneSlot* slot) {
         ctx.rng->SetSeed(SlotSeed(slot));           // VIBE_Cutscene_SetRandSeed(v73[30])
 
     int result = 0;
-    if (ctx.types) {
-        CutsceneTypeFn fn = (*ctx.types)[slot->type].main;   // dword_11AE5C0[5*type]
+    if (const CutsceneTypeEntry* te = SlotTypeEntry(ctx.types, slot->type)) {
+        CutsceneTypeFn fn = te->main;                        // dword_11AE5C0[5*type]
         if (fn)
             result = fn(slot);
     }
@@ -275,8 +294,8 @@ int CutsceneProcessActive(CutsceneContext& ctx) {
             } else {
                 s->started = 1;                                     // dword+40 = 1
                 int stepResult = 1;
-                CutsceneTypeFn step = ctx.types ? (*ctx.types)[s->type].step
-                                                : nullptr;
+                const CutsceneTypeEntry* te = SlotTypeEntry(ctx.types, s->type);
+                CutsceneTypeFn step = te ? te->step : nullptr;
                 if (step)
                     stepResult = step(s);
                 if (!stepResult) {
@@ -290,7 +309,8 @@ int CutsceneProcessActive(CutsceneContext& ctx) {
         // ----- no step fn + clock past timeout window -> mark finished -----
         // (0x4ac4cc) if (step fn absent && GameTime_Compare(clock, windowB) > 0)
         //               finished = 1;
-        CutsceneTypeFn step = ctx.types ? (*ctx.types)[s->type].step : nullptr;
+        const CutsceneTypeEntry* te2 = SlotTypeEntry(ctx.types, s->type);
+        CutsceneTypeFn step = te2 ? te2->step : nullptr;
         if (!step && GameTimeCompare(&ctx.clock, windowB) > 0)
             s->finished = 1;                                        // dword+4 = 1
 

@@ -15,7 +15,49 @@
 #include "sim/real_hooks2.h"  // InstallRealSimHooks2 (interaction emit / pamphlet / turn bridge)
 #include "sim/real_hooks3.h"  // InstallRealSimHooks3 (NPC leaf builders / He pool / combat sink)
 #include "sim/real_hooks4.h"  // InstallRealSimHooks4 (command-APPLY entity mutators)
+#include "sim/object_attach_wiring.h"  // InstallRealObjectAttachWiring (factory attach -> 0x5b3e30)
+#include "sim/real_reaper_wiring.h"    // InstallRealReaperWiring (NpcEventHooks reaper leaves)
+#include "sim/wire_npcevent.h"         // InstallRealNpcEventWiring / ...NpcEvent2Wiring (supersedes reaper)
+#include "sim/wire_charaction.h"       // InstallRealCharActionWiring (CharAction step bridges)
+#include "sim/wire_charaction2.h"      // InstallRealCharAction2Wiring (CharActionStep5-8 RNG)
+#include "sim/wire_combat.h"           // InstallRealCombatWiring (combat-driver RNG)
+#include "sim/wire_charrender.h"       // InstallRealCharRenderWiring (CharRender pool/strcmp)
+#include "sim/wire_ai.h"               // InstallRealAiWiring (AiRecon5 decision leaves)
+#include "world/wire_building.h"       // InstallRealBuildingWiring (building bridges)
+#include "world/wire_event_office.h"   // InstallRealEventOfficeWiring (mission-req / interaction RNG)
+#include "world/wire_location.h"       // InstallRealLocationWiring (contact-loop feast)
+#include "render/wire_scene_fx.h"      // InstallRealSceneFxWiring (pure-logic scene/fx leaves)
+#include "world/wire_event.h"          // InstallRealEventWiring (EventHooks / Event3/4/5)
+#include "sim/wire_he.h"               // InstallRealHeWiring (He entity-query / handler / group-interact)
+#include "sim/wire_charstate.h"        // InstallRealCharStateWiring (CharState + factory leaves)
+#include "sim/wire_cutscene.h"         // InstallRealCutsceneWiring (cutscene body leaves)
+#include "sim/wire_inventory.h"        // InstallRealInventoryWiring (apply-target / bauplatz / apply8)
+#include "sim/wire_charrender2.h"      // InstallRealCharRender2Wiring (path normalize)
+#include "sim/wire_apply_input.h"      // InstallRealApplyInputWiring (order router / target pick)
+#include "world/wire_election.h"       // InstallRealElectionWiring (guild eligibility / office entry)
+#include "world/wire_history_amt.h"    // InstallRealHistoryAmtWiring (amt economy / mission-req-event)
+#include "sim/wire_npcaction1.h"       // InstallRealNpcAction1Wiring (NpcAction5/6/7)
+#include "sim/wire_npcaction2.h"       // InstallRealNpcAction2Wiring (NpcAction8/9/10)
+#include "sim/wire_npcaction3.h"       // InstallRealNpcAction3Wiring (NpcAction11/12 + NpcMarket)
+#include "world/wire_production.h"     // InstallRealProductionWiring (production / personnel2)
+#include "sim/wire_script.h"           // InstallRealScriptWiring (script-VM strcmp)
+#include "sim/wire_object.h"           // InstallRealObjectWiring (object scene-entity / move-universe)
+#include "sim/wire_cmdops.h"           // InstallRealCmdOpsWiring (combat order-driver RNG)
+#include "sim/wire_recon45.h"          // InstallRealRecon45Wiring (recon4/5 sub-hooks)
+#include "world/wire_meister_loc.h"    // InstallRealMeisterLocWiring (Meister3 / LocationDialog4 / MissionName)
+#include "world/wire_economy2.h"       // InstallRealEconomy2Wiring (Supervision / Stock)
+#include "sim/wire_spawnmotion.h"      // InstallRealSpawnMotionWiring (building lifecycle)
+#include "sim/wire_actionops.h"        // InstallRealActionOpsWiring (misc-action find-nearby)
+#include "sim/wire_selinput.h"         // InstallRealSelInputWiring (selection / check)
+#include "sim/wire_objscene.h"         // InstallRealObjSceneWiring (scene-sync)
+#include "world/wire_dialogtut.h"      // InstallRealDialogTutWiring (tutorial-mission / gesetz)
+#include "sim/wire_combat2.h"          // InstallRealCombat2Wiring (brawl / recon2)
+#include "sim/wire_misc2.h"            // InstallRealMisc2Wiring (personnel-gui)
+#include "world/wire_worldnet.h"       // InstallRealWorldNetWiring (audit no-op)
+#include "world/wire_privilege_panels_a.h" // InstallPrivilegePanelsA (SET-A privilege leaves)
+#include "world/wire_privilege_panels_b.h" // InstallPrivilegePanelsB (SET-B privilege leaves)
 #include "sim/command_apply3.h" // RegisterApplyHandlers3 + ApplyPacket3 (the apply jump table)
+#include "sim/command_apply6.h" // RegisterApplyHandlers6 (incl. opcode-0x1B relation matrix)
 #include "world/city.h"
 #include "world/production.h"
 #include "world/data_load.h"
@@ -26,6 +68,7 @@
 #include "app/render_submit.h"
 #include "gui/form_loader.h"
 #include "io/gamestate.h"
+#include "io/save_world_load.h"  // LoadWorld / WorldState (full entity-table populate)
 #include "io/vfs.h"
 
 #include "render/mesh.h"
@@ -39,6 +82,7 @@
 #include "play/terrain_render.h"      // Heightfield / TerrainView / RenderTerrain (real floor)
 #include "play/wire_scene_bridge.h"   // SceneDrawNode / WalkSceneTree (real node dispatch)
 #include "play/wire_hud_bridge.h"     // InstallRealHudBridge / BlitHudSprite (real 2D blit)
+#include "play/wire_render_bridge.h"  // InstallRealRenderBridge (real Character attach/head leaves)
 #include "render/colorformat.h"
 
 #include "shim_impl/disk_filesystem.h"
@@ -49,6 +93,11 @@
 #include "shim_impl/null_platform.h"
 
 #include <algorithm>
+
+// gilde.exe 0x43dfb0 — VIBE_Character_RegisterScriptCommands. Forward-declared to
+// avoid pulling the heavy script/script_vm.h into this widely-shared TU (its
+// transitive include set perturbs other headers' include ordering).
+namespace guild::script { int RegisterScriptCommands(); }
 
 namespace guild::app {
 
@@ -406,6 +455,15 @@ void RealSubsystems::EnableRealRenderBridges() {
     frame_.hasTerrain         = true;                  // dword_64A028 != 0
     play::InstallRealSceneBridge();   // WalkVTable.invoke -> ProcessSceneNodeAppend
     play::InstallRealHudBridge();     // HudRenderHooks::drawSprite -> ShapeShowFromBank
+    // De-inert the Character attach-offset / head-variant render cohort
+    // (sim::CharRenderHooks): VIBE_Character_ComputeAttachOffset @0x404860 ->
+    // util::PointThroughBoneChainPivot (0x5c8d0c) + mesh-root translation
+    // (mesh+132/136/140) and VIBE_Character_ApplyHeadVariant @0x57c548 ->
+    // sim::ObjectSelectTextureSet (0x5b3f54). These leaves belong to the same
+    // "real render bridges" feature the engine enables for the in-game frame: with
+    // the cohort on, an attached actor's geometry is transformed through the real
+    // bone-chain pivot and its texture set is actually resolved (rule 13).
+    play::InstallRealRenderBridge();
     realRenderBridges_ = true;
 }
 
@@ -466,7 +524,17 @@ void RealSubsystems::memPoolStartupStack(int /*size*/) {
     rec("memPoolStartupStack", Kind::Real);
 }
 
-bool RealSubsystems::loadMovieDll() { rec("loadMovieDll", Kind::Stub); return false; }
+// moveahead.dll is replaced (rule-6, user-approved) by pl_mpeg behind the IVideo
+// shim. "Loading the movie DLL" == creating the video decoder; success means a
+// video backend is compiled in (GUILD_BACKEND). The portable build's
+// CreateVideoDecoder() returns nullptr -> false -> the engine skips movies, the
+// same as the prior stub.
+bool RealSubsystems::loadMovieDll() {
+    videoDecoder_.reset(shim::CreateVideoDecoder());
+    const bool ok = (videoDecoder_ != nullptr);
+    rec("loadMovieDll", ok ? Kind::Real : Kind::Stub);
+    return ok;
+}
 
 void RealSubsystems::fileCreateDirectory(const std::string& path) {
     if (fs_) {
@@ -656,6 +724,82 @@ void RealSubsystems::netConnectToServer(const std::string& host, int port) {
     }
 }
 
+// Install EVERY reconstructed gameplay hook bridge into its global hook table
+// (rule 13). Operates entirely on process globals (no per-instance state), so it is
+// reusable both by the live spine (commandQueueInitAndSync) and by tests that want
+// the full wired system without booting the whole RealSubsystems lifecycle. Each
+// installer seeds from its module inert defaults and overrides only wireable fields.
+void InstallAllRealGameplayHooks() {
+    sim::InstallRealSimHooks();
+    sim::InstallRealSimHooks2();
+    sim::InstallRealSimHooks3();
+    sim::InstallRealSimHooks4();
+    sim::InstallRealObjectAttachWiring();
+    sim::InstallRealNpcEventWiring();   // supersedes the reaper-only install
+    sim::InstallRealNpcEvent2Wiring();
+    sim::InstallRealCharActionWiring();
+    sim::InstallRealCharAction2Wiring();
+    sim::InstallRealCombatWiring();
+    sim::InstallRealCharRenderWiring();
+    sim::InstallRealAiWiring();
+    world::InstallRealBuildingWiring();
+    world::InstallRealEventOfficeWiring();
+    world::InstallRealLocationWiring();
+    render::InstallRealSceneFxWiring();
+    world::InstallRealEventWiring();
+    sim::InstallRealHeWiring();
+    sim::InstallRealCharStateWiring();
+    sim::InstallRealCutsceneWiring();
+    sim::InstallRealInventoryWiring();
+    sim::InstallRealCharRender2Wiring();
+    sim::InstallRealApplyInputWiring();
+    world::InstallRealElectionWiring();
+    world::InstallRealHistoryAmtWiring();
+    sim::InstallRealNpcAction1Wiring();
+    sim::InstallRealNpcAction2Wiring();
+    sim::InstallRealNpcAction3Wiring();
+    world::InstallRealProductionWiring();
+    sim::InstallRealScriptWiring();
+    sim::InstallRealObjectWiring();
+    sim::InstallRealCmdOpsWiring();
+    sim::InstallRealRecon45Wiring();
+    world::InstallRealMeisterLocWiring();
+    // Fourth wiring wave (seed-from-defaults; each binds the signature-compatible
+    // reconstructed leaves of a previously-inert bridge, rest stay inert stubs).
+    world::InstallRealEconomy2Wiring();       // Supervision He-probe/RNG + Stock cmd tails
+    sim::InstallRealSpawnMotionWiring();       // building lifecycle release/free-child
+    sim::InstallRealActionOpsWiring();         // misc-action find-nearby
+    sim::InstallRealSelInputWiring();          // selection parseInt + check person-query
+    sim::InstallRealObjSceneWiring();          // scene-sync category/money-rate
+    world::InstallRealDialogTutWiring();       // tutorial-mission clock + gesetz portrait
+    sim::InstallRealCombat2Wiring();           // brawl He/person + recon2 strcmp/strlen
+    sim::InstallRealMisc2Wiring();             // personnel-gui RNG
+    world::InstallRealWorldNetWiring();        // audit (no-op): documents the inert net/history points
+
+    // Wave-20 (rule 13): the SET-A guild-office PRIVILEGE panels. InvokePrivilegeLeaf
+    // (live caller in sim/contextaction2.cpp) routed through the inert g_privilegeHook
+    // (returned 0). InstallPrivilegePanelsA installs a SetPrivilegeLeafHook adapter
+    // that, for the 11 SET-A leaf ids (GenerateHatred/ChangeProfession/ExpelWorker/
+    // Blackmail/MakePeace/Convert/Interrogation/Medicus/Divorce/Apology/CharmConfirm),
+    // dispatches to the reconstructed VIBE_Privilege_Panel* bodies (cost math, RNG
+    // draw order, relation deltas, return codes — verbatim). Non-SET-A leaf ids
+    // return 0 (identical to the prior inert default). No provider yet -> the panels
+    // run against the inert PrivilegePanelHooks (compute verdict, emit nothing) —
+    // the documented deferral posture (a live provider binds the command queue later).
+    world::InstallPrivilegePanelsA();          // 11 SET-A privilege leaves -> live verdicts
+
+    // Wave-21 (rule 13): the SET-B guild-office PRIVILEGE panels (law / evidence /
+    // espionage + dispatch). contextaction2.cpp already invokes these leaf-ids
+    // (kPrivEnactLaw/RemoveFromOffice/CounterEspionage/Embezzlement/SwapSeats/
+    // Miracle/EvidenceReview(+Alt)/ShowDialog). InstallPrivilegePanelsB installs a
+    // SetPrivilegeLeafHook adapter that owns those nine ids and CHAINS onto the
+    // SET-A adapter just installed (single g_privilegeHook slot is shared), so both
+    // batches stay reachable. No provider yet -> the panels run against the inert
+    // PrivilegePanelBHooks (compute verdict, emit nothing) — the documented deferral
+    // posture (a live provider binds the command queue + person/office arrays later).
+    world::InstallPrivilegePanelsB();          // 9 SET-B privilege leaves -> live verdicts (chained after A)
+}
+
 void RealSubsystems::commandQueueInitAndSync() {
     // REAL: VIBE_Command_QueueInitAndSync (init half). Standalone for single-player.
     cmdQueue_.set_standalone(true);
@@ -674,11 +818,17 @@ void RealSubsystems::commandQueueInitAndSync() {
     // INERT default hooks. Install them here (the faithful command-system init point)
     // and register the apply-3 jump-table entries onto the owned queue, so an applied
     // packet now mutates the REAL shared entity arrays.
-    sim::InstallRealSimHooks();
-    sim::InstallRealSimHooks2();
-    sim::InstallRealSimHooks3();
-    sim::InstallRealSimHooks4();
+    // Bind every reconstructed gameplay leaf into its previously-inert hook bridge
+    // (rule 13) — the faithful command-system init point. Before this, the per-frame/
+    // per-turn sim dispatch ran against INERT defaults.
+    InstallAllRealGameplayHooks();
     sim::RegisterApplyHandlers3(cmdQueue_);
+    // Batch 6 closes the 96-entry table on the owned queue — in particular the
+    // opcode-0x1B relation-matrix handler (ExComputeObjectCoords @0x49818C) the
+    // new-game commit's six QueueRequestCoord27 packets dispatch to. In the
+    // binary this is one static jump table (funcs_4941F4 @0x631298); the batch
+    // registries are disjoint, so composing them here is order-independent.
+    sim::RegisterApplyHandlers6(cmdQueue_);
     simHooksInstalled_ = true;
 
     rec("commandQueueInitAndSync", Kind::Real);
@@ -712,6 +862,19 @@ void RealSubsystems::worldLoadBuildingAndObjectData(const std::string&) {
                 if (io::LoadGameState(path.c_str(), cityState, /*load=*/nullptr)) {
                     cityLoaded_ = true;
                     cityName_   = cityState.header.name;
+                }
+                // Populate the LIVE entity tables (g_persons / g_objects) from the
+                // .cty via the full VIBE_Save_LoadGameFile table-load driver, so the
+                // wired per-entity sim/turn/event hooks run over a real loaded world
+                // instead of empty state. (LoadWorld resets + loads the header +
+                // scene/building/person tables; partial city-seed files stop there.)
+                io::WorldState world{};
+                if (io::LoadWorld(path.c_str(), world)) {
+                    worldLoaded_ = true;
+                    for (int i = 0; i < sim::kPersonCapacity; ++i)
+                        if (sim::g_persons[i].marker != -1) ++livePersonCount_;
+                    for (int i = 0; i < sim::kObjectCapacity; ++i)
+                        if (sim::g_objects[i].alive) ++liveObjectCount_;
                 }
             }
         }
@@ -871,14 +1034,62 @@ void RealSubsystems::scriptRegisterCommands() {
     };
     sim::ScriptVm vm(scriptProgram_, host);
     scriptCmdResult_ = vm.InvokeCommand("init", {1, 2, 3});
+
+    // REAL (rule 13): VIBE_App_InitEngineAndScriptCommands @0x528560 registers the
+    // per-character .esc command table via VIBE_Character_RegisterScriptCommands
+    // @0x43dfb0 (the EngineInitHooks.characterRegisterScriptCommands seam). Bind the
+    // reconstructed registrar so the 38 character commands populate the shared
+    // guild::sim::Commands() table (ImportCommand replaces by name -> idempotent).
+    scriptCharCmdResult_ = script::RegisterScriptCommands();
+
     rec("scriptRegisterCommands", Kind::Real);
 }
 
 // ===========================================================================
 // intro movie
 // ===========================================================================
-void RealSubsystems::moviePlayIntroSequence() { rec("moviePlayIntroSequence", Kind::Stub); }
-void RealSubsystems::movieDllExit() { rec("movieDllExit", Kind::Stub); }
+// VIBE_Movie_PlayIntroSequence @0x5347d4 — play "<movie>\Intro.mpg" through the
+// pl_mpeg decoder via the reconstructed video backing. The decode pump delivers
+// each RGB frame to a sink (here a counter; the real host blits it through the
+// IGraphicsDevice). No decoder (portable build) -> silent skip (the stub path).
+void RealSubsystems::moviePlayIntroSequence() {
+    if (!videoDecoder_) { rec("moviePlayIntroSequence", Kind::Stub); return; }
+
+    play::VideoMovieBacking backing;
+    backing.decoder  = videoDecoder_.get();
+    // The extracted assets keep movies under "<gameDir>/movie/"; probe the two
+    // common casings (the in-engine VFS path is "\\project\\movie\\").
+    backing.movieDir = gameDir_.empty() ? std::string("movie/")
+                                        : (gameDir_ + "/movie/");
+    backing.clipName = "Intro.mpg";
+    movieFramesDecoded_ = 0;
+    backing.frameSink = [this](const shim::VideoFrame&) { ++movieFramesDecoded_; };
+    if (movieFrameCap_ > 0) {
+        const int cap = movieFrameCap_;
+        backing.shouldAbort = [this, cap]() { return movieFramesDecoded_ >= cap; };
+    }
+
+    play::MovieDllHooks dll = play::MakeVideoMovieHooks(backing);
+    const int handle = dll.prepare ? dll.prepare(nullptr, 0) : 0;  // open Intro.mpg
+    if (handle == 0) {
+        // Casing fallback: lower-case name (case-sensitive filesystems).
+        backing.clipName = "intro.mpg";
+        play::MovieDllHooks dll2 = play::MakeVideoMovieHooks(backing);
+        const int h2 = dll2.prepare ? dll2.prepare(nullptr, 0) : 0;
+        if (h2) dll2.play(h2);
+        if (dll2.dispose) dll2.dispose();
+    } else {
+        dll.play(handle);            // decode-and-present pump
+        if (dll.dispose) dll.dispose();
+    }
+    rec("moviePlayIntroSequence", movieFramesDecoded_ > 0 ? Kind::Real : Kind::Stub);
+}
+
+void RealSubsystems::movieDllExit() {
+    if (videoDecoder_) videoDecoder_->close();
+    videoDecoder_.reset();
+    rec("movieDllExit", Kind::Real);
+}
 
 // ===========================================================================
 // per-frame
@@ -1555,6 +1766,9 @@ RealHeadlessResult RunHeadlessRealAssets(const std::string& gameDir, int frames,
     out.sceneTypeCount   = sub.sceneTypeCount();
     out.cityLoaded       = sub.cityLoaded();
     out.cityName         = sub.cityName();
+    out.worldLoaded      = sub.worldLoaded();
+    out.livePersonCount  = sub.livePersonCount();
+    out.liveObjectCount  = sub.liveObjectCount();
     return out;
 }
 

@@ -107,16 +107,15 @@ bool BgfFindChunkStart(const u8* data, size_t size, size_t* chunkOffset) {
         if (token == kBgfTokenEnd) {       // '+': end of stream / EOF
             return false;
         }
-        if (token == kBgfTokenName) {      // any byte > 0x3A: a sized block
-            u32 blockSize;
-            if (!c.ReadU32(&blockSize)) return false;
-            const u8* np = c.p + static_cast<long>(blockSize);
-            if (np < data || np > c.end) return false;
-            c.p = np;
-            continue;
-        }
-        // Any other small byte token: the original loop does nothing special for
-        // it (it only acts on '-'/'+'/name); treat it as a no-op and re-read.
+        // Every OTHER token (the name token '\'' for any byte > 0x3A, AND any other
+        // small byte that isn't '-'/'+') is a sized block: read a u32 length and
+        // seek forward past it.  (gilde.exe 0x5F86FC: `if (Token != '+') ReadDword;
+        // Seek(+len)` — it skips for ANY non-'-'/'+' token, not just names.)
+        u32 blockSize;
+        if (!c.ReadU32(&blockSize)) return false;
+        const u8* np = c.p + static_cast<long>(blockSize);
+        if (np < data || np > c.end) return false;
+        c.p = np;
     }
 }
 
@@ -132,9 +131,24 @@ bool LoadFastChunk(const u8* data, size_t size, BgfModel& out) {
     if (!c.ReadU32(&out.vertexCount)) return false;
     if (!c.ReadU32(&out.polyCount)) return false;
 
+    // Hardening (W11): bound the declared counts by the bytes that remain before
+    // allocating. The engine streamed from a finite file, so each declared record
+    // is necessarily backed by bytes on disk; a count larger than the buffer can
+    // satisfy is a truncated/malformed asset. Bounding here turns a would-be huge
+    // std::vector::assign (bad_alloc / heap exhaustion) into the same clean parse
+    // failure the per-record reads already produce — without changing any valid
+    // load (a valid file always has the bytes). Each vertex record is >=24 bytes
+    // (pos+normal); each poly >=12 (the 3 index dwords), so these are conservative
+    // lower bounds that never reject a real asset.
+    const size_t remain = static_cast<size_t>(c.end - c.p);
+    if (out.vertexCount > remain / 24u) return false;
+    if (out.polyCount   > remain / 12u) return false;
+
     // Vertex block: the engine allocates 24*(vertexCount+8) bytes and reads
     // (vertexCount+8) (pos,normal) pairs. We mirror the +8 slack so downstream
     // index math is identical.
+    // (vertexCount is now bounded by remain/24 above, so vertexCount+8 cannot
+    // overflow a u32.)
     const u32 vtxStored = out.vertexCount + 8;
     out.vertices.assign(vtxStored, BgfVertex{});
     if (static_cast<i32>(out.vertexCount) > 0) {
@@ -168,7 +182,10 @@ bool LoadFastChunk(const u8* data, size_t size, BgfModel& out) {
         }
     }
 
-    // Material block: materialCount entries (3 strings + 6 bytes).
+    // Material block: materialCount entries (3 strings + 6 bytes). Each entry is
+    // >=9 bytes on disk (3 NUL terminators + 6 flag bytes), so bound the count by
+    // the remaining bytes before allocating (W11 hardening — see note above).
+    if (out.materialCount > static_cast<size_t>(c.end - c.p) / 9u) return false;
     out.materials.assign(out.materialCount, BgfMaterial{});
     for (u32 i = 0; i < out.materialCount; ++i) {
         BgfMaterial& mat = out.materials[i];
@@ -185,6 +202,9 @@ bool LoadFastChunk(const u8* data, size_t size, BgfModel& out) {
 
     // Dummy block: dummyCount (read via the SwapArgs reader) then 88-byte entries.
     if (!c.ReadU32(&out.dummyCount)) return false;
+    // Each dummy is >=25 bytes (name NUL + 2 vec3); bound the count by remaining
+    // bytes before allocating (W11 hardening — see note above).
+    if (out.dummyCount > static_cast<size_t>(c.end - c.p) / 25u) return false;
     out.dummies.assign(out.dummyCount, BgfDummy{});
     for (u32 i = 0; i < out.dummyCount; ++i) {
         BgfDummy& d = out.dummies[i];
@@ -235,6 +255,7 @@ bool BuildGeometry(const BgfModel& m, BgfGeometry& out) {
         p.uvZ = q.uv0[2];
         p.flags36 = 0;
         p.flags38 = 0;
+        p.matIndex = q.matIndex;   // carry the material index for texture binding
     }
 
     // Carry the per-corner UV0 onto each polygon's vertex u/v (the engine stores

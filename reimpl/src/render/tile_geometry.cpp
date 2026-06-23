@@ -1,5 +1,7 @@
 #include "render/tile_geometry.h"
 
+#include <cmath>   // std::lrint — bare-fistp round-nearest-even convention
+
 namespace guild::render {
 
 // flt_628B4C = 2.0 — the terrain type-byte -> light multiplier (0x628b4c: 00 00 00 40).
@@ -7,12 +9,17 @@ static constexpr float kTypeLightMul = 2.0f;
 // dword_1406A84 stride/base for the sort-key shift is folded into texSortId by the
 // caller (>>7 of the texture record stride); see header.
 
-// Clamp exactly as the engine: cast to int, cap high at 255, store low byte.
-//   if ((int)x > 255) byte = 0xFF; else byte = (u8)(int)x;
+// Clamp exactly as the engine (0x5becce/0x5bed00/0x5bed33 ambient branch and the
+// shadow branch at 0x5becbe..): the float->int store is a BARE `fistp` (no preceding
+// ConvertX / no fldcw chop), so it ROUNDS TO NEAREST-EVEN under the default x87
+// control word — NOT truncate-toward-zero. Then the SIGNED `cmp eax,0FFh; jle` caps
+// only the high side (>255 -> 0xFF), and the engine stores the LOW BYTE (`mov [..],al`),
+// so a negative rounded value wraps via its low 8 bits rather than clamping at 0.
+//   v = (int)lrint(x);  if (v > 255) byte = 0xFF;  else byte = (u8)v;
 u8 ClampLightByte(float x) {
-    int t = (int)x;            // truncate toward zero
-    if (t > 255) return 0xFF;  // the `LOBYTE(v)=-1` 0xFF store
-    return (u8)t;              // low byte (engine stored the low 8 bits)
+    int t = (int)std::lrint(x);   // bare fistp => round-to-nearest-even
+    if (t > 255) return 0xFF;      // the `cmp 0FFh; jg -> 0xFF` high cap (signed)
+    return (u8)t;                  // low byte (engine stored the low 8 bits / al)
 }
 
 // gilde.exe 0x5bf22c — VIBE_Floor_RenderTerrain per-vertex build.

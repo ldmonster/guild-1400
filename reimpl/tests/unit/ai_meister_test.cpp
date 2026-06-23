@@ -52,6 +52,29 @@ TEST(AiMeister, MeisterRoutineDispatch) {
 }
 
 // ---------------------------------------------------------------------------
+// Wave-20 (rule 13): EvaluateMeister is the dispatch-tail bind that connects
+// ClassifyMeisterRoutine to guild::sim::DispatchMeisterCalc along the original's
+// 0x4533a8 call edge. It must (a) return the classified routine and (b) dispatch
+// without crashing under the inert/null Meister leaves (the original's null path).
+// With meisterRec == nullptr the dispatched Calc takes the null-record early-out.
+// ---------------------------------------------------------------------------
+TEST(AiMeister, EvaluateMeisterReturnsClassifiedRoutine) {
+    // A zeroed 536-byte meister record: every rdptr column reads 0 -> null handle,
+    // so the dispatched Calc takes its null-record early-out (no leaves installed).
+    unsigned char rec[536] = {0};
+    CHECK(ai::EvaluateMeister(2, 9, rec, 0) == ai::MeisterRoutine::kFarming);
+    CHECK(ai::EvaluateMeister(0, ai::kAiClassWache, rec, 0) == ai::MeisterRoutine::kWache);
+    CHECK(ai::EvaluateMeister(0, ai::kAiClassDiebe, rec, 0) == ai::MeisterRoutine::kDiebe);
+    CHECK(ai::EvaluateMeister(0, ai::kAiClassAmbush, rec, 0) == ai::MeisterRoutine::kAmbush);
+    // Production / Bank / PlanProduction classify but DispatchMeisterCalc no-ops
+    // them (their own planner module owns them); EvaluateMeister still returns the
+    // classified routine.
+    CHECK(ai::EvaluateMeister(1, 9, rec, 0) == ai::MeisterRoutine::kProduction);
+    CHECK(ai::EvaluateMeister(0, ai::kAiClassBank, rec, 0) == ai::MeisterRoutine::kBank);
+    CHECK(ai::EvaluateMeister(0, 99, rec, 0) == ai::MeisterRoutine::kNone);
+}
+
+// ---------------------------------------------------------------------------
 // Security-heat decrement (golden, hand-computed).
 // ---------------------------------------------------------------------------
 TEST(AiMeister, SecurityHeatDecrement) {
@@ -252,15 +275,20 @@ TEST(AiMeister, CardGameCanPlayAndPlay) {
     ai::CardGameState st;
     st.seti32(12, 0x1000);
     st.bytes[36] = 0;            // decision 0
-    // (0,1) is a valid transition -> next 2.
+    // gilde.exe dword_46637D/byte_466381: transition result == the played action.
+    // (0,1) is a valid transition -> next 1 (byte_466381[0]=0x01).
     CHECK_EQ(ai::CanPlayCard(st, 0x1000, 1), 1);
     CHECK_EQ(ai::PlayCard(st, 0x1000, 1), 1);
-    CHECK_EQ(st.bytes[36], (u8)2);
-    // (2,2) -> 4 valid.
+    CHECK_EQ(st.bytes[36], (u8)1);
+    // now decision 1: (1,2) -> next 2 (byte_466381[2]=0x02).
     CHECK_EQ(ai::CanPlayCard(st, 0x1000, 2), 1);
     CHECK_EQ(ai::PlayCard(st, 0x1000, 2), 1);
+    CHECK_EQ(st.bytes[36], (u8)2);
+    // (2,4) -> next 4 (byte_466381[12]=0x04).
+    CHECK_EQ(ai::CanPlayCard(st, 0x1000, 4), 1);
+    CHECK_EQ(ai::PlayCard(st, 0x1000, 4), 1);
     CHECK_EQ(st.bytes[36], (u8)4);
-    // unknown action.
+    // (4,*) has no transition; and an unknown action is rejected.
     CHECK_EQ(ai::CanPlayCard(st, 0x1000, 9), 0);
 }
 

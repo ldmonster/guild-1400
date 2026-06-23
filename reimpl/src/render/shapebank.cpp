@@ -126,9 +126,14 @@ int ShapeBankRemoveShape(u8* bank, int index) {
     MemMove(bank + TableSlot(index), bank + TableSlot(index + 1),
             4u * (count - index));
 
-    // Zero the now-unused final slot, decrement count, shrink the write cursor.
+    // Zero the now-unused slot, decrement count, shrink the write cursor.
+    // gilde.exe 0x5d8592-0x5d859e: the binary reads the OLD count, zeroes
+    //   TableSlot(count) [bank+eax*4+0x45 with eax==old count], THEN does
+    //   `dec word [bank+0x2a]`. So the cleared slot is index `count` (one past
+    //   the last live entry), and the decrement happens AFTER the zero — both
+    //   the index and the order matter for a 1:1 clone.
+    SetU32(bank, TableSlot(count), 0);
     SetU16(bank, bank_off::kShapeCount, static_cast<u16>(count - 1));
-    SetU32(bank, TableSlot(GetU16(bank, bank_off::kShapeCount)), 0);
     SetU32(bank, bank_off::kWriteCursor,
            GetU32(bank, bank_off::kWriteCursor) - size);
     return 1;

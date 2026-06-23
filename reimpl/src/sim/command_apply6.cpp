@@ -4,7 +4,9 @@
 #include <string>
 
 #include "sim/command_apply.h"   // g_lastObjectId / g_lastSceneId / g_lastTradeId
+#include "sim/entity.h"          // g_persons — the live Person table (word_12CE910)
 #include "sim/gametime.h"        // GameTimeCompare
+#include "world/relation.h"      // g_relationMatrix — the grid A @0x123D6D0 backing store
 
 // command_apply6.cpp — the FINAL batch of Command_Ex apply handlers + the group
 // framing opcodes, closing the 96-entry dispatch table. Each handler is a
@@ -93,7 +95,8 @@ void SetSellableResolveHook(SellableResolveFn fn) { g_sellableResolve = fn ? fn 
 //   dstId = remap(a1+16); resolve dst container; gate dst capacity
 //           (free-capacity for storage, carry-capacity for carried — clamps qty).
 //   move qty: src -= qty; dst += qty (AddObjekt/AddObjektToParent — hooked).
-//   dword_631290 = newDstRecord.id;  (the last-trade-id register, LABEL_58)
+//   dword_631290 = *(v55+2);  (the last-trade-id register, LABEL_58 — latched
+//   inside the dest storage phase: buildingtype_callers Sell_EnsureDestStorageNode)
 //   ack[0]=1; if (a1+16 != -1) { ack[1]=3; ack[6]=dstRecord; }  return 0.
 // The deep transfer leaves are routed through trade_sell's TradeCmd hook; the
 // deterministic gate is TradeSellObjektResolve.
@@ -123,7 +126,10 @@ int ExSellObjekt(CommandPacket& pkt, AckEntry* ack) {
 
     g_log.sellCommitCount++;
     g_log.lastSellMoved = moved;
-    g_lastTradeId = moved;  // dword_631290 = *(newDst+1) modeled as the moved id
+    // dword_631290 (g_lastTradeId) is NOT written here: the binary's only store
+    // is the LABEL_58 latch `dword_631290 = *(v55+2)` (the dest stock NODE id)
+    // inside the dest storage phase — reconstructed 1:1 in buildingtype_callers
+    // (Sell_EnsureDestStorageNode), which TradeSellObjektResolve already ran.
 
     if (ack) {
         ack->status = 1;
@@ -188,25 +194,46 @@ int ExComputeSellableAmount(CommandPacket& pkt, AckEntry* ack) {
 // ===========================================================================
 // 0x1B relation matrix.
 // ===========================================================================
-RelationState::RelationState() { Reset(); }
+// matrixA is the binary's single primary grid @0x123D6D0 — the same memory the
+// 0x5942fc reader/setter (world/relation.h) address. One global, one layout
+// (row stride 768 bytes), exactly like dword_123D6CD in the binary.
+static_assert(kRelCells == world::kRelationBytes,
+              "grid A geometry must match world::g_relationMatrix");
+static_assert(kRelPersons == world::kRelationRowStride,
+              "grid A row stride must match world::kRelationRowStride");
+RelationState::RelationState()
+    : matrixA(reinterpret_cast<i8*>(world::g_relationMatrix)) {
+    Reset();
+}
 void RelationState::Reset() {
-    matrixA.assign(kRelCells, 0);
+    std::memset(matrixA, 0, kRelCells);
     matrixB.assign(kRelCells, 0);
-    personId.assign(kRelPersons, 0);
-    aliveMarker.assign(kRelPersons, -1);  // all free by default
-    slotId.assign(kRelPersons, 0);
 }
 namespace { RelationState g_relations; }
 RelationState& Apply6_Relations() { return g_relations; }
 
 namespace {
-// Find the Person index for `id` by scanning the id column (dword_12CE914 stride
-// 134 dwords). Returns index in [0,768) or -1 (the original returns 1/reject).
-int FindPersonIndex(const RelationState& rel, i32 id) {
+// Find the Person index for `id` by scanning the id column dword_12CE914[134*i]
+// — i.e. g_persons[i].id, the dword at record +4 (the column and the record
+// field are the SAME memory in the binary). The original scan takes the FIRST
+// id match without consulting the marker word; the caller gates on the marker
+// afterwards. Returns index in [0,768) or -1 (the original returns 1/reject).
+int FindPersonIndex(i32 id) {
     for (int i = 0; i < kRelPersons; ++i)
-        if (rel.personId[i] == id)
+        if (g_persons[i].id == id)
             return i;
     return -1;
+}
+
+// word_12CE910[268*i] — the record marker word at +0 (-1 == free slot).
+inline i16 PersonMarker(int i) { return g_persons[i].marker; }
+
+// dword_12CEB1C[134*i] — the dword at record +0x20C (the case-3 exclusion key).
+inline i32 PersonSlotId(int i) {
+    i32 v;
+    std::memcpy(&v, reinterpret_cast<const u8*>(&g_persons[i]) + kRelPersonSlotIdOff,
+                sizeof(v));
+    return v;
 }
 
 // The relation clamp used by modes 0/1/2 (and the band path): >126 => 127,
@@ -235,6 +262,10 @@ i32 TruncToInt(double v) { return static_cast<i32>(v); }
 // mode 4: global band-decay pass over the whole 768x768 primary grid; per-band
 //   (threshold, lowBound, highDelta, lowDelta) nudges every off-diagonal live
 //   cell toward 0 and clamps. modes 0/1/2/3: targeted pair / column mutation.
+//   Any OTHER mode resolves both persons and acks without mutating (0x498640).
+// The person id / marker / slot-id columns are the live g_persons table
+// (dword_12CE914 / word_12CE910 / dword_12CEB1C are the record fields at
+// +4 / +0 / +0x20C of the same 536-byte array).
 // Returns 0 on apply, 1 if a referenced person index is missing / dead.
 // ===========================================================================
 int ExComputeObjectCoords(CommandPacket& pkt, AckEntry* ack) {
@@ -262,10 +293,10 @@ int ExComputeObjectCoords(CommandPacket& pkt, AckEntry* ack) {
             default: threshold = 100; lowBound = -75;  highDelta = -4;  lowDelta = 11; break; // band 0
         }
         for (int i = 0; i < kRelPersons; ++i) {
-            if (rel.aliveMarker[i] == -1) continue;
+            if (PersonMarker(i) == -1) continue;
             for (int j = 0; j < kRelPersons; ++j) {
                 if (j == i) continue;
-                if (rel.aliveMarker[j] == -1) continue;
+                if (PersonMarker(j) == -1) continue;
                 int v = rel.A(i, j);
                 if (v <= threshold) {
                     if (v < lowBound) v += lowDelta;
@@ -281,18 +312,18 @@ int ExComputeObjectCoords(CommandPacket& pkt, AckEntry* ack) {
     }
 
     // --- targeted modes: resolve the column person (id A == +20) ----------
-    int idx = FindPersonIndex(rel, idA);
-    if (idx < 0 || rel.aliveMarker[idx] == -1)
+    int idx = FindPersonIndex(idA);
+    if (idx < 0 || PersonMarker(idx) == -1)
         return 1;
 
     // --- mode 3: scale matrix-B column `idx` by the float, where the row
-    //     person's id differs from this person's slot id --------------------
+    //     person's id differs from this person's +0x20C slot id ------------
     if (mode == 3) {
         float scale;
         std::memcpy(&scale, &pkt.bytes[32], sizeof(scale));
-        i32 mySlot = rel.slotId[idx];
+        i32 mySlot = PersonSlotId(idx);
         for (int k = 0; k < kRelPersons; ++k) {
-            if (rel.personId[k] != mySlot) {
+            if (g_persons[k].id != mySlot) {
                 double scaled = static_cast<double>(rel.B(k, idx)) * static_cast<double>(scale);
                 rel.B(k, idx) = static_cast<i8>(TruncToInt(scaled));
             }
@@ -303,8 +334,8 @@ int ExComputeObjectCoords(CommandPacket& pkt, AckEntry* ack) {
     }
 
     // --- modes 0/1/2: resolve the row person (id B == +16) ----------------
-    int idx2 = FindPersonIndex(rel, idB);
-    if (idx2 < 0 || rel.aliveMarker[idx2] == -1)
+    int idx2 = FindPersonIndex(idB);
+    if (idx2 < 0 || PersonMarker(idx2) == -1)
         return 1;
 
     switch (mode) {
@@ -312,6 +343,7 @@ int ExComputeObjectCoords(CommandPacket& pkt, AckEntry* ack) {
             rel.B(idx2, idx) = 0;
             int v = delta + rel.A(idx2, idx);
             rel.A(idx2, idx) = ClampRel(v);
+            g_log.relationMutateCount++;
             break;
         }
         case 1: {
@@ -321,16 +353,21 @@ int ExComputeObjectCoords(CommandPacket& pkt, AckEntry* ack) {
             int half = (delta < 0) ? a : (a / 2);
             int w = half + rel.B(idx2, idx);
             rel.B(idx2, idx) = ClampRel(w);
+            g_log.relationMutateCount++;
             break;
         }
-        case 0:
-        default: {
+        case 0: {
             int v = delta + rel.A(idx2, idx);
             rel.A(idx2, idx) = ClampRel(v);
+            g_log.relationMutateCount++;
             break;
         }
+        default:
+            // 0x498640 `test ebp,ebp; jnz loc_49856C` — any mode other than
+            // 0/1/2 (3 and 4 were handled above) falls straight through to the
+            // ACK stamp WITHOUT touching either grid.
+            break;
     }
-    g_log.relationMutateCount++;
     AckStatus(ack, 1);
     return 0;
 }

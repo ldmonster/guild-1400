@@ -50,7 +50,8 @@ inline constexpr int kFlagNetwork = 0x4;   // word_63C740 & 4  -> network game
 inline constexpr int kFlagMission = 0x80;  // word_63C740 & 0x80 -> mission (no load/save)
 
 // gilde.exe 0x56dccc — whether the Load/Save buttons are enabled given the session
-// flags (disabled in mission mode 0x80; Save disabled in non-host network states).
+// flags.  Network (0x4): Load is disabled unconditionally, Save is disabled unless the
+// host bit 0x10 is set.  Mission (0x80): both Load and Save are disabled.
 bool Menu_OptionEnabled(OptionsItem item, int sessionFlags);
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ char UpdateGravity(Emitter&, u32);
 bool UpdateCosineWave(Emitter&, u32);
 bool UpdateFadeOut(Emitter&, u32);
 bool UpdateScatter(Emitter&, u32);
+char SeedParticles(Emitter&, u32);   // 0x42bec0 — SpawnRefLens' real integrator
 int  TruncToward(double);   // VIBE_Coord_ConvertX (0x5c6b08), particle.cpp
 } // namespace guild::render
 
@@ -54,30 +55,33 @@ const RenderLeaves5Hooks& CurrentRenderLeaves5Hooks() { return g_hooks; }
 
 // ===========================================================================
 // 0x42be58 — VIBE_Particle_InitColors
-//   sys[0]=baseW0; sys[1]=baseW1; sys[2]=baseW2; for (i=0; i+1<count; ++i) {
+//   sys[0]=baseW0; sys[1]=baseW1; sys[2]=baseW2;
+//   if (count > 0) do {   // do-while: entry guard `count > 0` (jle @0x42be80)
 //     slot.flags &= ~1;
 //     slot+0x4E = (rand & 0x3F) - 66;   slot+0x4D = (rand & 0x3F) + 100;
-//     result = slot+0x4C = (rand & 0x3F) + 50; }
-// The loop guard is `v15 + 1 < count` — i.e. it seeds count-1 slots (verbatim).
-// We do not write the three sys header dwords here (the original wrote them into
-// the raw block at sys+0/4/8); SpawnRefLens has no header overlay so we accept
-// the three base words as parameters and apply only the per-slot seeding, which
-// is the deterministic part the colour tests pin. (sys header front is engine
-// bookkeeping in the reconstructed layout.)
+//     result = slot+0x4C = (rand & 0x3F) + 50;
+//   } while (++i < count);   // continue guard `ecx < count` (jl @0x42beb6)
+// HARDEN: the original seeds ALL `count` slots (0..count-1). The post-increment
+// compare `ecx < count` runs the body exactly `count` times — NOT count-1. The
+// prior code/comment ("v15+1 < count", "seeds count-1") was wrong: there is no
+// `+1` in the disasm; ecx starts at 0 (xor) and is compared after `inc ecx`.
+// The three base words ARE written unconditionally (`*a1=a2; a1[1]=a3; a1[2]=a4`
+// @0x42be66/72/7b). The reconstructed ParticleSystem does not preserve those raw
+// sys+0/4/8 offsets, so they are accepted as params and dropped (engine
+// bookkeeping); the deterministic per-slot seeding is reproduced exactly.
 // ===========================================================================
-u8 InitColors(void* sysVoid, i32 /*baseW0*/, i32 /*baseW1*/, i32 /*baseW2*/, i32 slotCount) {
+u8 InitColors(void* sysVoid, i32 /*baseW0*/, i32 /*baseW1*/, i32 baseW2, i32 slotCount) {
     ParticleSystem* sys = static_cast<ParticleSystem*>(sysVoid);
     Particle* parts = static_cast<Particle*>(sys->particles);
-    u8 result = 0;
-    int i = 0;
-    while (i + 1 < slotCount) {       // 0x42beb6: v15+1 < count
+    // result = a4 (baseW2 low byte) @0x42be75 — the al residue if count <= 0.
+    u8 result = static_cast<u8>(baseW2);
+    for (int i = 0; i < slotCount; ++i) {   // 0x42be80 entry / 0x42beb6 continue
         u8* s = SB(&parts[i]);
         s[0x51] &= ~1u;               // 0x42be82
         s[0x4E] = static_cast<u8>((crt::RandNext() & 0x3F) - 66);   // 0x42be8f
         s[0x4D] = static_cast<u8>((crt::RandNext() & 0x3F) + 100);  // 0x42be9b
         result  = static_cast<u8>((crt::RandNext() & 0x3F) + 50);   // 0x42bea5
         s[0x4C] = result;             // 0x42bea7
-        ++i;
     }
     return result;
 }
@@ -138,8 +142,13 @@ ParticleSystem* SpawnBlood(int ownerA1, int hdr0, int hdr1, int hdr2, int hdr3,
                            int startActive, EffectHeader& hdr, int slotCount,
                            u32 now) {
     static const void* kUpdateGravity = reinterpret_cast<const void*>(&UpdateGravity);
-    ParticleSystem* sys = AllocSystem(ownerA1, reinterpret_cast<const u8*>("Blut"),
-                                      131199, 1.0f, ownerA1,
+    // HARDEN: AllocSystem(owner=200, "Blut", 131199, 1.0, userTag=a1, UpdateGravity)
+    // @0x42c75f — the original hardcodes owner=200 (eax) and passes a1 as userTag,
+    // NOT owner=a1. The prior code used ownerA1 for both, which diverges on the
+    // null-owner gate (AllocSystem returns null when owner==0; owner=200 never is)
+    // and on the stored sys->owner / sys->userTag values.
+    ParticleSystem* sys = AllocSystem(/*owner*/ 200, reinterpret_cast<const u8*>("Blut"),
+                                      131199, 1.0f, /*userTag*/ ownerA1,
                                       const_cast<void*>(kUpdateGravity), slotCount, now);
     if (!sys)
         return nullptr;
@@ -157,12 +166,16 @@ ParticleSystem* SpawnBlood(int ownerA1, int hdr0, int hdr1, int hdr2, int hdr3,
 // ===========================================================================
 // 0x42c8e0 — VIBE_Particle_SpawnExplosion
 // ===========================================================================
-ParticleSystem* SpawnExplosion(int ownerA1, int hdr0, float radius, int hdr2,
-                               float life, int hdr8, EffectHeader& hdr,
+ParticleSystem* SpawnExplosion(int ownerA1, int ownerA2, int hdr0, float radius,
+                               int hdr2, float life, int hdr8, EffectHeader& hdr,
                                int slotCount, u32 now) {
     static const void* kUpdateCosine = reinterpret_cast<const void*>(&UpdateCosineWave);
-    ParticleSystem* sys = AllocSystem(ownerA1, reinterpret_cast<const u8*>("Explosion"),
-                                      65791, life, ownerA1,
+    // HARDEN: AllocSystem(owner=a2(ebx), "Explosion", 65791, life=a6, userTag=a1(eax),
+    // UpdateCosineWave) @0x42c916. The original's owner is a2 (ebx) and userTag is
+    // a1 (eax) — NOT both a1. The real caller @0x486822 passes a1=0, a2=30.
+    ParticleSystem* sys = AllocSystem(/*owner*/ ownerA2,
+                                      reinterpret_cast<const u8*>("Explosion"),
+                                      65791, life, /*userTag*/ ownerA1,
                                       const_cast<void*>(kUpdateCosine), slotCount, now);
     if (!sys)
         return nullptr;
@@ -195,16 +208,27 @@ ParticleSystem* SpawnExplosion(int ownerA1, int hdr0, float radius, int hdr2,
         float oy = vy - b * kExpAxisDampZ;                // v28
         float oz = vz - c;                                // v32
 
-        // v19 = rand*norm*2pi (angle)
-        float angle = static_cast<float>(crt::RandNext()) * kExpRandNorm * kExpTwoPi; // 0x42ca37
-        // v20 = sin(i * (pi/2) * inv) * radius  -> slot+0x14
-        float yprof = std::sin(static_cast<double>(i) * kExpHalfPi * inv) * radius;   // 0x42ca51
-        Wf(s, 0x14, yprof);                               // v18[5]
-        // v21 = sqrt(radius^2 - yprof^2)
-        float ring = static_cast<float>(std::sqrt(static_cast<double>(radius) * radius
-                       - static_cast<double>(yprof) * Rf(s, 0x14)));     // 0x42ca60
-        Wf(s, 0x10, static_cast<float>(std::sin(angle)) * ring);         // v18[4] 0x42ca77
-        Wf(s, 0x18, static_cast<float>(std::cos(angle)) * ring);         // v18[6] 0x42ca7c
+        // v19 = (double)(int)RandNext() * flt_611AD0(2pi) * flt_611AC0(norm), all
+        // 80-bit on the x87 stack (fild;fmul 2pi;fmul norm @0x42ca2d..37), fed
+        // straight to fsin/fcos. Modelled in double; order is i*2pi*norm.
+        double angle = static_cast<double>(crt::RandNext()) * kExpTwoPi * kExpRandNorm; // 0x42ca37
+        // v20 = sin(i * (pi/2) * inv) * radius  -> slot+0x14  (radius == sys+4 == a4)
+        float yprof = static_cast<float>(
+            std::sin(static_cast<double>(i) * kExpHalfPi * inv) * radius);            // 0x42ca51
+        Wf(s, 0x14, yprof);                               // fst -> slot+0x14 (v18[5])
+        // HARDEN: the sqrt's first term is (float)sys[0] == hdr0 REINTERPRETED as a
+        // float (fld dword ptr [esi] @0x42ca5a), NOT radius. The prior code used
+        // radius*radius which diverges whenever hdr0's float bits != radius (the
+        // real caller @0x486822 passes hdr0=119.0f bits with radius=80.0f). The
+        // 80-bit x87 chain (fsubrp/fsqrt @0x42ca5e/60, sin*ring @0x42ca75) is
+        // modelled in double; the stored yprof (float) is re-read for the square
+        // (fmul dword ptr [ecx+14h] @0x42ca57).
+        float hdr0f;
+        std::memcpy(&hdr0f, &hdr0, 4);                    // (float)sys[0]
+        double ring = std::sqrt(static_cast<double>(hdr0f) * hdr0f
+                       - static_cast<double>(yprof) * Rf(s, 0x14));      // 0x42ca60
+        Wf(s, 0x10, static_cast<float>(std::sin(angle) * ring)); // v18[4] 0x42ca77
+        Wf(s, 0x18, static_cast<float>(std::cos(angle) * ring)); // v18[6] 0x42ca7c
         Wf(s, 0x10, Rf(s, 0x10) + ox);                    // 0x42ca86
         Wf(s, 0x14, Rf(s, 0x14) + oy);                    // 0x42ca90
         Wf(s, 0x18, Rf(s, 0x18) + oz);                    // 0x42ca9a
@@ -301,8 +325,11 @@ ParticleSystem* SpawnDebris(int ownerA1, const float posRec[3], int texSlotA3,
                             int h5, int h6, int h9, EffectHeader& hdr,
                             int slotCount, u32 now) {
     static const void* kUpdateScatter = reinterpret_cast<const void*>(&UpdateScatter);
+    // HARDEN: the texture name is "Erdbrocken_an0" (aErdbrockenAn0 @0x611b34), not
+    // "Erdbrocken anim" — the prior string was wrong. AllocSystem(owner=a3(texSlot),
+    // name, 131199, life=a4, userTag=a1, UpdateScatter) @0x42d1ba.
     ParticleSystem* sys = AllocSystem(texSlotA3,
-                                      reinterpret_cast<const u8*>("Erdbrocken anim"),
+                                      reinterpret_cast<const u8*>("Erdbrocken_an0"),
                                       131199, life, ownerA1,
                                       const_cast<void*>(kUpdateScatter), slotCount, now);
     if (!sys)
@@ -323,11 +350,15 @@ ParticleSystem* SpawnRefLens(int ownerA1, int tagA2, int texSlotA3,
                              int slotCount, u32 now) {
     hdr.i(4) = tagA2;                                     // v8[1] = a2 (0x42c3ad)
     hdr.i(0) = 131199;                                    // v8[0] = 131199 (0x42c3b7)
-    static const void* kUpdateScatter = reinterpret_cast<const void*>(&UpdateScatter);
+    // HARDEN: the stored integrator is VIBE_Particle_SeedParticles (0x42bec0), NOT
+    // UpdateScatter — the original passes (int)VIBE_Particle_SeedParticles as the
+    // updateFn @0x42c3df. AllocSystem(owner=a3(texSlot), "Ref-Map-Linse", 131199,
+    // 7.0, userTag=a1, SeedParticles).
+    static const void* kSeedParticles = reinterpret_cast<const void*>(&SeedParticles);
     ParticleSystem* sys = AllocSystem(texSlotA3,
                                       reinterpret_cast<const u8*>("Ref-Map-Linse"),
                                       131199, 7.0f, ownerA1,
-                                      const_cast<void*>(kUpdateScatter), slotCount, now);
+                                      const_cast<void*>(kSeedParticles), slotCount, now);
     if (!sys)
         return nullptr;
     // InitColors(sys, v8(=&{131199,tagA2}), lensTag, 1063675494, 1082130432,
@@ -371,8 +402,10 @@ ParticleSystem* SpawnSmokeEffect(void* owner, int tagA2, float meshTurnRate,
 // ===========================================================================
 ParticleSystem* SpawnBloodEffect(const int* ownerHolder, u32 now) {
     static const void* kUpdateRain = reinterpret_cast<const void*>(&UpdateRainStep);
+    // HARDEN: the texture name is "blut" (lowercase, aBlut @0x6175e0), NOT "Blut".
+    // AllocSystem(owner=100, "blut", 196735, 1.0, userTag=*a1, UpdateRainStep).
     ParticleSystem* sys = AllocSystem(/*owner*/ 100,
-                                      reinterpret_cast<const u8*>("Blut"),
+                                      reinterpret_cast<const u8*>("blut"),
                                       196735, 1.0f, *ownerHolder,
                                       const_cast<void*>(kUpdateRain), /*slotCount*/ 100, now);
     if (!sys)
@@ -422,13 +455,16 @@ u8 UpdateRainStep(void* sysVoid, u32 now) {
     u8 last = 0;
     for (int i = 0; i < count; ++i) {                     // 0x43f86e..0x43f96c
         u8* s = SB(&parts[i]);
-        float dt = static_cast<float>(static_cast<double>(
-                     static_cast<u32>(now - Rd<u32>(s, 0x30))) * kRainDtScale); // v4
+        // HARDEN: v4 (dt) stays on the x87 stack as 80-bit (fild;fmul @0x43f888),
+        // never rounded to float — it is reused at full precision for both v4*2.0
+        // (0x43f8bc) and slot+4 - v4 (0x43f8d0). Keep dt as double.
+        double dt = static_cast<double>(
+                     static_cast<u32>(now - Rd<u32>(s, 0x30))) * kRainDtScale; // v4
         Wf(s, 0x38, Rf(s, 0x10) + Rf(s, 0x00));           // 0x43f898
         Wf(s, 0x3C, Rf(s, 0x14) + Rf(s, 0x04));           // 0x43f8a7
         Wf(s, 0x40, Rf(s, 0x18) + Rf(s, 0x08));           // 0x43f8b6
-        Wf(s, 0x48, static_cast<float>(dt * kRainGravity) + Rf(s, 0x48)); // 0x43f8c9
-        Wf(s, 0x04, Rf(s, 0x04) - dt);                    // 0x43f8d4
+        Wf(s, 0x48, static_cast<float>(dt * kRainGravity + Rf(s, 0x48)));  // 0x43f8c9
+        Wf(s, 0x04, static_cast<float>(Rf(s, 0x04) - dt));// 0x43f8d4
 
         if (Rf(s, 0x3C) < 0.0f) {                         // 0x43f8e7
             Wr<i32>(s, 0x38, 0);                          // slot+56 = 0

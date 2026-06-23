@@ -2,11 +2,17 @@
 
 #include "gui/object.h"   // g_widgets, Widget_AllocSlot
 #include "gui/window.h"   // g_currentWindowId (dword_62D230)
+#include "util/coord.h"   // util::ConvertX (VIBE_Coord_ConvertX @0x5c6b08, TRUNCATE)
 
 #include <cstdint>
 #include <cstring>
 
 namespace guild::gui {
+
+// gilde.exe 0x552d34 — VIBE_Panel_RunBuildingRoundEnd lives in gui_dialogs6.cpp.
+// RunBuildingList (0x552fc4) dispatches into it on a building-row hover; forward-declare
+// to wire the real sibling (Rule 13) without a header cycle.
+int Panel_RunBuildingRoundEnd(char* a1, unsigned short city);
 
 // ===========================================================================
 // Module-owned engine tables (BSS, zero at load).
@@ -19,8 +25,16 @@ i32 g_buildingRowCount;
 i32 g_playerStatsTab;
 i32 g_forceQuitLatch;
 
+// gilde.exe flt_624DF8 — ChooseProfession wealth->display scale.
+// get_bytes(0x624DF8,4) = 8F C2 75 3C == 0.015f.  The original multiplies the
+// integer wealth by this float (promoted to double on x87) before ConvertX.
+inline constexpr float kWealthDisplayScale = 0.015f;
+
 // Widget pool element by slot, addressed as the original "dword_69FFB4 + 740*idx".
-namespace { inline Widget& W(int slot) { return g_widgets[slot]; } }
+namespace { inline Widget& W(int slot) { return g_widgets[slot]; }
+// Unaligned by-value dword load — byte-identical to the original's unaligned x86 read.
+inline int      LdI32(const void* p) { int v;      std::memcpy(&v, p, sizeof(v)); return v; }
+inline unsigned LdU32(const void* p) { unsigned v; std::memcpy(&v, p, sizeof(v)); return v; } }
 
 // ===========================================================================
 // Hooks (inert defaults). Defaults make every builder observable without the
@@ -230,15 +244,22 @@ int* Panel_BuildLawSeals(int* lawRow) {
     if (lawRow[0] == -1) return result;
 
     // VIBE_Gesetz_GetRecord(HIBYTE(*(lawRow+14)), &scratch) -> seal flag/count.
-    unsigned char hi = static_cast<unsigned char>(
-        (*reinterpret_cast<unsigned*>(reinterpret_cast<char*>(lawRow) + 14) >> 24) & 0xFF);
-    char v5[12];
+    // +14 is an unaligned dword on the law record; the original does an unaligned x86
+    // load. Read by memcpy (byte-identical) to avoid the misaligned-access UB.
+    unsigned lawRow14;
+    std::memcpy(&lawRow14, reinterpret_cast<char*>(lawRow) + 14, sizeof(lawRow14));
+    unsigned char hi = static_cast<unsigned char>((lawRow14 >> 24) & 0xFF);
+    // Scratch for the Gesetz record VIBE_Gesetz_GetRecord fills. The original
+    // (@0x4c244c) qmemcpy's exactly 0x24=36 bytes into the buffer. The caller stack
+    // reads v6=var_30 at buffer+0xC and v7=var_24 at buffer+0x18 (disasm @0x55292f /
+    // @0x552936). Size the buffer to span the full 36-byte record.
+    char v5[36];
     std::memset(v5, 0, sizeof(v5));
     int rec = g_hooks->gesetzGetRecord(hi, v5);
-    // v6 (count) and v7 (flag) live in the returned record at the +0x18/+0xC slots
-    // the original reads as v6/v7; model from v5 scratch (zero by default).
-    int v7 = *reinterpret_cast<int*>(v5 + 0);   // v7 (flag)
-    int v6 = *reinterpret_cast<int*>(v5 + 12);  // v6 (count)
+    // v6 (count) at +0xC, v7 (flag) at +0x18 — exactly the stack offsets the original
+    // reads (cmp [esp+var_24] then [esp+var_30]); model from v5 scratch.
+    int v7; std::memcpy(&v7, v5 + 0x18, sizeof(v7));  // v7 (flag)  = var_24
+    int v6; std::memcpy(&v6, v5 + 0x0C, sizeof(v6));  // v6 (count) = var_30
 
     if (rec) {
         if (v7) {
@@ -253,9 +274,9 @@ int* Panel_BuildLawSeals(int* lawRow) {
 
     if (*reinterpret_cast<signed char*>(reinterpret_cast<char*>(v1) + 16) <= 4) {
         g_hooks->formSelectWindow(v1[0], v1[2]);
-        RichStr(0u /*"$C$Z%s"*/, (*reinterpret_cast<int*>(reinterpret_cast<char*>(v1) + 13) >> 24) + 4810);
+        RichStr(0u /*"$C$Z%s"*/, (LdI32(reinterpret_cast<char*>(v1) + 13) >> 24) + 4810);
         g_hooks->formSelectWindow(v1[0], v1[3]);
-        int curByte = (*reinterpret_cast<unsigned*>(reinterpret_cast<char*>(v1) + 13) >> 24) & 0xFF;
+        int curByte = (LdU32(reinterpret_cast<char*>(v1) + 13) >> 24) & 0xFF;
         return reinterpret_cast<int*>(static_cast<std::intptr_t>(
             g_hooks->hudBuildScaledTiledBar(0, 6, curByte, nullptr, 1162)));
     }
@@ -285,10 +306,12 @@ int Panel_BuildBuildingList(unsigned short /*city*/) {
 // 0x5517b4 — VIBE_Panel_BuildMoneyInfo.
 // ===========================================================================
 int Panel_BuildMoneyInfo(unsigned short city) {
-    // clear the per-row scratch: 16 rows of 7 i32; col[0..5]=-1 markers, col[6]=0.
+    // gilde.exe @0x5517df: for(i=0; i!=112; i+=7){ dword_1231EA4[i]=-1; dword_1231EB0[i]=0; }
+    // dword_1231EB0 == base(dword_1231EA4) + 0xC == +3 dwords, so the cleared cols are [i+0]
+    // and [i+3] (NOT [i+6]).
     for (int i = 0; i != 112; i += 7) {
         g_moneyInfoRows[i + 0] = -1; // dword_1231EA4[i]
-        g_moneyInfoRows[i + 6] = 0;  // dword_1231EB0 (+12 bytes from EA4 => +3 i32? keep verbatim slot)
+        g_moneyInfoRows[i + 3] = 0;  // dword_1231EB0[i] (EA4+0xC = +3 dwords)
     }
     int v3 = g_hooks->gameTickFinalize(0, 0, "Panel\\geld_info_2");
     int v30 = v3;
@@ -302,7 +325,8 @@ int Panel_BuildMoneyInfo(unsigned short city) {
     g_hooks->formSelectWindow(v3, 5);
     RichStr(0x1B1Bu);
     g_hooks->formSelectWindow(v3, 1);
-    g_hooks->tradePopulateItemSlots(0, &g_moneyInfoRows[6 /*dword_1231EC0 region*/], 1, v3, 0);
+    // dword_1231EC0 == base + 0x1C == +7 dwords.
+    g_hooks->tradePopulateItemSlots(0, &g_moneyInfoRows[7 /*dword_1231EC0*/], 1, v3, 0);
 
     i32 v24[9];
     std::memset(v24, 0, sizeof(v24));
@@ -372,23 +396,29 @@ int Panel_BuildMasterList(unsigned short city) {
     const short* begin = static_cast<const short*>(g_hooks->personQueryBegin(3072, 1, 4, city));
     if (begin) {
         int v9 = 0;        // 6*row index into g_masterRows
-        int y = 8;
         do {
             const short* active = g_hooks->personFindActiveByEntity(begin);
             if (active && active[0] != static_cast<short>(city)) {
+                // gilde.exe @0x551ffd/0x552018: y coords are 62*v19-based.
+                //   v23 = 62*v19 + 8  (name label y),  v22 = 62*v19 + 20  (tax label y),
+                //   v21 = 62*v19 + 20 (input field y).
+                i16 yName  = static_cast<i16>(62 * v19 + 8);
+                i16 yTax   = static_cast<i16>(62 * v19 + 20);
+                i16 yField = static_cast<i16>(62 * v19 + 20);
                 g_hooks->formSelectWindow(v20, 2);
                 g_masterRows[v9 + 0] = g_hooks->objectAddToWindow(g_currentWindowId, 62 * v19);
                 char buf[256];
                 g_hooks->textRenderFormattedMessage(buf, "%s~ %s", 0, 0, 0);
-                int label = g_hooks->objectAddTextLabel(64, static_cast<i16>(y + 12),
-                                                        g_currentWindowId, buf);
+                int label = g_hooks->objectAddTextLabel(64, yName, g_currentWindowId, buf);
                 g_masterRows[v9 + 5] = label;
+                // gilde.exe @0x5520eb: *(word*)(widget[label] + 20) = 160.
+                if (label >= 0 && label < kMaxWidgets) W(label).at<i16>(20) = 160;
                 g_hooks->objectSetColor(label, 67);
                 char taxbuf[256];
                 g_hooks->textRenderFormattedMessage(taxbuf, "%T", 0, 0, 0);
-                g_masterRows[v9 + 4] = g_hooks->objectAddTextLabel(384, static_cast<i16>(y + 12),
+                g_masterRows[v9 + 4] = g_hooks->objectAddTextLabel(384, yTax,
                                                                    g_currentWindowId, taxbuf);
-                int field = g_hooks->inputAddFieldToWindow(234, static_cast<i16>(y), 64, 64, 0x82u,
+                int field = g_hooks->inputAddFieldToWindow(234, yField, 64, 64, 0x82u,
                                                            g_currentWindowId);
                 g_masterRows[v9 + 3] = field;
                 int disp = g_hooks->moneyConvertToDisplayCoord(0, 0);
@@ -397,7 +427,6 @@ int Panel_BuildMasterList(unsigned short city) {
                 g_masterRows[v9 + 6 + 0] = data; // dword_12312B8 row+1 slot
                 ++v19;
                 v9 += 6;
-                y += 62;
             }
             begin = static_cast<const short*>(g_hooks->personIterNext());
         } while (begin);
@@ -413,26 +442,34 @@ int Panel_BuildMasterList(unsigned short city) {
 // then spins the per-frame loop until it exits.
 // ===========================================================================
 int Panel_RunBuildingDetail(char* a1, unsigned short city) {
+    // v2 = 589*(*a1) + dword_13CE294 (building-type record; type table out of tree —
+    // modeled by a1, which holds the same +0/+547 byte semantics in the recon).
+    char* v2 = a1;
     int v3 = g_hooks->gameTickFinalize(60, 0, "panel\\player_stats_geb_detail");
     g_hooks->formCenterChildWindows(v3);
     g_hooks->formSelectWindow(v3, 0);
-    RichStr(0u /*"$[%1G$]"*/);
+    RichStr(0u /*"$[%1G$]"*/, static_cast<int>(reinterpret_cast<std::intptr_t>(a1)));
     g_hooks->formSelectWindow(v3, 0);
     g_hooks->buildingMapTypeToCategory(a1 ? a1[0] : 0);
 
-    int worth[16];
+    // ComputeProductionWorth writes a contiguous dword array a2 (=worth). The original's
+    // stack-aliased locals map to these a2[] indices (disasm @0x551c.. ebp offsets vs
+    // output base &v13+4):  v14=a2[1] v15=a2[2] v16=a2[4] v17=a2[5] v18=a2[6] v19=a2[8]
+    //   v20=a2[12] v21=a2[13] v22=a2[14] v23=a2[15] v24=a2[18] v25=a2[19] v26=a2[20]
+    //   HIDWORD(v13)=a2[0].  ComputeProductionWorth (@0x58fe68) writes up to a2[20].
+    int worth[24];
     std::memset(worth, 0, sizeof(worth));
     g_hooks->buildingValueComputeWorth(a1, city, worth);
-    int v14 = worth[0],  v15 = worth[1],  v16 = worth[2],  v17 = worth[3],  v18 = worth[4];
-    int v19 = worth[5],  v20 = worth[6],  v21 = worth[7],  v22 = worth[8],  v23 = worth[9];
-    int v24 = worth[10], v25 = worth[11], v26 = worth[12]; int hi13 = worth[13];
+    int v14 = worth[1],  v15 = worth[2],  v16 = worth[4],  v17 = worth[5],  v18 = worth[6];
+    int v19 = worth[8],  v20 = worth[12], v21 = worth[13], v22 = worth[14], v23 = worth[15];
+    int v24 = worth[18], v25 = worth[19], v26 = worth[20]; int v13hi = worth[0];
 
     int upg = g_hooks->buildingGetUpgradeLevel(reinterpret_cast<std::intptr_t>(a1));
     RichStr(0xA0u, upg);
-    if (hi13) RichStr(0xA1u, hi13);
+    if (v13hi) RichStr(0xA1u, v13hi);
     if (v15) RichStr(0xA2u, v15);
     if (v18) {
-        int catBase = a1 ? (static_cast<unsigned char>(a1[547]) + 294) : 294;
+        int catBase = v2 ? (static_cast<unsigned char>(v2[547]) + 294) : 294;
         RichStr(0xA3u, catBase, v18);
     }
     if (v17 + v16) RichStr(0xA4u, v17 + v16);
@@ -443,7 +480,7 @@ int Panel_RunBuildingDetail(char* a1, unsigned short city) {
     if (v22) RichStr(0xA9u, v22);
     if (v25) RichStr(0xAAu, v25);
     if (v24) {
-        char t = a1 ? a1[0] : 0;
+        char t = v2 ? v2[0] : 0;
         if (t == 4 || t == 16 || t == 19) RichStr(0xB0u, v24);
         else                              RichStr(0xABu, v24);
     }
@@ -451,7 +488,11 @@ int Panel_RunBuildingDetail(char* a1, unsigned short city) {
     if (v26 > 0)      RichStr(0xADu, v26);
     else if (v26 < 0) RichStr(0xAEu, v26 + v24);
 
-    while (g_hooks->gameLogicRunFrameLoop(423879, 0, reinterpret_cast<const void*>(&Panel_RunBuildingDetail))) {
+    // gilde.exe @0x551e0e: RunFrameLoop(423879, (int)VIBE_Panel_RunBuildingDetail, v10)
+    // where v10 == v26 (a2[20]).
+    while (g_hooks->gameLogicRunFrameLoop(423879,
+               static_cast<int>(reinterpret_cast<std::intptr_t>(&Panel_RunBuildingDetail)),
+               reinterpret_cast<const void*>(static_cast<std::intptr_t>(v26)))) {
         if (g_hooks->readMouseRelease()) g_forceQuitLatch = 1;
     }
     return g_hooks->formDestroy(v3);
@@ -463,6 +504,8 @@ int Panel_RunBuildingDetail(char* a1, unsigned short city) {
 int Panel_RunBuildingList(unsigned short /*city*/) {
     i32 priceIds[128];
     std::memset(priceIds, 0, sizeof(priceIds));
+    // v1 = &word_12CE910[268 * word_63CC5C] (city price table) -> arg to BuildBuildingPriceRows;
+    // table out of tree, modeled nullptr.
     int v2 = g_hooks->gameTickFinalize(0, 0, "panel\\geb_liste");
     g_hooks->formCenterChildWindows(v2);
     g_hooks->formSelectWindow(v2, 0);
@@ -477,20 +520,26 @@ int Panel_RunBuildingList(unsigned short /*city*/) {
                                  &g_sliderScratch[2], &g_sliderScratch[1], &g_sliderScratch[0]);
     g_hooks->readLastClickedId(); // dword_75BF38 = -1 in the original; reads owned global
 
+    int v12 = g_currentWindowId; // v12 = dword_62D230 init; reset to 4*v8 in the hover branch
     do {
         if (g_hooks->readMouseRelease()) {
             g_forceQuitLatch = 1;
         } else if (g_hooks->readLastClickedId() != -1 && v8 > 0) {
-            int hover = g_hooks->readHoverObject();
+            v12 = 4 * v8;
+            int hover = g_hooks->readHoverObject();   // dword_62D22C
             for (int i = 0; i < v8; ++i) {
                 if (hover == priceIds[i]) {
+                    // gilde.exe @0x5530f6: VIBE_Panel_RunBuildingRoundEnd(
+                    //   *(char**)(740*dword_62D22C + dword_69FFB4 + 736)) — widget[hover].+736
+                    //   data pointer. NOTE: the binary dispatches RoundEnd here, NOT Detail.
                     char* rec = reinterpret_cast<char*>(static_cast<std::intptr_t>(
                         g_hooks->objectGetDataPtr(hover)));
-                    Panel_RunBuildingDetail(rec, /*city*/0);
+                    Panel_RunBuildingRoundEnd(rec, /*city (word_63CC5C)*/0);
                 }
             }
         }
-    } while (g_hooks->gameLogicRunFrameLoop(415687, 0, reinterpret_cast<const void*>(&Panel_RunBuildingList)));
+    } while (g_hooks->gameLogicRunFrameLoop(415687, v12,
+                 reinterpret_cast<const void*>(static_cast<std::intptr_t>(v2))));
     return g_hooks->formDestroy(v2);
 }
 
@@ -504,21 +553,34 @@ int Panel_RunApBuy(unsigned short /*city*/) {
     RichStr(0x1AD4u);
     g_hooks->formPopulateObjectList(v1, 0);
 
+    g_hooks->readLastClickedId(); // dword_75BF38 = -1 in the original (owned global)
+    int v3 = 0;                   // v3 = word_63CC5C | (HIWORD 0); init then loop arg
     do {
         if (g_hooks->readMouseRelease()) g_forceQuitLatch = 1;
         if (g_hooks->readLastClickedId() == 1210) {
-            int hover = g_hooks->readHoverObject();
+            int hover = g_hooks->readHoverObject();   // dword_62D22C
+            v3 = hover;                                // v3 = dword_62D22C
+            // scan the interleaved [id, recPtr] table (dword_1232080 / dword_1232084),
+            // stride 2 dwords; stop on first non-zero recPtr matching hover.
+            bool found = false;
             for (int v4 = 0; v4 < 512; v4 += 2) {
                 if (g_buildingRowIds[v4 + 1] && hover == g_buildingRowIds[v4]) {
+                    // gilde.exe @0x54da6e: *(dword*)(recPtr + 8) = GetDataPtr(id).
+                    // recPtr (dword_1232084[v4]) is out of tree -> the +8 write is a boundary.
                     g_hooks->objectGetDataPtr(g_buildingRowIds[v4]);
+                    found = true;
                     break;
                 }
             }
-            g_hooks->formSelectWindow(v1, 0);
-            RichStr(0u /*"$C"*/);
-            g_hooks->formPopulateObjectList(v1, 0);
+            // The SelectWindow/$C/Populate only run when a row was matched (the original's
+            // "goto LABEL_9" skips them otherwise).
+            if (found) {
+                g_hooks->formSelectWindow(v1, 0);
+                RichStr(0u /*"$C"*/);
+                g_hooks->formPopulateObjectList(v1, 0);
+            }
         }
-    } while (g_hooks->gameLogicRunFrameLoop(415687, 0, nullptr));
+    } while (g_hooks->gameLogicRunFrameLoop(415687, v3, nullptr));
     return g_hooks->formDestroy(v1);
 }
 
@@ -560,15 +622,21 @@ int Panel_RunUseObject(short* a1, unsigned short city) {
                 a2 = 0;
             }
         }
-    } while (g_hooks->gameLogicRunFrameLoop(423879, 0, nullptr));
+    // gilde.exe @0x54f4d4: RunFrameLoop(423879, v4 (form id), v5 (form ptr)).
+    } while (g_hooks->gameLogicRunFrameLoop(423879, v4,
+                 reinterpret_cast<const void*>(static_cast<std::intptr_t>(v4))));
 
     g_hooks->formDestroy(v4);
     if (!a2) return 0;
 
-    short args[8];
-    std::memset(args, 0, sizeof(args));
-    args[0] = a1 ? a1[0] : 0;
-    g_hooks->itemUseObjectAction(static_cast<int>(city), args);
+    // gilde.exe @0x54f611: v14 = { a1 (item ptr), -1, -1 }; v15 = v16 = 0.
+    // Item_UseObjectAction(&word_12CE910[268*city] (city record, out of tree), v14).
+    int v14[5];
+    std::memset(v14, 0, sizeof(v14));
+    v14[0] = static_cast<int>(reinterpret_cast<std::intptr_t>(a1));
+    v14[1] = -1;
+    v14[2] = -1;
+    g_hooks->itemUseObjectAction(static_cast<int>(city), v14);
     return 0;
 }
 
@@ -643,8 +711,13 @@ int Panel_RunChooseWappen(unsigned short city) {
 int Panel_ChooseProfession(unsigned short* a1, unsigned short* a2, short* a3) {
     int wealth = g_hooks->personComputeTotalWealth(a1 ? a1[0] : 0, a3);
     (void)a2;
+    // gilde.exe 0x566bd?: v4 = (double)wealth * flt_624DF8; ConvertX (TRUNCATE);
+    // v37 = (int)v4.  flt_624DF8 (get_bytes 0x624DF8,4 = 8F C2 75 3C) == 0.015f, so
+    // v37 = (int)trunc((double)wealth * 0.015f).  The coord call is the truncation,
+    // it is NOT inert here — the *0.015 scale is load-bearing.
     g_hooks->coordConvertX();
-    int v37 = wealth; // (double)wealth * flt -> coord; inert coord keeps it integral
+    int v37 = static_cast<int>(
+        util::ConvertX(static_cast<double>(wealth) * static_cast<double>(kWealthDisplayScale)));
     int v38 = g_hooks->gameTickFinalize(0, 0, "Menu\\chooseprof");
     g_hooks->formCenterChildWindows(v38);
     g_hooks->formSelectWindow(v38, 0);
@@ -683,12 +756,27 @@ int Panel_ChooseProfession(unsigned short* a1, unsigned short* a2, short* a3) {
                 }
             }
             if (hit) {
-                int blob[40];
+                // gilde.exe LABEL_11 @0x566d3f: a byte/dword-packed command blob.
+                // var_118(+0)=uninit; var_114(+4)=byte 94; var_110(+8)=a2[+4];
+                // var_10C(+0xC)=-1; var_E2(+0x36)=byte 18; var_C0(+0x58)=a1[+4];
+                // var_BC(+0x5C)=byte variant; var_B8(+0x60)=v37.
+                // ComputeVariantIndex arg = (char)(edx)+1, edx = dword_672230 + (eax-1350).
+                // In this wheel-up branch dword_672230 (mouse-release) is 0, so edx counts
+                // up from 0 as eax walks 1350..clicked => arg = (clicked-1350)+1.
+                char blob[160];
                 std::memset(blob, 0, sizeof(blob));
-                blob[1] = a2 ? *reinterpret_cast<int*>(reinterpret_cast<char*>(a2) + 4) : 0;
-                blob[2] = -1;
                 int variant = g_hooks->buildingTypeComputeVariantIndex((clicked - 1350) + 1, 1);
-                (void)variant;
+                blob[0x04] = static_cast<char>(94);                 // var_114
+                std::memcpy(blob + 0x08,                            // var_110 = a2[+4]
+                            a2 ? reinterpret_cast<char*>(a2) + 4 : reinterpret_cast<const char*>("\0\0\0\0"),
+                            4);
+                { int m1 = -1; std::memcpy(blob + 0x0C, &m1, 4); }  // var_10C = -1
+                blob[0x36] = static_cast<char>(18);                 // var_E2
+                std::memcpy(blob + 0x58,                            // var_C0 = a1[+4]
+                            a1 ? reinterpret_cast<char*>(a1) + 4 : reinterpret_cast<const char*>("\0\0\0\0"),
+                            4);
+                blob[0x5C] = static_cast<char>(variant);           // var_BC = variant byte
+                std::memcpy(blob + 0x60, &v37, 4);                 // var_B8 = v37
                 g_hooks->cmdQueueRequestSlotReset28(blob, 0);
                 g_forceQuitLatch = 1;
             }
@@ -749,7 +837,7 @@ unsigned char Panel_RunPlayerStats(unsigned short city) {
         }
         if (v6 != -1) {
             g_hooks->formSelectWindow(v6, 1);
-            g_hooks->tradePopulateItemSlots(0, &g_moneyInfoRows[6], 1, v6, 0);
+            g_hooks->tradePopulateItemSlots(0, &g_moneyInfoRows[7 /*dword_1231EC0*/], 1, v6, 0);
         }
         if (v31 != -1 && g_hooks->readLastClickedId() != -1 && g_buildingRowCount > 0) {
             int hover = g_hooks->readHoverObject();

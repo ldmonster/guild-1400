@@ -156,21 +156,27 @@ int ReceiveDriver::ExecReceivedCommands() {
         int dispatchGate = 1;                    // edx = 1
 
         // --- group framing (opcode 5 begin / 6 end) ---
+        // Disasm 0x4940f6..0x494176 (edx = dispatchGate):
+        //   edx starts at 1 every iteration (mov edx, 1 @0x4940eb).
         if (!groupStart && node->bytes[0] == kOpBegin) {
-            groupStart = node;                   // v3 = v2
-            // (falls through to the gate update below: group now open => edx = 0)
+            groupStart = node;                   // v3 = v2 (ebx = ecx) — open group
+            // falls to loc_494101: ebx != 0 => edx = 0 below.
         } else if (groupStart && node->bytes[0] == kOpEnd) {
-            ExecCommandGroup(groupStart);        // run the framed block (returns 1)
-            // ExecCommandGroup != 0 => edx keeps its current value (which is 0,
-            // set when the group was opened); the reprocessed begin frame is gated
-            // off. We model that by leaving dispatchGate = 0 here.
-            node = groupStart;                   // v2 = v3
+            // loc_494156: group open AND end-frame.
+            int r = ExecCommandGroup(groupStart);// eax = run the framed block
+            // @0x494166: if (eax != 0) skip `xor edx,edx`; else edx = 0.
+            // ExecCommandGroup ALWAYS returns 1, so edx KEEPS its value (1) here —
+            // the reprocessed begin frame (now opcode 1) IS dispatched.
+            if (r == 0)
+                dispatchGate = 0;
+            node = groupStart;                   // v2 = v3 (ecx = ebx)
             nextNode = NextOf(groupStart);       // v4 = *(v3+149)
-            groupStart = nullptr;                // v3 = 0 (ebx cleared)
-            dispatchGate = 0;                    // edx stays 0 for the begin frame
+            groupStart = nullptr;                // v3 = 0 (ebx cleared) — group closed
+            // ebx == 0 now, so the trailing guard leaves edx unchanged (== 1).
         }
-        // edx = (groupStart != 0) ? 0 : 1  — a frame is dispatched only when no
-        // group is currently open. (The group-close branch above forces it to 0.)
+        // loc_494101: edx = (ebx != 0) ? 0 : edx. A frame is dispatched only when no
+        // group is open — covers both the just-opened begin frame and inner frames.
+        // (The group-close branch leaves groupStart == 0 so edx stays 1 there.)
         if (groupStart)
             dispatchGate = 0;
 

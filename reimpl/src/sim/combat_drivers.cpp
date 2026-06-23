@@ -181,9 +181,14 @@ OrderSlotResult ComputeOrderSlot(const OrderSlotInput& in, double ratioScale) {
     if (in.active) {
         r.count = 1;
     }
-    // 0x4883f8: value = (int)(ComputeOutputRatio(unit) * dbl_61B264)  [float spill].
-    float spilled = static_cast<float>(in.outputRatio * ratioScale);
-    r.outputValue = static_cast<int>(spilled);
+    // 0x4883f8: value = (int)(ComputeOutputRatio(unit) * dbl_61B264).
+    // dbl_61B264 == 100.0 (double). The original multiplies in the x87 stack
+    // (ComputeOutputRatio(double) * 100.0(double)) and truncates via ConvertX
+    // (frndint with RC=truncate-toward-zero) — there is NO float store in between,
+    // so we must truncate the DOUBLE product directly (a float intermediate would
+    // wrongly re-round e.g. 6.9999999->7.0 and change the truncated int).
+    double value = in.outputRatio * ratioScale;
+    r.outputValue = static_cast<int>(value);             // ConvertX truncate
     return r;
 }
 
@@ -252,9 +257,11 @@ std::vector<PursuitAction> DrivePursuitTargets(const std::vector<PursuitUnit>& u
             out.push_back(PursuitAction::kSkip);
             continue;
         }
-        // 0x48c4f7: scaled = (int)(ComputeOutputRatio(unit) * dbl_61B8EC) [float].
-        float spilled = static_cast<float>(u.outputRatio * ratioScale);
-        int scaled = static_cast<int>(spilled);
+        // 0x48c4f7: scaled = (int)(ComputeOutputRatio(unit) * dbl_61B8EC).
+        // dbl_61B8EC == 100.0 (double); the original truncates the DOUBLE product
+        // via ConvertX (no float store) — truncate the double directly.
+        double scaledD = u.outputRatio * ratioScale;
+        int scaled = static_cast<int>(scaledD);          // ConvertX truncate
         // 0x48c51f: attack if scaled >= 20 OR RandomModulo(100) <= 30; else flee.
         bool attack;
         if (scaled >= 20) {

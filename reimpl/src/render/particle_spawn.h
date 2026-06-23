@@ -160,6 +160,18 @@ struct SpawnStats {
 SpawnStats& MutableSpawnStats();
 void ResetSpawnStats();
 
+// Wave-10 (W10-PARTICLE) leak-safety helpers for the DEFAULT in-process spawn
+// backend. The original engine routed AllocSystem's four allocations through the
+// engine heap (reclaimed at teardown); the headless default backend uses new[].
+// These let tests / DestroyAllSystems reclaim those blocks so ASAN/LSAN stays
+// clean. They are no-ops for blocks allocated by a custom backend.
+//   FreeAllSpawnAllocations  — free + forget every default-backend block; returns
+//                              the count freed.
+//   ReleaseSpawnAllocation   — free + deregister ONE block (e.g. a ParticleSystem*
+//                              or its particles ptr); returns true if it was owned.
+int  FreeAllSpawnAllocations();
+bool ReleaseSpawnAllocation(void* p);
+
 // ---------------------------------------------------------------------------
 // Validity / free boundary (KillParticle / KillEmitter). The originals call
 // VIBE_Memory_IsValidPointer @0x4391f0 and VIBE_Render_FreeObjectNode @0x5e0f30

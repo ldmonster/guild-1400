@@ -25,6 +25,10 @@ struct BigRec {
     BigRec() { std::memset(bytes, 0, sizeof(bytes)); }
     HeRecord* get() { return reinterpret_cast<HeRecord*>(bytes); }
     template <class T> T& at(int off) { return *reinterpret_cast<T*>(bytes + off); }
+    // Alignment-safe write for fields at non-naturally-aligned byte offsets
+    // (e.g. +39). Binding a T& reference there is UB (UBSAN); this stores the
+    // identical little-endian bytes without forming a misaligned reference.
+    template <class T> void poke(int off, T v) { std::memcpy(bytes + off, &v, sizeof(v)); }
 };
 
 GameTime Clock() { GameTime t{}; t.day = 10; t.hour = 8; t.minute = 30; t.second = 15; return t; }
@@ -173,9 +177,10 @@ TEST(CharActionV6, HandlerTableShape) {
     CHECK_EQ((int)kCharActionHandlerTable[14].type, 0x43);
     CHECK_EQ(kCharActionHandlerTable[14].initAddr, 0x4cdd38u);
     CHECK_EQ(kCharActionHandlerTable[14].stepAddr, 0x4cdf74u);
-    // Last entry: tutorial 0x87.
+    // Last entry: tutorial 0x87 (edx=init=0x4db8ac, ebx=step=0x4db8c8 @0x4dc04e..).
     CHECK_EQ((int)kCharActionHandlerTable[65].type, 0x87);
-    CHECK_EQ(kCharActionHandlerTable[65].initAddr, 0x4dab00u);
+    CHECK_EQ(kCharActionHandlerTable[65].initAddr, 0x4db8acu);
+    CHECK_EQ(kCharActionHandlerTable[65].stepAddr, 0x4db8c8u);
     // The registration order is NOT sorted by type: index 9 is 0x37, index 10 0x36.
     CHECK_EQ((int)kCharActionHandlerTable[9].type, 0x37);
     CHECK_EQ((int)kCharActionHandlerTable[10].type, 0x36);
@@ -237,7 +242,7 @@ TEST(CharActionV6, EinstellenState1NotDueReturnsCmp) {
 
 TEST(CharActionV6, EinstellenState1NoPurseFrees) {
     InstallAll();
-    BigRec self; self.at<u16>(0) = 3; self.at<u16>(39) = 5;
+    BigRec self; self.at<u16>(0) = 3; self.poke<u16>(39, 5);
     g6.personQueryRet = self.get();
     g6.wageRet = 1000; g6.currencyRet = 10;   // cannot afford
     BigRec r; r.at<i32>(112) = 1;
@@ -250,7 +255,7 @@ TEST(CharActionV6, EinstellenState1NoPurseFrees) {
 
 TEST(CharActionV6, EinstellenState1ArmsGuardTarget) {
     InstallAll();
-    BigRec self; self.at<u16>(0) = 3; self.at<u16>(39) = 5;
+    BigRec self; self.at<u16>(0) = 3; self.poke<u16>(39, 5);
     g6.personQueryRet = self.get();
     g6.wageRet = 5; g6.currencyRet = 1000;     // affordable
     g6.guard61Ret = 333;
@@ -336,7 +341,9 @@ TEST(CharActionV6, RunPruegelState0Payout) {
 // ===========================================================================
 TEST(CharActionV6, InitSpionageAlreadySpawnedNoOp) {
     InstallAll();
-    BigRec r; r.at<u8>(121) = 0x04;   // (flags & 0x400) set
+    // gilde.exe 0x4e2e68: `mov ah,[eax+78h]; test ah,4` — the gate reads the flag
+    // byte at +0x78 == +120 (He_Flags), bit 0x04, NOT byte +121.
+    BigRec r; r.at<u8>(120) = 0x04;   // He_Flags & 0x04 set -> already spawned
     r.at<i32>(132) = 999;
     i32 ret = InitSpionage(r.get());
     CHECK_EQ(ret, 999);
@@ -358,7 +365,10 @@ TEST(CharActionV6, RunSpionageTerminalStateBails) {
     InstallAll();
     BigRec r; r.at<i32>(112) = -2;     // 0xFFFFFFFE
     u32 ret = RunSpionage(r.get());
-    CHECK_EQ((int)ret, -2);
+    // gilde.exe 0x4e31ad: terminal (-1/-2) path ends with `mov eax,ebp; call
+    // VIBE_He_FreeHandlerEntry` and returns THAT result (eax), not the state.
+    // The leaf hook (RecFree) returns freeRet (7); no entity-29 request is armed.
+    CHECK_EQ((int)ret, 7);             // freeRet (FreeHandlerEntry result)
     CHECK_EQ(g_leaf.cmd29Calls, 0);
 }
 

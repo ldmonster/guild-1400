@@ -117,14 +117,15 @@ BuildingMenuLayout BuildingOptionsMenu_Build(const BuildingMenuState& s, int roo
         AddEntry(l, kMenuTextRequestQuad, BuildingMenuAction::kRequestQuad56);
     }
 
-    // Late SetEnabled gates: building[90] & 4 disables the sell/renovate/teardown/
-    // sell-preview group; building[90] & 0x40 disables the upgrade entry.
+    // Late SetEnabled gates (gilde.exe 0x54cd18): building[90] & 4 disables exactly four
+    // objects — SetEnabled(v92,0), SetEnabled(v91,0), SetEnabled(v81,0), SetEnabled(v94,0):
+    //   v92 = OpenUpgradeWindow (5055), v91 = Renovate (5048), v81 = TearDown (5049),
+    //   v94 = SellPreview (5047).  building[90] & 0x40 toggles the upgrade entry below.
     if ((s.flag90 & 4) != 0) {
-        for (BuildingMenuAction a : {BuildingMenuAction::kSellPreview,
-                                     BuildingMenuAction::kConfirmSell,
+        for (BuildingMenuAction a : {BuildingMenuAction::kOpenUpgradeWindow,
                                      BuildingMenuAction::kRenovate,
                                      BuildingMenuAction::kTearDown,
-                                     BuildingMenuAction::kSellLand}) {
+                                     BuildingMenuAction::kSellPreview}) {
             if (BuildingMenuEntry* e = FindByAction(l, a))
                 e->enabled = false;
         }

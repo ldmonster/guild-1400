@@ -99,6 +99,21 @@ bool RuleEvalSettingToggle(const RuleBuilding& b, const RuleEnv& env,
 bool RuleEvalToggleVariant(const RuleBuilding& b, const RuleEnv& env,
                            const RuleConfig& cfg, int* out);
 
+// gilde.exe 0x465ac8 — RuleEvalDemandToggle. This rule does NOT share the
+// SettingToggle shape: the disasm computes only TWO trends (base from setting61,
+// high from setting67 — NO mid/setting64) and its decision is the *inverse* of
+// SettingToggle's first branch:
+//   score = (eval_rating(b,4) - (rate_scalar(4)+1)*c0) * c1 * 0.8   (unconditional)
+//   base  = (b.setting61 + bias) * b.weight63
+//   high  = (b.setting67 + bias) * b.weight69
+//   law   = law_value(18)
+//   if score < 1.0 && law==0: if base > high -> *out=1, fire   (base > high!)
+//   else if score > 1.0 && law==1 && high > base -> *out=0, fire
+// (cfg.c0/c1/bias/goodColumn=4 from RuleConfigDemandToggle; group mul is the
+// unconditional 0.8 default.) Returns true + writes *out if the setting changes.
+bool RuleEvalDemandToggle(const RuleBuilding& b, const RuleEnv& env,
+                          const RuleConfig& cfg, int* out);
+
 // The recovered per-rule configs (the named tuning blocks). One accessor per rule.
 const RuleConfig& RuleConfigServiceLevel();      // 0x464ad4, law 3,  goodCol 4
 const RuleConfig& RuleConfigWageLevel();         // 0x464c00, law 4,  goodCol 3

@@ -48,6 +48,7 @@ static CurrencyAmountFn g_currencyHook = DefaultCurrency;
 
 void ResetInteractionLeafTrace() { g_leafTrace = {}; }
 void SetPrivilegeLeafHook(PrivilegeLeafFn fn) { g_privilegeHook = fn ? fn : DefaultPrivilege; }
+PrivilegeLeafFn GetPrivilegeLeafHook() { return g_privilegeHook; }
 void SetCommandEmitHook(CommandEmitFn fn) { g_commandHook = fn ? fn : DefaultCommandEmit; }
 void SetCurrencyHook(CurrencyAmountFn fn) { g_currencyHook = fn ? fn : DefaultCurrency; }
 

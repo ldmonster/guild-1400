@@ -144,23 +144,33 @@ u32 DrawGlyph(u8 ch, int x, int color, int y, const u8* glyphMap,
         + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(g.pitchBytes) * y);
 
     if (depth < 16)
-        return depth;
+        return depth;                                // jb loc_434DB9: eax == depth
 
-    if (depth <= 16) {                               // 16bpp path
+    if (depth <= 16) {                               // 16bpp path (loc_434DC3)
+        // The original's `result` (eax) is reset to 0 at the head of every row's
+        // column loop (xor eax,eax) and incremented 5 times (inc eax, cmp eax,5);
+        // it is NOT restored to depth on row exit, so on loop completion eax == 5.
+        u32 result = 0;
         for (int row = 0; row < 7; ++row) {
             u16* dst = reinterpret_cast<u16*>(rowAddr);
             unsigned mask = 16;                      // column 0 == leftmost
             u8 bits = glyph[row];
+            result = 0;
             for (int col = 0; col < 5; ++col) {
                 if ((mask & bits) != 0)
                     *dst = static_cast<u16>(color);
                 mask >>= 1;
+                ++result;
                 ++dst;
             }
             rowAddr += static_cast<std::uintptr_t>(
                 static_cast<std::intptr_t>(g.pitchBytes));
         }
-    } else if (depth == 32) {                        // 32bpp path
+        return result;                               // eax == 5 (matches 0x434d99..)
+    } else if (depth == 32) {                        // 32bpp path (loc_434D83)
+        // Here the original sets eax (result) = v14 = (glyph + 7) at the tail of
+        // every row (mov eax,[esp+var_18]); on loop completion eax holds that
+        // data-segment pointer, which is what the function returns.
         for (int row = 0; row < 7; ++row) {
             u32* dst = reinterpret_cast<u32*>(rowAddr);
             unsigned mask = 16;
@@ -174,8 +184,11 @@ u32 DrawGlyph(u8 ch, int x, int color, int y, const u8* glyphMap,
             rowAddr += static_cast<std::uintptr_t>(
                 static_cast<std::intptr_t>(g.pitchBytes));
         }
+        // v14 = v5 + 7 = glyph + 7 (the row block's end pointer), truncated to eax.
+        return static_cast<u32>(
+            reinterpret_cast<std::uintptr_t>(glyph + 7));
     }
-    return depth;
+    return depth;                                    // depth != 16 && != 32: eax == depth
 }
 
 // gilde.exe 0x434E18 — VIBE_Render_DrawText

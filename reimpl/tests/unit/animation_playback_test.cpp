@@ -235,3 +235,59 @@ TEST(AnimPlayback, SeekToFrameClampAndPhase) {
     SeekToFrame(&dummyObj, t, -1);
     CHECK_EQ(t.fromFrame, 3);
 }
+
+// ===========================================================================
+// W11-ANIM hardening — degenerate playback inputs (ASAN/UBSAN).
+// ===========================================================================
+
+// FindFirstActiveBone reads a1[87] (a 32-bit pointer slot at byte 348). The UBSAN
+// fix reads it as a 4-byte word; store ONLY 4 bytes there to prove there is no
+// 8-byte misaligned over-read (the previous code did `*(const void**)` here).
+TEST(AnimPlaybackEdge, FindFirstActiveBone_FourByteFramesSlot) {
+    std::uint8_t hdr[1024] = {};
+    std::uint32_t framesPtr = 0xABCD1234u;            // nonzero 32-bit slot only
+    std::memcpy(hdr + 87 * 4, &framesPtr, 4);
+    int count = 2; std::memcpy(hdr + 81 * 4, &count, 4);
+    std::strcpy(reinterpret_cast<char*>(hdr + 64 + 0 * 64), "root");
+    std::strcpy(reinterpret_cast<char*>(hdr + 64 + 1 * 64), "tip");
+    CHECK_EQ(FindFirstActiveBone(hdr, "root"), 0);
+    CHECK_EQ(FindFirstActiveBone(hdr, "tip"), 1);
+    CHECK_EQ(FindFirstActiveBone(hdr, "none"), -1);
+}
+
+// A zero frames-pointer slot (a1[87] == 0) -> -1 with no name scan (no OOB on the
+// name buffer even if the count says otherwise).
+TEST(AnimPlaybackEdge, FindFirstActiveBone_NullFramesSlot) {
+    std::uint8_t hdr[1024] = {};
+    std::uint32_t framesPtr = 0; std::memcpy(hdr + 87 * 4, &framesPtr, 4);
+    int count = 9999; std::memcpy(hdr + 81 * 4, &count, 4);   // bogus large count
+    CHECK_EQ(FindFirstActiveBone(hdr, "x"), -1);              // bailed before scan
+}
+
+// Zero bone count (a1[81] <= 0) -> -1 immediately; the name scan never runs.
+TEST(AnimPlaybackEdge, FindFirstActiveBone_ZeroCount) {
+    std::uint8_t hdr[1024] = {};
+    std::uint32_t framesPtr = 1; std::memcpy(hdr + 87 * 4, &framesPtr, 4);
+    int count = 0; std::memcpy(hdr + 81 * 4, &count, 4);
+    CHECK_EQ(FindFirstActiveBone(hdr, "x"), -1);
+}
+
+// SeekToFrame on a track with no header (hdr == nullptr) returns 0 without touching
+// any frame array.
+TEST(AnimPlaybackEdge, SeekToFrame_NoHeader) {
+    AnimTrack t;            // t.hdr defaults to nullptr
+    int obj = 0;
+    CHECK_EQ((int)SeekToFrame(&obj, t, 5), 0);
+}
+
+// SeekToFrame frame == frameCount (one past the last valid index) clamps to the
+// last frame; ASAN proves SegDur(frames, last) reads a valid keyframe.
+TEST(AnimPlaybackEdge, SeekToFrame_FramePastTrackClamps) {
+    Fixture f;
+    AnimTrack t = MakeTrack(f);
+    t.modeFlags = 0;
+    int obj = 0;
+    SeekToFrame(&obj, t, f.hdr.frameCount);     // == 4, one past last index 3
+    CHECK_EQ(t.fromFrame, 3);                   // clamped to last frame
+    CHECK_EQ(t.phaseAccum, 39);                 // dur(3)-1
+}

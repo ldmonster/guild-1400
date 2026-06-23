@@ -156,7 +156,9 @@ constexpr double kWorkRateMul    = 0.01;  // dbl_620100
 constexpr double kFavorBias      = -0.5;  // dbl_620108
 constexpr double kFavorScale     = 0.25;  // dbl_620110
 
-// Season index from a game day (VIBE_GameTime_GetSeasonFromDay 0x58339c == day % 4).
+// Season index from a game day (VIBE_GameTime_GetSeasonFromDay 0x58339c).
+// Disasm: `sar edx,1Fh; idiv ecx(=4); mov al,dl` -> signed remainder. C++ signed
+// `% 4` truncates toward zero, matching `idiv` exactly (verified wave-16, NOT `& 3`).
 inline int SeasonFromDay(i32 day) { return static_cast<int>(day % 4); }
 
 // ===========================================================================

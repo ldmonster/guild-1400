@@ -33,8 +33,10 @@ struct EventDesc {
     u8  value;     // +0x04  PickRandomByType return (byte_63CD4C[24*i]); subtype id
     u8  category;  // +0x05  category byte the accessors read as *(int*)(rec+2)>>24.
                    //         In the shipped static image this is 0xFF for the free
-                   //         sentinel (row 0) and 0,0,0,0,1,1,..,5 for the populated
-                   //         rows — the 0..5 book/category the picker/counter match.
+                   //         sentinel (row 0) and the 0..5 book grouping for the
+                   //         populated rows (4x0,8x1,8x2,8x3,12x4,7x5) — the value
+                   //         the picker/counter match. (The 0x17 that recurs at +9
+                   //         is paramA's low byte, not the category.)
     u8  pad6[2];   // +0x06  remainder of the +4 dword
     i32 paramA;    // +0x08  descriptor parameter A
     i32 paramB;    // +0x0C  descriptor parameter B

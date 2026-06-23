@@ -389,8 +389,12 @@ int PathBuildWaypointList(const MapGrid& g, int startX, int startY,
     if (!g.entries)
         return -1;
     const int size = g.size;
-    if (startX > size || goalX > size || startX < 0 || goalX < 0 ||
-        startY > size || goalY > size || startY < 0 || goalY < 0)
+    // gilde.exe 0x43bd9b: the binary bounds-checks ONLY the two args that arrive
+    // as a5/a6 (BuildWaypointList stack slots), which — through the swizzled
+    // register interleave into FindRoute — are goalX and goalY. startX/startY are
+    // NOT range-checked here (FindRoute consumes them unvalidated).
+    //   if ( a5 > v9 || a6 > v9 || a5 < 0 || a6 < 0 ) return 0xFFFF;
+    if (goalX > size || goalY > size || goalX < 0 || goalY < 0)
         return -1;
 
     int route = PathFindRoute(g, startX, startY, goalX, goalY, profile);

@@ -53,6 +53,8 @@ public:
     void sleepMs(std::uint32_t ms) override;
     void getMouse(MouseState& out) override;
     bool keyDown(int vkey) override;
+    std::string pollText() override;
+    void showSystemCursor(bool show) override;
 
     // --- Vulkan integration --------------------------------------------------
 
@@ -80,6 +82,8 @@ private:
     std::uint32_t start_ = 0;
     bool started_ = false;
     bool quit_ = false;
+    std::string textBuf_;   // accumulated SDL_TEXTINPUT since the last pollText()
+    int wheelAccum_ = 0;    // SDL_MOUSEWHEEL notches since the last getMouse()
 };
 
 } // namespace guild::shim

@@ -1,5 +1,7 @@
 #include "render/light.h"
 
+#include <cmath>
+
 // =============================================================================
 // guild::render lighting — implementation. See light.h for the overview and the
 // 768*idx shade-table reconciliation. All arithmetic mirrors the Hex-Rays
@@ -106,9 +108,72 @@ void BuildShadeRamp(u8* out, const u8 pal[256 * 3]) {
     }
 }
 
-// NOTE: VIBE_Light_InitFalloffTable (0x5c88f8) is DEFERRED — see light.h. Its
-// recurrence relies on the two-operand x87 acos (VIBE_Math_AcosGuarded), whose
-// st0/st1 stack semantics must be modelled to reproduce the LUT bit-for-bit.
+// ---------------------------------------------------------------------------
+// gilde.exe 0x5c88f8 — VIBE_Light_InitFalloffTable.
+//   for k in [0,1024): out[k] = 1.0 - acos(k * flt_628CB4) * flt_628CB8
+//   flt_628CB4 = 0x3A800000 = 1/1024 (the step); flt_628CB8 = 0x3F22F983 = 2/pi.
+//   == 1.0 - (2/pi) * acos(k/1024).  (Disasm: fld 2/pi; fld 1/1024; loop fild k;
+//   fmul (1/1024); acos; fmul (2/pi); fld1; fsubrp -> 1 - that.)
+// The consumer (VIBE_Light_ApplyToCachedVertices) indexes with
+// (int)(NdotL * flt_628C28) where flt_628C28 = -1023 and NdotL in [-1,0], so the
+// index is +|NdotL|*1023 and the LUT rises 0 (grazing) -> ~1 (facing) — a softened
+// Lambert. (Earlier this used a negated argument, which inverted the falloff.)
+// ---------------------------------------------------------------------------
+void BuildFalloffLUT(float out[1024]) {
+    const float kTwoOverPi = 0.63661975f;       // flt_628CB8
+    const float kStep      = 1.0f / 1024.0f;    // flt_628CB4 = 0x3A800000
+    for (int k = 0; k < 1024; ++k) {
+        float x = static_cast<float>(k) * kStep;    // k/1024 in [0, ~1)
+        if (x < -1.0f) x = -1.0f; else if (x > 1.0f) x = 1.0f;  // AcosGuarded clamp
+        out[k] = 1.0f - std::acos(x) * kTwoOverPi;
+    }
+}
+
+namespace {
+// flt_628C28 = -1023.0: the LUT index scale. NdotL in [-1,0] -> index in [0,1023].
+inline int FalloffIndex(float ndotl) {
+    int i = static_cast<int>(ndotl * -1023.0f);
+    if (i < 0) i = 0; else if (i > 1023) i = 1023;
+    return i;
+}
+} // namespace
+
+// gilde.exe 0x5c6f90 — point-light per-vertex contribution.
+void AccumulatePointLight(const float vpos[3], const float vnormal[3],
+                          const float lightPos[3], const float color[3],
+                          float range, float intensity, float rangeParam,
+                          float objScale, const float lut[1024], float accum[3]) {
+    const float dx = vpos[0] - lightPos[0];
+    const float dy = vpos[1] - lightPos[1];
+    const float dz = vpos[2] - lightPos[2];
+    const float distSq = dx * dx + dy * dy + dz * dz;   // before normalize
+    if (distSq >= range * range) return;                // out of range (v32 < v105)
+    const float dist = std::sqrt(distSq > 1e-12f ? distSq : 1e-12f);
+    const float inv = 1.0f / dist;
+    const float ndotl = vnormal[0] * dx * inv + vnormal[1] * dy * inv + vnormal[2] * dz * inv;
+    if (ndotl >= 0.0f) return;                          // faces away (v33 < 0 required)
+    if (rangeParam == 0.0f) return;
+    const float atten = (intensity * 10.0f * objScale) / (rangeParam * distSq);
+    const float f = atten * lut[FalloffIndex(ndotl)];
+    accum[0] += color[0] * f;
+    accum[1] += color[1] * f;
+    accum[2] += color[2] * f;
+}
+
+// gilde.exe 0x5c6f90 — directional (type-7) per-vertex contribution.
+void AccumulateDirectionalLight(const float vnormal[3], const float dir[3],
+                                const float color[3], float intensity,
+                                float objScale, const float lut[1024], float accum[3]) {
+    const float l = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (l < 1e-6f) return;
+    const float nx = dir[0] / l, ny = dir[1] / l, nz = dir[2] / l;
+    const float ndotl = vnormal[0] * nx + vnormal[1] * ny + vnormal[2] * nz;
+    if (ndotl >= 0.0f) return;
+    const float f = intensity * 0.001f * objScale * lut[FalloffIndex(ndotl)];   // flt_628C2C
+    accum[0] += color[0] * f;
+    accum[1] += color[1] * f;
+    accum[2] += color[2] * f;
+}
 
 // ---------------------------------------------------------------------------
 // gilde.exe 0x42dd4c — VIBE_Light_ComputeRayFalloff(a1=origin, a2=end, a3=sample).

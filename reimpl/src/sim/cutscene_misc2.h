@@ -238,8 +238,11 @@ void CutsceneSetupSky(unsigned int* a1);
 //   if (layer) Sky_RemoveLayer(sky, layer); Sky_Destroy(sky); g_skyMirror = 0;
 i32 CutsceneDestroySky();
 
-// The sky handle pair (dword_6315F0 sky / dword_6315EC layer) Setup/Destroy use.
-struct CutsceneSky { void* sky = nullptr; void* layer = nullptr; };
+// The sky handle pair (dword_6315F0 sky / dword_6315EC layer) Setup/Destroy use,
+// plus the mirror global dword_64A7C8 (SetupSky sets it to the sky handle;
+// DestroySky zeroes ONLY this mirror and leaves sky/layer untouched, exactly as
+// the binary does — see 0x4aa6a8 / 0x4aa740).
+struct CutsceneSky { void* sky = nullptr; void* layer = nullptr; void* mirror = nullptr; };
 CutsceneSky& CutsceneSkyState();
 
 // ===========================================================================

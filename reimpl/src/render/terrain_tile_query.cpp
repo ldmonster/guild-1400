@@ -70,7 +70,9 @@ bool FindNearestWalkableTile(const TileWalkGrid* grid, int centerY, int* foundX,
                             if (col >= 0) {
                                 int s = size;      // v15
                                 if (col < s && row >= 0 && row < s) {
-                                    u8 t = grid->cells[24 * (row + col * s)];
+                                    // @0x5c6550: imul edx,ecx(row); add edx,eax(col) ->
+                                    // index = col + row*size  (NOT row + col*size).
+                                    u8 t = grid->cells[24 * (col + row * s)];
                                     if (t && t != 13) { brk = true; break; }
                                 }
                             }

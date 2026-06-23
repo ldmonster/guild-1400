@@ -226,3 +226,89 @@ TEST(MenuWidgets, FrameInertFallback) {
     // Outline pixel drawn at the rect border.
     CHECK(At(fb, W, 2, 2) != 0u);
 }
+
+// ===========================================================================
+// wave-12 boundary / out-of-range hardening
+// ===========================================================================
+
+// Out-of-range gfxRecord indices (negative and beyond the archive count) must
+// hit the inert fallback, never index a non-existent record. No OOB into the
+// archive's record table.
+TEST(MenuWidgets, ButtonOutOfRangeRecordInert) {
+    GfxArchive arc = MakeArchive();   // 2 records (indices 0,1)
+    const int W = 64, H = 40;
+    std::vector<u32> fb((std::size_t)W * H, 0u);
+
+    // gfxRecord = -1 (negative guard).
+    ButtonSliceInfo n =
+        DrawThreeSliceButton(fb.data(), W, H, 2, 2, 40, arc, -1, false);
+    CHECK(!n.real);
+    // gfxRecord far beyond the count.
+    ButtonSliceInfo big =
+        DrawThreeSliceButton(fb.data(), W, H, 2, 2, 40, arc, 9999, false);
+    CHECK(!big.real);
+    // Frame with both out-of-range record ids -> inert too.
+    FrameDrawInfo fn = DrawWindowFrame(fb.data(), W, H, 2, 2, 30, 30, arc, -5);
+    CHECK(!fn.real);
+    FrameDrawInfo fb2 = DrawWindowFrame(fb.data(), W, H, 2, 2, 30, 30, arc, 9999);
+    CHECK(!fb2.real);
+}
+
+// Degenerate sizes: widthPx<=0 / w<=0 / h<=0 must early-return with an inert
+// (default-constructed) info and write nothing — no negative-extent loops.
+TEST(MenuWidgets, DegenerateSizesEarlyReturn) {
+    GfxArchive arc = MakeArchive();
+    const int W = 64, H = 40;
+    std::vector<u32> fb((std::size_t)W * H, 0u);
+    const int btn = arc.FindByName("_BUTTON_RED");
+    const int frame = arc.FindByName("_MAIN_MENU_RAHMEN");
+
+    ButtonSliceInfo b0 =
+        DrawThreeSliceButton(fb.data(), W, H, 0, 0, 0, arc, btn, false);
+    CHECK(!b0.real);
+    ButtonSliceInfo bneg =
+        DrawThreeSliceButton(fb.data(), W, H, 0, 0, -10, arc, btn, false);
+    CHECK(!bneg.real);
+    FrameDrawInfo f0 = DrawWindowFrame(fb.data(), W, H, 0, 0, 0, 10, arc, frame);
+    CHECK(!f0.real);
+    FrameDrawInfo fh = DrawWindowFrame(fb.data(), W, H, 0, 0, 10, -3, arc, frame);
+    CHECK(!fh.real);
+    // The framebuffer must be untouched by the degenerate calls.
+    bool clean = true;
+    for (u32 p : fb) if (p != 0u) { clean = false; break; }
+    CHECK(clean);
+}
+
+// Narrow button: widthPx smaller than the two caps combined forces the overlap
+// path (centreSpan<0 -> clamped). Caps are clipped, no centre, no OOB write.
+TEST(MenuWidgets, ButtonTooNarrowCapsClamp) {
+    GfxArchive arc = MakeArchive();
+    const int btn = arc.FindByName("_BUTTON_RED");  // caps 4+4 = 8 px
+    const int W = 64, H = 16;
+    std::vector<u32> fb((std::size_t)W * H, 0u);
+    // widthPx = 5 < 8: overlap path.
+    ButtonSliceInfo info =
+        DrawThreeSliceButton(fb.data(), W, H, 3, 2, 5, arc, btn, false);
+    CHECK(info.real);
+    CHECK_EQ(info.center, 0);
+    CHECK(info.capLeft <= 5);
+    CHECK(info.capRight <= 5);
+}
+
+// Fully off-buffer placement (origin far negative AND far positive): every blit
+// pixel is clipped by the InBounds tests; nothing is written, no OOB.
+TEST(MenuWidgets, OffBufferPlacementClipped) {
+    GfxArchive arc = MakeArchive();
+    const int btn = arc.FindByName("_BUTTON_RED");
+    const int frame = arc.FindByName("_MAIN_MENU_RAHMEN");
+    const int W = 32, H = 24;
+    std::vector<u32> fb((std::size_t)W * H, 0u);
+
+    DrawThreeSliceButton(fb.data(), W, H, -1000, -1000, 40, arc, btn, false);
+    DrawThreeSliceButton(fb.data(), W, H, 100000, 100000, 40, arc, btn, false);
+    // Frame larger than the buffer, origin off-screen: tiled/ring loops clipped.
+    DrawWindowFrame(fb.data(), W, H, -50, -50, 200, 200, arc, frame);
+    bool clean = true;
+    for (u32 p : fb) if (p != 0u) { clean = false; break; }
+    CHECK(clean);   // all off-buffer -> nothing drawn, ASAN-clean
+}

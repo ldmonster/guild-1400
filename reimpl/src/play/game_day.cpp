@@ -42,6 +42,9 @@ const DayStep kDayOrder[] = {
     {"MeisterAi_ProcessBuildingNeeds", 0x533510, DayTurn::Ai},
     {"TurnEndCoord27Broadcast",    0x533523, DayTurn::Ai},
     {"History_DisplayCurrentEvent", 0x5336b3, DayTurn::Events},
+    // 0x5336e1 is the call SITE inside BeginPlayerRound; 0x5320f0 is the
+    // VIBE_Character_SyncAllTurnStates function ENTRY (confirmed via the
+    // 0x533188 decompile refs, wave-15). The golden pins the entry.
     {"Character_SyncAllTurnStates", 0x5320f0, DayTurn::Ai},
 };
 

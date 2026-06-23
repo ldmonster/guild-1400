@@ -52,8 +52,12 @@ extern const u8 kBuiltinFontBitmap[637];
 // g.dibStride / g.screenHeight, then write the packed pixel `color` to every set
 // bit of the glyph's 7 rows x 5 columns. Only 16bpp and 32bpp targets draw; any
 // other depth is a no-op (matches the original's `>=16 && <=16` / `==32` gates).
-// Returns the original's `eax`: dword_762714 (depth) when a row block was reached,
-// else the failing clip/extent value. `glyphMap` is byte_75FB50, `color` already
+// Returns the original's `eax` EXACTLY: the failing clip/extent value (x+5 or y+7)
+// when clipped; `depth` when depth<16 or depth is neither 16 nor 32; **5** on the
+// 16bpp draw path (eax holds the column counter on loop exit); and the data-segment
+// pointer `glyph+7` on the 32bpp draw path (eax holds v14 on loop exit). These last
+// two are quirks of the original — verified against the 0x434D0C disassembly, not
+// a tidy "returns depth". `glyphMap` is byte_75FB50, `color` already
 // packed (DrawText packs it); `g` is the locked present-state block.
 u32 DrawGlyph(u8 ch, int x, int color, int y, const u8* glyphMap,
               const PresentGlobals& g);

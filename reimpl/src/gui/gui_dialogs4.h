@@ -155,6 +155,17 @@ extern i32 g_focusValuePrev;  // dword_75BED0
 extern i32 g_focusValueAcc;   // dword_75BED4
 extern i32 g_groupSlots[18];  // dword_75B9F0  active group-slot table (-1 == empty)
 
+// Drag-origin bookkeeping the per-frame FSM parks/restores (engine globals; this
+// module owns its copies, matching the rest of the interaction-state cluster).
+// NOTE: in the original these are the SAME engine dwords that widget_interact.cpp
+// models under its own C++ names (a pre-existing cross-module modeling fork — see
+// gui_dialogs4.cpp). Owned here so this module is internally 1:1 and testable.
+extern i32 g_d4_dragOriginX;     // dword_62D0C8  cursor-clamp/drag origin x mirror
+extern i32 g_d4_dragOriginY;     // dword_62D0D0  cursor-clamp/drag origin y mirror
+extern i32 g_d4_savedClampY0;    // dword_75BEB8  parked cursor clamp y0
+extern i32 g_d4_savedClampY1;    // dword_75BEC0  parked cursor clamp y1
+extern i32 g_caretCreateBase; // dword_62D2C8  caret-create extra base (ebx arg, +8)
+
 extern i32 g_hoverPrev;       // dword_75BF40
 extern i32 g_hoverLast;       // dword_75BEE4
 extern i32 g_hoverSlot;       // dword_75BF3C  current hover slot (-1 = none)
@@ -168,17 +179,32 @@ extern i32 g_scrollThumbY;    // dword_69FF9C
 
 extern i32 g_hitTestSlot4;    // dword_62D22C  the slot under the cursor
 
+// Hover / wheel-scroll forwarding state read by Widget_HoverUpdate (engine globals;
+// module-owned copies). g_hoverScrollWin/g_scrollWheelWin index the window table
+// (g_windows). g_wheelUp/g_wheelDn are the mouse-wheel up/down latches.
+extern i32 g_hoverScrollWin;  // dword_75BF08  window under the hover scroll (-1 = none)
+extern i32 g_scrollWheelWin;  // dword_62D294  window under the wheel cursor (-1 = none)
+extern i32 g_stateFinalizeReq;// dword_62D248  deferred State_Finalize id (-1 = none)
+extern i32 g_wheelUp;         // dword_672254  wheel-up latch
+extern i32 g_wheelDn;         // dword_672250  wheel-down latch
+
 // Per-frame mouse / key input state (engine globals; un-reconstructed).
 extern i32 g_pendingMouseX;   // dword_672210 (16.16 fixed-point cursor x)
-extern i32 g_mouseX;          // dword_75BF46
-extern i32 g_mouseY;          // (high word usage of the same cursor pair)
+// Live cursor "rolling point" buffer (word_75BF44 | dword_75BF46 | word_75BF4A).
+// Widget_HoverUpdate reads the X coord as `*(int*)(buf+4) >> 16` (the misaligned
+// dword at 75BF46+2) and the Y coord as `*(int*)(buf+2) >> 16` (dword_75BF46>>16),
+// then shifts the buffer: LOWORD(75BF46)=word_75BF4A; word_75BF44=HIWORD(75BF46).
+// Modelled byte-exact so the misaligned reads/writes translate 1:1.
+//   buf[0..1] = word_75BF44 ; buf[2..5] = dword_75BF46 ; buf[6..7] = word_75BF4A
+extern u8  g_cursorPtBuf[8];  // 0x75BF44 .. 0x75BF4B
 extern u8  g_pendingKey;      // byte_67225C  pending scancode (0 = none)
+extern u8  g_shiftHeldL;      // byte_671D96  left-shift held (group-nav direction)
+extern u8  g_shiftHeldR;      // byte_671D8A  right-shift held (group-nav direction)
 extern i32 g_pendingMouseUp;  // dword_67222C
 extern i32 g_mouseDown;       // dword_672220
 extern i32 g_mouseWheelUp;    // dword_672228
 extern i32 g_mouseRelease;    // dword_672230
 extern i32 g_mouseDownHover;  // dword_672238
-extern i32 g_mouseMovedFlag;  // dword_672220 mirror used by HoverUpdate
 extern i32 g_frameTick;       // dword_62EB3C
 
 // MainWndProc activation latches + frame blob (engine globals; un-reconstructed).
@@ -188,6 +214,15 @@ extern i32 g_renderRetryFlag; // byte_649D70
 extern std::uintptr_t g_frameBlob;  // dword_62D210 (frame surface pointer)
 extern i32 g_frameBlob2;            // dword_62D218
 extern i32 g_audioPausedFlag; // dword_62EB4C
+// Active render-context record pointer (dword_62D268), read by the textured-quad
+// blit branches of DrawCheckbox / Window_RenderContent.  +116 is the context width.
+extern std::uintptr_t g_renderContext; // dword_62D268
+// Window_RenderContent state edges (engine globals; un-reconstructed siblings).
+extern u8  g_renderPhaseFlag;   // byte_62D25C  (==1 => second-pass blit ordering)
+extern std::uintptr_t g_tileAnimRec; // dword_62D21C (entity tile-animation record)
+extern std::uintptr_t g_animTableBase; // dword_62D204 (84-byte-stride anim table base)
+extern i32 g_drawClipLeft;      // dword_64A1B4
+extern i32 g_drawClipRight;     // dword_64A1BC
 
 // ===========================================================================
 // Reset all module-owned globals + restore the default hooks. Tests call this
@@ -226,9 +261,10 @@ int Widget_ProcessMouseDrag();
 // gilde.exe 0x41fd48 — VIBE_Widget_HoverUpdate (no args; per-frame hover/scroll).
 int Widget_HoverUpdate();
 
-// gilde.exe 0x518efc — VIBE_Widget_AddPersonRow (x@ax, gfxId@edx, y2@cx, win@ebx, rate).
-// INTEGRATION ANCHOR.  Returns the middle-cell widget slot.
-int Widget_AddPersonRow(i16 x, int gfxId, i16 y2, int winSlot, unsigned char rate);
+// gilde.exe 0x518efc — VIBE_Widget_AddPersonRow (x@ax, packed@edx, y2@cx, win@ebx, rate).
+// `packed` is a packed dword: LOWORD = base row y, HIWORD (>>16) = gfx base & market
+// item id.  y2 (@cx) is unused by the body.  INTEGRATION ANCHOR.  Returns cell-2 slot.
+int Widget_AddPersonRow(i16 x, int packed, i16 y2, int winSlot, unsigned char rate);
 
 // gilde.exe 0x4121c4 — VIBE_Widget_DrawScrollBar (widgetSlot@eax, surf@edx).
 int Widget_DrawScrollBar(int widgetSlot, int surf);

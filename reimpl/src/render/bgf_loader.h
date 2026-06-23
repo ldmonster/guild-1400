@@ -65,8 +65,9 @@
 // =============================================================================
 namespace guild::render {
 
-// Magic dword that marks the fast-chunk record (gilde.exe: -88801275).
-constexpr u32 kBgfFastChunkMagic = 0xFAB7E6C5u;
+// Magic dword that marks the fast-chunk record (gilde.exe 0x5F86FC compares the
+// dword to -88801275 == 0xFAB50005).
+constexpr u32 kBgfFastChunkMagic = 0xFAB50005u;
 
 // Script token bytes used by VIBE_Vfs_FindChunkStart / VIBE_Script_ReadToken.
 constexpr u8 kBgfTokenChunk = 0x2D;  // '-'  chunk header follows

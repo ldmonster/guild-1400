@@ -32,7 +32,7 @@ int TalentDialog_PointsToLevel(int points) {
 //     if (trainer)             -> 4806
 //     else if (points >= 0xFC) -> 4805
 //     else if (level > avail)  -> 4807
-//     else { 4803 (flag) or 4804; canTrain = 1; }
+//     else { (debugAdjust!=0) ? 4803 : 4804; canTrain = 1; }
 TalentLayout TalentDialog_Build(const TalentState& s) {
     TalentLayout l{};
     l.form = kFormTalent;
@@ -51,7 +51,10 @@ TalentLayout TalentDialog_Build(const TalentState& s) {
     } else if (level > s.availableLevel) {
         l.statusText = kTextTalCantJump;       // 4807
     } else {
-        l.statusText = s.hasTrainingFlag ? kTextTalCanTrain : kTextTalCanTrain2; // 4803/4804
+        // 0x5471c0: cmp [v37],0; jz -> 4804 (loc_547225); else -> 4803. The 4803/4804
+        // discriminator is the debug-adjust term v37 (debugAdjust != 0), NOT a training
+        // flag. (dword_12CE919 only selects the 525/560 arg base *inside* the 4803 text.)
+        l.statusText = (s.debugAdjust != 0) ? kTextTalCanTrain : kTextTalCanTrain2; // 4803/4804
         l.canTrain = true;
     }
     return l;

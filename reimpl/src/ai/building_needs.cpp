@@ -16,8 +16,13 @@ double BuildProbability(int gameTick, int difficulty) {
         d = 0;
     else if (d > 4)
         d = 4;
-    // N = (gameTick >> 2) + 1 (the original's signed arithmetic shift).
-    int n = (gameTick >> 2) + 1;
+    // N = (gameTick / 4) + 1.
+    // gilde.exe 0x4c77b5: mov edx,eax / sar edx,1Fh / shl edx,2 / sbb eax,edx /
+    // sar eax,2 / inc eax — the MSVC signed-divide-by-4 idiom that rounds TOWARD
+    // ZERO, not a bare arithmetic shift. For gameTick>=0 it equals gameTick>>2;
+    // for negatives it differs (e.g. -1/4==0 vs -1>>2==-1). C++ integer division
+    // truncates toward zero, so it reproduces the binary exactly.
+    int n = (gameTick / 4) + 1;
     double scale = static_cast<double>(kBuildDiffScale[d]);
     return static_cast<double>(n) / (scale + static_cast<double>(n));
 }

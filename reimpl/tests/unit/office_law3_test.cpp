@@ -42,8 +42,14 @@ TEST(OfficeLaw3_Init, ClearsAndSeedsTable) {
 // ---------------------------------------------------------------------------
 TEST(OfficeLaw3_Role, OutOfRangeAndBadTable) {
     CHECK_EQ(OfficeFindRoleTemplate(0, 0), kRoleNotFound);    // roleId == 0
-    CHECK_EQ(OfficeFindRoleTemplate(0, 76), kRoleNotFound);   // roleId >= 76
-    CHECK_EQ(OfficeFindRoleTemplate(0, 200), kRoleNotFound);
+    CHECK_EQ(OfficeFindRoleTemplate(0, 76), kRoleNotFound);   // roleId >= 76 (signed)
+    // 0x57c18f: the range gate `cmp bl,4Ch / jge` is a SIGNED char compare. A u8
+    // roleId of 200 is -56 as i8, so it is NOT rejected (-56 < 76); it falls into
+    // the scan, never matches (movsx makes it negative), and returns the table's
+    // end-of-scan terminator slot. Table A has 75 live entries -> terminator idx 75.
+    CHECK_EQ(OfficeFindRoleTemplate(0, 200), 75);
+    // roleId 100 (0x64) is positive as i8 and >= 76 -> rejected by the signed gate.
+    CHECK_EQ(OfficeFindRoleTemplate(0, 100), kRoleNotFound);
     CHECK_EQ(OfficeFindRoleTemplate(2, 33), kRoleNotFound);   // which not in {0,1}
     CHECK_EQ(OfficeFindRoleTemplate(99, 33), kRoleNotFound);
 }
@@ -203,8 +209,12 @@ TEST(OfficeLaw3_Desc, LowFallback) {
 
 TEST(OfficeLaw3_Desc, MidOps) {
     g_dm = DescModel{}; InstallDesc();
-    CHECK_EQ(GesetzFormatDescriptionMid(nullptr, 13, 0, 1, 0).textId, 4213);
-    CHECK_EQ(GesetzFormatDescriptionMid(nullptr, 15, 0, 1, 9).textId, 4223);
+    // 0x4c2f69 setle: flag = (lowFlag <= 1) ? 1 : 0, added to the base id
+    // (0x4c2fc6 add ecx,1075h / 0x4c2f9b add ecx,107Fh). lowFlag 0 -> flag 1.
+    CHECK_EQ(GesetzFormatDescriptionMid(nullptr, 13, 0, 1, 0).textId, 4214); // 4213+1
+    CHECK_EQ(GesetzFormatDescriptionMid(nullptr, 13, 0, 1, 5).textId, 4213); // 4213+0
+    CHECK_EQ(GesetzFormatDescriptionMid(nullptr, 15, 0, 1, 9).textId, 4223); // 4223+0
+    CHECK_EQ(GesetzFormatDescriptionMid(nullptr, 15, 0, 1, 1).textId, 4224); // 4223+1
     char buf[64] = {0};
     GesetzDescResult r = GesetzFormatDescriptionMid(buf, 14, 0, 1, 0);
     CHECK(!r.valid && r.usedFallback);
@@ -231,8 +241,8 @@ TEST(OfficeLaw3_Desc, DispatcherRouting) {
     g_dm = DescModel{}; InstallDesc();
     // op < 8 -> Low (op 3 -> 4163+flag)
     CHECK_EQ(GesetzFormatDescription(nullptr, 3, 0, 1, 0, 0).textId, 4164);
-    // op < 16 -> Mid (op 13 -> 4213)
-    CHECK_EQ(GesetzFormatDescription(nullptr, 13, 0, 1, 0, 0).textId, 4213);
+    // op < 16 -> Mid (op 13, lowFlag 0 -> flag 1 -> 4213+1)
+    CHECK_EQ(GesetzFormatDescription(nullptr, 13, 0, 1, 0, 0).textId, 4214);
     // op in [16,26) -> High (op 20 -> 4248+flag)
     CHECK_EQ(GesetzFormatDescription(nullptr, 20, 0, 1, 0, 0).textId, 4249);
     // op >= 26 -> invalid, no render

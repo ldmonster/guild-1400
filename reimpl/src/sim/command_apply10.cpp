@@ -320,12 +320,26 @@ int CheckParamRefsValid(u8* cmd) {
 
     int n = rdU8(cmd, 20);            // *(u8*)(cmd+20) field count
     int cur = 21;                     // v3 = cmd + 21
+    // HARDENING (wave-11): cmd is the fixed 153-byte command record. Each field
+    // descriptor is 4 bytes (width,count,off:2) read at cur, followed by an inline
+    // value run of width*count bytes (one read of the first value at `cur` below).
+    // A malformed/truncated received packet with a bogus +20 count or oversized
+    // fields can run `cur` past the 153-byte record (OOB read). A valid delta
+    // packet stays within the 119-byte payload window, so this is byte-identical
+    // on valid input; it only stops the validation walk on garbage.
+    constexpr int kCmdStride = 0x99;  // 153 — sim::kPacketStride (not visible here)
     for (int i = 0; i < n; ++i) {
+        if (cur + 4 > kCmdStride)
+            break;
         u8  width  = rdU8(cmd, cur);      // *(v5-2)
         u8  count  = rdU8(cmd, cur + 1);  // *(v5-1)
         u16 fieldOff = rdU16(cmd, cur + 2); // *v5
         void* tgt = static_cast<u8*>(base) + fieldOff; // v8 = base + *v5
         cur += 4;                          // v3 = v5 + 1 (advance past the 4-byte descriptor)
+        // The owner-link branch below reads rdI32(cmd, cur); guard that 4-byte
+        // read against the record end too.
+        if (cur + 4 > kCmdStride)
+            break;
 
         if (e.object) {
             // v8 == object+2w(+4 bytes) -> reject

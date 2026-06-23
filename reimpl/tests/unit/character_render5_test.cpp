@@ -51,7 +51,9 @@ TEST(CharRender5, NeedsDecayDominantFlip) {
     CHECK_EQ(Rf(rec.b, kPnPrimaryValue), 0.0f);
     CHECK_EQ(static_cast<int>(static_cast<std::int8_t>(rec.b[kPnLastDominant])), 12);
     CHECK_EQ(Rf(rec.b, kPnNeedBase + 12 * 3), 30.0f);   // need[3] unchanged (==active, skipped)
-    CHECK_EQ(Rf(rec.b, kPnNeedBase + 12 * 12), 1000.0f); // need[12] hit ceiling
+    // need[12] = 120 + 2.2 - 120*0.01 = 121.0 (the 1000-ceiling is dbl_619110 == 1000.0,
+    // NOT the 0.002 eps; only a value reaching 1000 is clamped). gilde.exe 0x452564.
+    CHECK_EQ(Rf(rec.b, kPnNeedBase + 12 * 12), 121.0f); // need[12] updated (below ceiling)
     CHECK_EQ(Rf(rec.b, kPnNeedBase + 12 * 1), 0.0f);     // need[1] zeroed (case k==1)
 }
 

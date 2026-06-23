@@ -20,19 +20,24 @@ void ComputeBoundingExtents(Mesh& m) {
     float radius = 0.0f;  // i (ebp-40h), seeded 0.0
     for (int n = 0; n < count; ++n) {
         const float* v = verts[n].pos;
-        float len = static_cast<float>(
-            std::sqrt(static_cast<double>(v[0]) * v[0] + static_cast<double>(v[1]) * v[1] +
-                      static_cast<double>(v[2]) * v[2]));
-        if (len > radius)
-            radius = len;
+        // The binary compares the DOUBLE sqrt result against the float accumulator
+        // (fcomp of the 80-bit sqrt vs the promoted float `i`), and on the taken
+        // branch RECOMPUTES sqrt and stores it as float into `i`. Mirror that: the
+        // comparison is in double, the stored radius is the float truncation.
+        double len = std::sqrt(static_cast<double>(v[0]) * v[0] +
+                               static_cast<double>(v[1]) * v[1] +
+                               static_cast<double>(v[2]) * v[2]);
+        if (len > static_cast<double>(radius))
+            radius = static_cast<float>(len);
     }
 
-    // zero centroid (+104/+108/+112), store radius (+472, then mirrored to +468).
+    // zero centroid (+104/+108/+112), store max-|vertex| radius into +472 then
+    // mirror it into +468 (m.radius = +0x1D8, m.radius2 = +0x1D4).
     m.centroid[0] = 0.0f;
     m.centroid[1] = 0.0f;
     m.centroid[2] = 0.0f;
-    m.radius  = radius;   // *(a1+472)
-    m.radius2 = radius;   // *(a1+468) = *(a1+472)
+    m.radius  = radius;   // *(a1+472)  (0x1D8)
+    m.radius2 = radius;   // *(a1+468) = *(a1+472)  (0x1D4)
 
     if (count <= 0)
         return;
@@ -71,11 +76,15 @@ void ComputeBoundingExtents(Mesh& m) {
         slot.pos[2] = corners[k][2];
     }
 
-    // ----- diagonal length -> radius2 (+472) -------------------------------
+    // ----- diagonal length -> radius (+472) --------------------------------
+    // HARDEN (0x5d1ff5): the binary OVERWRITES *(a1+472) with the AABB diagonal
+    // length; +472 is m.radius (0x1D8), NOT m.radius2 (+468 / 0x1D4). The prior
+    // code wrote the diagonal into m.radius2, swapping the two fields vs the
+    // binary (which leaves +468 holding the max-|vertex| value from above).
     float dx = maxX - minX;  // v32
     float dy = maxY - minY;  // v34
     float dz = maxZ - minZ;  // v36
-    m.radius2 = static_cast<float>(
+    m.radius = static_cast<float>(
         std::sqrt(static_cast<double>(dx) * dx + static_cast<double>(dy) * dy +
                   static_cast<double>(dz) * dz));
 

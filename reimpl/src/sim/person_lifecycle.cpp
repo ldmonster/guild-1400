@@ -116,11 +116,16 @@ u8 PersonCountActiveSlots(const char* name) {
 //   return v4;
 int PersonCollectByType(u8 kind, u8* out) {
     const u8* base = reinterpret_cast<const u8*>(g_buildingTypes);
+    // The original takes `char a1@<al>` and compares the table's (zero-extended,
+    // `movzx`) kind byte against `a1` SIGN-EXTENDED to 32 bits (sar ebx,18h at
+    // 0x587bbf). For kind >= 0x80 the sign-extended compare value is negative and
+    // can never equal the 0..255 table byte — so high-bit kinds match nothing.
+    const int kindSx = static_cast<int>(static_cast<i8>(kind));   // a1 sign-extended
     int v4 = 0;   // count written
     int v5 = 0;   // type index
     int v6 = 0;   // byte cursor into the table
     do {
-        if (ReadU8(base, v6) == kind)           // kind byte @ type +0
+        if (static_cast<int>(ReadU8(base, v6)) == kindSx)   // kind byte @ type +0
             out[v4++] = static_cast<u8>(v5);
         ++v5;
         v6 += kBuildingTypeStride;
@@ -193,9 +198,13 @@ int PersonComputeBirthDate(const Person* person, PersonBirthDate* out) {
 
     u32 seed = static_cast<u32>(pack.yearTag) ^ static_cast<u32>(ReadI32(person, 48));
 
-    // month: signed modulo on inDateLow (idiv), unsigned on the seed term (div).
+    // month: signed modulo on inDateLow (idiv esi=19), unsigned on the seed term
+    // (div ebx=7). The final reduction `% 12` is an UNSIGNED div in the binary
+    // (0x58be88: xor edx,edx; div ebx=0Ch) — so the sum is taken as u32 here even
+    // when (inDateLow % 19) is negative, which is the only case where unsigned and
+    // signed modulo diverge.
     int monthTerm = (inDateLow % 19) + static_cast<int>((seed >> 3) % 7u);
-    u8 month = static_cast<u8>(monthTerm % 12 + 1);
+    u8 month = static_cast<u8>(static_cast<u32>(monthTerm) % 12u + 1);
     u8 day   = static_cast<u8>((seed >> 5) % 28u + 1);
 
     std::memset(out, 0, sizeof(*out));
@@ -234,8 +243,10 @@ u32 PersonComputeBirthDateFromRecord(const Person* person, PersonBirthDate* out)
 
     u32 seed = static_cast<u32>(pack.yearTag) ^ static_cast<u32>(ReadI32(person, 48));
 
+    // signed `% 11` (idiv edi=0Bh), unsigned `% 13` (div esi=0Dh), and the final
+    // `% 12` is an UNSIGNED div (0x58bdf1: xor edx,edx; div esi=0Ch) — match it.
     int monthTerm = (dateLow % 11) + static_cast<int>((seed >> 3) % 13u);
-    u8 month = static_cast<u8>(monthTerm % 12 + 1);
+    u8 month = static_cast<u8>(static_cast<u32>(monthTerm) % 12u + 1);
     u8 day   = static_cast<u8>((seed >> 5) % 28u + 1);
 
     std::memset(out, 0, sizeof(*out));

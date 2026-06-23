@@ -46,10 +46,14 @@ ParticleSystem* SpawnAuthored(u8 kind, int owner, int slots, u32 tick,
     return sys;
 }
 
-void FreeSys(ParticleSystem* s) {
-    if (!s) return;
-    delete[] static_cast<unsigned char*>(s->particles);
-    delete[] reinterpret_cast<unsigned char*>(s);
+// wave-10 (W10-PARTICLE) leak fix: AllocSystem makes FOUR default-backend
+// allocations per system (header + particle array + two scratch buffers, one of
+// whose return value AllocSystem discards). Free them ALL via the backend
+// registry instead of the previous two manual delete[]s, which leaked the scratch.
+// Idempotent: clears the registry, so repeated calls (e.g. a per-system loop) are
+// safe no-ops after the first.
+void FreeSys(ParticleSystem* /*s*/) {
+    FreeAllSpawnAllocations();
 }
 
 } // namespace

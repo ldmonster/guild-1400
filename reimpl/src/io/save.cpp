@@ -293,8 +293,17 @@ namespace {
 inline guild::u8&  RelinkTag_(guild::u8* table, std::size_t off) {
     return table[off + kRelinkTagOffset];
 }
-inline guild::u32& RelinkPtr_(guild::u8* table, std::size_t off) {
-    return *reinterpret_cast<guild::u32*>(table + off + kRelinkPtrOffset);
+// The relink table has a 10-byte stride, so the 4-byte pointer/id slot at
+// (+kRelinkPtrOffset) is naturally unaligned. The original reads/writes it via a
+// raw *(DWORD*) (unaligned access is fine on x86); we keep byte-identical
+// semantics but avoid a misaligned u32 reference (UB) by going through memcpy.
+inline guild::u32 RelinkPtrGet_(const guild::u8* table, std::size_t off) {
+    guild::u32 v;
+    std::memcpy(&v, table + off + kRelinkPtrOffset, 4);
+    return v;
+}
+inline void RelinkPtrSet_(guild::u8* table, std::size_t off, guild::u32 v) {
+    std::memcpy(table + off + kRelinkPtrOffset, &v, 4);
 }
 } // namespace
 
@@ -306,22 +315,21 @@ void RelinkTableIdsToPointers(guild::u8* table, const RelinkResolvers& r) {
     if (!table)
         return;
     for (guild::u32 n = 0; n != kRelinkBytes; n += kRelinkStride) {
-        guild::u32& slot = RelinkPtr_(table, n);
-        guild::u32 id = slot;
+        guild::u32 id = RelinkPtrGet_(table, n);
         if (id == 0)                          // if (*(table+n)) — skip empty
             continue;
         switch (RelinkTag_(table, n)) {
         case kRelinkPerson:
-            if (r.person)   slot = r.person(id, r.ctx);
+            if (r.person)   RelinkPtrSet_(table, n, r.person(id, r.ctx));
             break;
         case kRelinkBuilding:
-            if (r.building) slot = r.building(id, r.ctx);
+            if (r.building) RelinkPtrSet_(table, n, r.building(id, r.ctx));
             break;
         case kRelinkObject:
-            if (r.object)   slot = r.object(id, r.ctx);
+            if (r.object)   RelinkPtrSet_(table, n, r.object(id, r.ctx));
             break;
         case kRelinkCutscene:
-            if (r.cutscene) slot = r.cutscene(id, r.ctx);
+            if (r.cutscene) RelinkPtrSet_(table, n, r.cutscene(id, r.ctx));
             break;
         default:
             break;

@@ -430,9 +430,12 @@ double FadeParam(int frameEndTick, float startTick, bool fadeIn) {
 }
 
 int FadeAlpha(double t) {
-    // v26 = clamp01(t); alpha = round(v26 * 255.0) via frndint (round-to-nearest).
+    // v26 = clamp01(t); alpha = (int)(v26 * 255.0) via VIBE_Coord_ConvertX (the
+    // @0x40b998 call site: ConvertX(); v27 = (int)v26). ConvertX @0x5c6b08 sets
+    // RC=11 (round-toward-zero) before frndint, so this TRUNCATES toward zero —
+    // NOT round-to-nearest (verified: decompile 0x5c6b08 + the 0x40b998 site).
     double a = t * kFadeAlphaScale;
-    double r = std::nearbyint(a);              // VIBE_Coord_ConvertX == frndint
+    double r = std::trunc(a);                  // VIBE_Coord_ConvertX == truncate
     int v = static_cast<int>(r);
     if (v < 0) v = 0;
     if (v > 255) v = 255;
@@ -550,7 +553,7 @@ void GroupInteractStep(HeRecord* h, GroupLeader* leader, i32 partnerId) {
             accum = static_cast<float>(sq * kGroupAccumScale + accum);
         } else {
             Gi_State(h) = 1;                     // *(a1+112) = 1
-            Gi_DwellCounter(h) += 1;             // *(a1+82) += 1
+            Gi_SetDwellCounter(h, Gi_GetDwellCounter(h) + 1);  // *(a1+82) += 1
             accum = 0.0f;                        // *(a1+172) = 0
         }
         return;
@@ -560,7 +563,7 @@ void GroupInteractStep(HeRecord* h, GroupLeader* leader, i32 partnerId) {
         float& accum = Gi_Accum(h);
         if (static_cast<double>(accum) < kGroupDwellThresh) {
             accum = accum + 1.0f;                // *(a1+172) += 1.0
-            Gi_DwellCounter(h) += 1;             // *(a1+82) += 1
+            Gi_SetDwellCounter(h, Gi_GetDwellCounter(h) + 1);  // *(a1+82) += 1
             return;
         }
         // Dwell elapsed: optionally queue a cmd39 appointment for a player char,
@@ -579,7 +582,7 @@ void GroupInteractStep(HeRecord* h, GroupLeader* leader, i32 partnerId) {
             gi.enqueueObjectInteraction(fromId, partnerId, toId);
         }
         Gi_State(h) = 0;                         // *(a1+112) = 0
-        Gi_DwellCounter(h) += (util::RandomModulo(8) + 1); // *(a1+82) += rand%8 + 1
+        Gi_SetDwellCounter(h, Gi_GetDwellCounter(h) + (util::RandomModulo(8) + 1)); // *(a1+82) += rand%8 + 1
     }
 }
 

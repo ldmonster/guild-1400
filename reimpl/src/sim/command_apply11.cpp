@@ -13,18 +13,18 @@ namespace {
 i32  DefParseInt(const char*)               { return 0; }
 void DefToLower(char*)                       {}
 i16  DefCountActiveObjects()                 { return 0; }
-int  DefGesetzGetRecord(u8, DebugCmdHooks::GesetzRecord* out) {
-    if (out) *out = DebugCmdHooks::GesetzRecord{0, 0, 0};
+int  DefGesetzGetRecord(u8, Apply11CmdHooks::GesetzRecord* out) {
+    if (out) *out = Apply11CmdHooks::GesetzRecord{0, 0, 0};
     return 0;
 }
 void DefGesetzRequestApply(int, u8, i32)     {}
 
-const DebugCmdHooks kDefaults = {
+const Apply11CmdHooks kDefaults = {
     &DefParseInt, &DefToLower, &DefCountActiveObjects,
     &DefGesetzGetRecord, &DefGesetzRequestApply,
 };
 
-DebugCmdHooks g_hooks = kDefaults;
+Apply11CmdHooks g_hooks = kDefaults;
 
 // Flat-byte scratch accessors (the originals treat the scratch as raw bytes).
 inline void wrU8 (SlotResetScratch& s, int off, u8  v) {
@@ -39,8 +39,8 @@ inline void wrU32(SlotResetScratch& s, int off, u32 v) {
 
 } // namespace
 
-DebugCmdHooks SetDebugCmdHooks(const DebugCmdHooks& h) {
-    DebugCmdHooks prev = g_hooks;
+Apply11CmdHooks SetApply11CmdHooks(const Apply11CmdHooks& h) {
+    Apply11CmdHooks prev = g_hooks;
     g_hooks = h;
     if (!g_hooks.parseInt)           g_hooks.parseInt = kDefaults.parseInt;
     if (!g_hooks.toLower)            g_hooks.toLower = kDefaults.toLower;
@@ -49,7 +49,7 @@ DebugCmdHooks SetDebugCmdHooks(const DebugCmdHooks& h) {
     if (!g_hooks.gesetzRequestApply) g_hooks.gesetzRequestApply = kDefaults.gesetzRequestApply;
     return prev;
 }
-DebugCmdHooks& GetDebugCmdHooks() { return g_hooks; }
+Apply11CmdHooks& GetApply11CmdHooks() { return g_hooks; }
 
 // ===========================================================================
 // Opcode-28 scratch packer (the shared body of the (A) emitters). The original
@@ -324,7 +324,7 @@ i32 QueueSetJusticeSeverity(const DebugCmdCtx& ctx, i32 lawSel, const char* arg)
     if (slot < 0) return 0;
     if (!past || *past != '_') return 0;
     i32 v8 = g_hooks.parseInt(past + 1);
-    DebugCmdHooks::GesetzRecord rec{};
+    Apply11CmdHooks::GesetzRecord rec{};
     u8 lawId = static_cast<u8>(lawSel);
     if (!g_hooks.gesetzGetRecord(lawId, &rec)) return 0;
     i32 lo = rec.lo, hi = rec.hi;                    // v14, v15
@@ -362,7 +362,7 @@ i32 QueueAdjustJusticeSeverity(const DebugCmdCtx& ctx, i32 lawSel, const char* a
     if (nameSlot < 0) return 0;
     if (!past || *past != '_') return 0;
     i32 n = g_hooks.parseInt(past + 1);
-    DebugCmdHooks::GesetzRecord rec{};
+    Apply11CmdHooks::GesetzRecord rec{};
     u8 lawId = static_cast<u8>(lawSel);
     if (!g_hooks.gesetzGetRecord(lawId, &rec)) return 0;
     i32 lo = rec.lo, hi = rec.hi;                    // v21, v22

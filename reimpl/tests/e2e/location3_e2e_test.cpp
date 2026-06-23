@@ -119,7 +119,8 @@ TEST(Location3E2E, RobberCampFlow) {
     auto full = MakeSlots(std::vector<std::uint8_t>(4, 0),
                           std::vector<std::int32_t>(4, 0));
     auto raiders = MakeSel({{true, true, 555}, {true, true, 556}});
-    DialogOutcome std0 = RobberCampStandard(9, true, full, raiders);
+    DialogOutcome std0 = RobberCampStandard(9, true, /*requestExists=*/false,
+                                            /*targetBusy=*/true, full, raiders);
     CHECK(!std0.opened);
     CHECK_EQ(s.batches.size(), 0u);
     CHECK_EQ(s.messages.size(), 1u);
@@ -127,7 +128,8 @@ TEST(Location3E2E, RobberCampFlow) {
     // Under-capacity camp -> standard raid queues a single-raider batch (98).
     s.scriptConfirm();
     auto camp = MakeSlots({1, 0, 1}, {70, 0, 72});
-    DialogOutcome std1 = RobberCampStandard(9, true, camp, raiders);
+    DialogOutcome std1 = RobberCampStandard(9, true, /*requestExists=*/false,
+                                            /*targetBusy=*/true, camp, raiders);
     CHECK(std1.committed);
     CHECK_EQ(std1.action, 98);
     CHECK_EQ(s.batches.size(), 1u);
@@ -137,7 +139,7 @@ TEST(Location3E2E, RobberCampFlow) {
 
     // Camp-wide raid -> all occupied camp ids as action 117.
     s.fi = 0; s.frames = {1};
-    DialogOutcome raid = RobberCampRaid(camp);
+    DialogOutcome raid = RobberCampRaid(/*hasTarget=*/true, /*targetBusy=*/true, camp);
     CHECK(raid.committed);
     CHECK_EQ(raid.action, 117);
     CHECK_EQ(raid.count, 2);

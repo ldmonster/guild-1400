@@ -144,19 +144,19 @@ int Window_CreateScrollButtons(int x, int y, int group, int win, int gfx, Scroll
         x = w.w() - 32;     // (v7+6 >> 16) - 32   (window width)
     }
 
+    // The binary writes the +476/+444 fields UNCONDITIONALLY (no -1 guard): it indexes
+    // dword_69FFB4 + 740*v8 with whatever Object_AddToWindow returned. 0x419b42-0x419b8c
+    // (down) and 0x419ba8-0x419bf0 (up). Object_AddToWindow always returns a valid slot
+    // here, so no guard is taken in practice.
     int down = Object_AddToWindow(win, static_cast<i16>(y), static_cast<i16>(x), gfx);
     w.at<i32>(940) = down;  // v7[235]
-    if (down != -1) {
-        g_widgets[down].at<i32>(476) = group; // +476 group link
-        g_widgets[down].at<u8>(444)  = 3;     // +444 radio/scroll flag
-    }
+    g_widgets[down].at<i32>(476) = group; // +476 group link
+    g_widgets[down].at<u8>(444)  = 3;     // +444 radio/scroll flag
 
     int up = Object_AddToWindow(win, static_cast<i16>(y), static_cast<i16>(x - 32), gfx + 1);
     w.at<i32>(936) = up;    // v7[234]
-    if (up != -1) {
-        g_widgets[up].at<i32>(476) = group;
-        g_widgets[up].at<u8>(444)  = 3;
-    }
+    g_widgets[up].at<i32>(476) = group;
+    g_widgets[up].at<u8>(444)  = 3;
 
     // dword_67EDC8[238*win] = 0; dword_67EDE4[238*group] = 48 — scroll-state globals owned
     // by the window cluster (offsets +584/+656 inside the window record region); the slot

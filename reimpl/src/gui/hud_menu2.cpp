@@ -122,7 +122,9 @@ SliderPanelResult Hud_BuildSliderPanel(std::vector<Widget>& widgets, int baseX, 
     r.labelId = AllocWidget(widgets);
     widgets[r.labelId].x()         = (i16)(baseX - 19);
     widgets[r.labelId].y()         = (i16)(baseY + 25);
-    widgets[r.labelId].editFlags() = 67;          // +132 = 67
+    // 0x4bd564: *(WORD*)(widget + 112) = 67  — the text-color word at +112 (the same
+    // slot BuildButtonRow writes at 0x4bcfac), NOT editFlags(+132).  (disasm-confirmed)
+    widgets[r.labelId].at<i16>(112) = 67;         // +112 = 67
     widgets[r.labelId].at<i32>(88) = 1;           // +88 = 1
     widgets[r.labelId].at<i16>(20) = 48;          // +20 = 48
     (void)userData;
@@ -217,24 +219,32 @@ int Hud_EnableObjectList(const std::vector<std::vector<guild::u8>>& records, int
 // Player bar drag-slot reset — gilde.exe 0x4b1d17.
 // ---------------------------------------------------------------------------
 DragSlotTables::DragSlotTables() {
-    t6F8.assign(kDragSlotLoopEnd, 0);
-    t700.assign(kDragSlotLoopEnd, 0);
-    t704.assign(kDragSlotLoopEnd, 0);
-    t708.assign(kDragSlotLoopEnd, 0);
-    t70C.assign(kDragSlotLoopEnd, 0);
-    t710.assign(kDragSlotLoopEnd, 0);
-    b714.assign(kDragSlotLoopEnd, 0);
+    // The binary writes indices up to and including 320 (see the loop below), so the
+    // arrays must hold index 320 -> size 321.
+    t6F8.assign(kDragSlotLoopEnd + 1, 0);
+    t700.assign(kDragSlotLoopEnd + 1, 0);
+    t704.assign(kDragSlotLoopEnd + 1, 0);
+    t708.assign(kDragSlotLoopEnd + 1, 0);
+    t70C.assign(kDragSlotLoopEnd + 1, 0);
+    t710.assign(kDragSlotLoopEnd + 1, 0);
+    b714.assign(kDragSlotLoopEnd + 1, 0);
 }
 
 void PlayerBar_ResetDragSlots(DragSlotTables& tbl) {
-    for (int i = 0; i != kDragSlotLoopEnd; i += kDragSlotStep) {
+    // 0x4b1d17: `for ( i = 0; i != 320; byte_11BB714[i*4] = 0 ) { i += 10; arr[i] = ... }`
+    // The `i += 10` runs at the TOP of the body BEFORE the writes, and the `i != 320`
+    // cond is checked before each body, so the writes land on i = 10, 20, ..., 320
+    // (slot 0 is never reset; slot 320 IS).  Reproduce that exact index sequence; the
+    // byte_11BB714[i*4] write is the same physical slot, modeled as tbl.b714[i].
+    for (int i = 0; i != kDragSlotLoopEnd; ) {
+        i += kDragSlotStep;          // i += 10 at the top of the loop body
         tbl.t6F8[i] = -1;
         tbl.t700[i] = -1;
         tbl.t704[i] = -1;
         tbl.t708[i] = 0xFFFF;
         tbl.t70C[i] = -1;
         tbl.t710[i] = -1;
-        tbl.b714[i] = 0; // byte_11BB714[i*4] = 0
+        tbl.b714[i] = 0;             // byte_11BB714[i*4] = 0 (iter-expr, i unchanged)
     }
 }
 

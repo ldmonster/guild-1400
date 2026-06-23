@@ -92,6 +92,10 @@ static const std::uint8_t* TypeRec(std::uint32_t index) {     // dword_13CE294, 
     if (!g_arrays.buildingTypeBase) return nullptr;
     return g_arrays.buildingTypeBase + 589u * index;
 }
+static const std::uint8_t* PersonRec(std::uint32_t index) {   // word_12CE910, 536
+    if (!g_arrays.personFamilyBase) return nullptr;
+    return g_arrays.personFamilyBase + 536u * index;
+}
 static int ObjectCategory(std::uint16_t objId) {              // dword_13CE27C, 65
     if (!g_arrays.objectTypeBase) return -1;
     return g_arrays.objectTypeBase[65u * objId];
@@ -136,17 +140,21 @@ TypeRecord* Building_LookupTypeRecordB(std::uint8_t code, TypeRecord* out) {
 // gilde.exe 0x589960 — VIBE_Building_MatchTypeCode
 int Building_MatchTypeCode(std::uint16_t typeIndex, int count,
                            const std::uint8_t* codes) {
-    const std::uint8_t* rec = TypeRec(typeIndex);
+    // gilde.exe 589998: the record is copied from word_12CE910[268*a1] (the
+    // person/family array, byte stride 536) — NOT the 589-stride building-type
+    // table. The matched field is *(int*)&rec[353] >> 24 == rec[356].
+    const std::uint8_t* rec = PersonRec(typeIndex);
     if (count <= -1)                                     // a2 <= -1
         return 0;
     if (count <= 0)                                      // a2 <= 0 (==0): 0
         return 0;
     if (!rec)                                            // null table => no match
         return 0;
-    // Original: byte at +356 (= *(int*)(rec+353) >> 24).
-    std::uint8_t typeByte = rec[356];
+    // Original: signed compare (movsx ecx, bl  vs  sar esi, 18h). The +356 byte
+    // is sign-extended before the comparison; match the signed semantics.
+    std::int32_t typeByte = static_cast<std::int8_t>(rec[356]);
     for (int i = 0; i < count; ++i) {
-        if (typeByte == codes[i])
+        if (typeByte == static_cast<std::int32_t>(static_cast<std::int8_t>(codes[i])))
             return 1;
     }
     return 0;
@@ -155,7 +163,10 @@ int Building_MatchTypeCode(std::uint16_t typeIndex, int count,
 // gilde.exe 0x5898e8 — VIBE_Building_MatchProfessionCode
 int Building_MatchProfessionCode(std::uint16_t typeIndex, int count,
                                  const std::uint8_t* codes) {
-    const std::uint8_t* rec = TypeRec(typeIndex);
+    // gilde.exe 589906: rec = word_12CE910[268*a1] (person/family array, byte
+    // stride 536). Fields +358 and +361 are compared as unsigned bytes against the
+    // (unsigned char) code (the original loads them with no sign extension).
+    const std::uint8_t* rec = PersonRec(typeIndex);
     int result = 0;
     if (count > -1 && rec) {                             // a2 > -1
         std::uint8_t prof0 = rec[358];
@@ -291,10 +302,14 @@ int Building_CollectSlotsAfterObject(std::uint8_t typeCode, std::uint8_t slotCou
         return 0;
     const std::uint16_t* roomList =
         reinterpret_cast<const std::uint16_t*>(rec + 35);
-    std::uint16_t target = static_cast<std::uint16_t>(afterSlot) & 0x7FFFu; // *a2 masked
+    // gilde.exe 58fbfc: *a2 is loaded with movsx (sign-extended int16), the room
+    // entry is masked to (& 0x7FFF) then ZERO-extended (and ecx,0FFFFh). So the
+    // search key is the SIGNED *a2, NOT a masked copy — a high-bit afterSlot can
+    // never match a masked-positive room entry. Do not mask afterSlot.
+    std::int32_t target = static_cast<std::int16_t>(afterSlot);
     int i = 0;
     for (; i < slotCount; ++i) {                            // i < *(u8*)(rec+34)
-        std::uint16_t v8 = roomList[i] & 0x7FFFu;           // HIBYTE &= ~0x80
+        std::int32_t v8 = roomList[i] & 0x7FFFu;            // HIBYTE &= ~0x80, then zero-ext
         if (v8 == target)
             break;
     }

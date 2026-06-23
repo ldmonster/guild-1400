@@ -1,5 +1,8 @@
 #include "render/meshlist.h"
+#include "render/colorformat.h"       // PackColor (level-shaded white default)
 #include "render/raster.h"
+#include "render/raster_textured.h"   // RasterizeTexturedTriangleRgbz (16bpp leaf)
+#include "render/texture.h"           // WhiteDefaultTexture/Palette (0x5db564)
 
 // =============================================================================
 // guild::render software draw-list flush — implementation. See meshlist.h for
@@ -45,10 +48,56 @@ int SpanFillNullStub(Surface* /*fb*/, const Polygon& /*tri*/) { return 1; }
 // Shared geometry path: read each vertex's PROJECTED screen x/y (+16/+20 in the
 // 80-byte Vertex record, i.e. Vertex::screenX/screenY) and the light byte (+66,
 // Vertex::lightIdx), then call the reconstructed textured-triangle rasterizer.
+//
+// SURFACE-FORMAT ROUTING (wave 3): RasterizeTexturedTriangle @0x5F7D58 drives
+// the 8bpp shade span (FillTexturedSpansShaded @0x5F7960 — one shade byte per
+// pixel into an 8bpp surface; raster.cpp now guards against any other format).
+// For a 16bpp target the engine's span binding never goes out-of-format: a poly
+// with no bound texels samples the 1x1 "WHITE" DEFAULT binding through the
+// 16bpp textured span (VIBE_Texture_BindActive @0x5db564 slot==0 /
+// ResetBinding @0x5db5f0 — texture_upload.h). Route accordingly; the 8bpp path
+// is byte-identical to before.
 static int RasterTri(Surface* fb, const Polygon& tri) {
     if (!fb || !tri.v0 || !tri.v1 || !tri.v2)
         return 1;
     const Vertex* vp[3] = {tri.v0, tri.v1, tri.v2};
+    if (fb->bpp != 8) {
+        // 16bpp target: the white default binding (a HOST STAND-IN — see
+        // texture.h: BindActive @0x5db564's +76==0 arm nulls the binding, there
+        // is no white texture in the binary) through the 1:1 textured leaf
+        // (RasterizeTexturedTriangleRgbz @0x5F6C30).
+        //
+        // Light selector (VERIFIED wave-4/5): the leaf's span palette row is the
+        // AVG of the three vertex +66 light bytes (dword_13FC5E0 =
+        // ((l0+l1+l2)/3) << 8, RasterizeMirrorTriangle @0x5f70bd) — NOT the
+        // max; "768 * max(+66)" is the DRAW-LIST SORT KEY only
+        // (ProjectVerticesToScreen @0x5c5120, 0x5c545f..0x5c547a).
+        //
+        // The original's *(tex+72) is the SHARED HiColTab block (FindOrBuild
+        // @0x5da04c / AddEntry @0x5d9db8): 63 ramp rows of 256 u16 entries
+        // (row L at u16 offset 256*L), so palBase[(avg<<8)|texel] is ramp row
+        // `avg` (valid avg range 0..62). The white default has no real texels,
+        // so we bake the avg-level gray into a flat 256-entry palette row keyed
+        // by the EVIDENCED avg selector (host stand-in; see raster.h SpanTexParams
+        // .lightRow8 and progress/ras-verify-wave5.md).
+        u32 avg = ((u32)vp[0]->lightIdx + (u32)vp[1]->lightIdx +
+                   (u32)vp[2]->lightIdx) / 3;
+        const u8 level = (u8)avg;
+        u16 pal[256];
+        const u16 shade = (u16)PackColor(fb->fmt, level, level, level);
+        for (int i = 0; i < 256; ++i) pal[i] = shade;
+        RgbzVertex rv[3];
+        for (int i = 0; i < 3; ++i) {
+            rv[i].x = vp[i]->screenX;
+            rv[i].y = vp[i]->screenY;
+            rv[i].u = vp[i]->u;          // 1x1: every sample is texel 0
+            rv[i].v = vp[i]->v;
+            rv[i].light = 0;             // row baked into the flat palette
+        }
+        RasterizeTexturedTriangleRgbz(fb, rv, WhiteDefaultTexture(), pal,
+                                      tri.flags38);
+        return 1;
+    }
     RasterVertex rv[3];
     for (int i = 0; i < 3; ++i) {
         rv[i].x = vp[i]->screenX;   // +0x10 projected screen x
@@ -65,7 +114,12 @@ int SpanFillTexturedOpaque(Surface* fb, const Polygon& tri) { return RasterTri(f
 int SpanFillTexturedBlend(Surface* fb, const Polygon& tri) { return RasterTri(fb, tri); }
 
 SpanDispatch::SpanDispatch() {
-    for (int i = 0; i < 7; ++i)
+    // dword_13D8780[0..5]: InitEngineDevice @0x5AF984 sets ALL six to NullStub13
+    // and nothing ever patches them (wave-5 verified — no second installer). The
+    // slot[3]/slot[4] wiring below is the HOST renderer choice so the software
+    // flush 0x5AEC88 actually rasterizes (the binary's own slots are NullStub;
+    // its real textured path is the D3D 0x5AE434, off this table).
+    for (int i = 0; i < 6; ++i)
         slot[i] = &SpanFillNullStub;        // VIBE_Raster_NullStub13 default
     slot[4] = &SpanFillTexturedOpaque;      // opaque (key>>24 == 4)
     slot[3] = &SpanFillTexturedBlend;       // translucent (key>>24 == 3)

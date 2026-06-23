@@ -109,8 +109,10 @@ i32 EmitWithPendingBlock(CommandQueue& q, PendingState& state, CommandPacket& he
 // fragment's Count); `head` is the received-list head to search for fragments.
 // Walks the chain (match by flag byte +3 and Count +8), copies each fragment's
 // payload into state.reasm, sets state.reasm_len from the first fragment's +16
-// word, and marks consumed fragments' opcode byte to 0. Returns the number of
-// fragments consumed (0 if the header carried no block, i.e. header.+12 == 0).
+// word, and clears each consumed fragment (opcode byte -> 0 and +12 link -> 0).
+// Returns state.reasm_len on full reassembly, or 0 when the header carried no
+// block (header.+12 == 0) or a fragment of the chain is missing (mirrors the
+// binary's eax: dword_11AA478 at completion, NULL/0 on the not-found paths).
 int ReassembleReceived(PendingState& state, CommandPacket& header,
                        CommandPacket* head, CommandPacket* (*next)(CommandPacket*));
 

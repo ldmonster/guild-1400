@@ -9,7 +9,10 @@
 // render/gui/net/command leaves are recorded through the SetupStep hook.
 #include "app/session_init.h"
 #include "crt/rand.h"
+#include "sim/buildingtype_callers.h"  // the REAL NewGameSyncScene sink (0x504ce0)
+#include "sim/entity.h"                // g_persons (the live anchor-scan table)
 #include "tests/framework/test.h"
+#include "world/amt.h"                 // AmtSetRateHook (the canonical 0x58f19c)
 
 #include <string>
 #include <vector>
@@ -102,6 +105,28 @@ TEST(AppSessionInit, DrivesHeavyPassesWhenHostBitOrStandalone) {
 }
 
 // ----------------------------------------------------------------------------
+// Recovered session-bootstrap constants (1:1 pin).
+//   kLiveGameFrameMask 0x20007 (gilde.exe 0x533a64, v112 = 131079) — the live-
+//     game feature mask the turn loop passes to RunFrameLoop.
+//   kRoundSyncToken    0x24087 (gilde.exe 0x533a5e, 147591) — round-sync token.
+//   kDayStartHour      6       — the new game's clock start hour (GameTime_Set 06:00).
+// These bare constants were not asserted against app::* anywhere; pin them so a
+// drift in the recovered value is caught.
+// ----------------------------------------------------------------------------
+TEST(AppSessionInit, RecoveredBootstrapConstants) {
+    CHECK_EQ((unsigned)app::kLiveGameFrameMask, 131079u);     // 0x20007
+    CHECK_EQ((unsigned)app::kLiveGameFrameMask, 0x20007u);
+    CHECK_EQ((int)app::kRoundSyncToken, 147591);              // 0x24087
+    CHECK_EQ((int)app::kRoundSyncToken, 0x24087);
+    CHECK_EQ((int)app::kDayStartHour, 6);
+    // The mask decomposes into the documented bit set: kInputCommandPoll(1) |
+    // bit1(2) | kWidgetMouse(4) | kNetworkCommand(0x20000) == 0x20007.
+    CHECK_EQ((unsigned)app::kLiveGameFrameMask,
+             app::mask::kInputCommandPoll | 0x2u | app::mask::kWidgetMouse |
+                 app::mask::kNetworkCommand);
+}
+
+// ----------------------------------------------------------------------------
 // Starting-gold formula (0x533c5e) + city-rate scale (0x58f19c).
 // ----------------------------------------------------------------------------
 TEST(AppSessionInit, StartGoldBaseByDifficulty) {
@@ -111,10 +136,32 @@ TEST(AppSessionInit, StartGoldBaseByDifficulty) {
     CHECK_EQ(app::NewGameStartGoldBase(false, 4), 250);
     CHECK_EQ(app::NewGameStartGoldBase(true, 4), 75000); // cheat overrides
 }
+// gilde.exe 0x58f19c — VIBE_Money_MultiplyByRate is NOT a percentage:
+//   return amount * dword_649A88[dword_13CD6F2[189 * currencyId] >> 16];
+// The second arg is the active city/currency index (byte_6477A1), and the
+// multiplier comes from a runtime-populated city record table. app::MoneyMultiply-
+// ByRate forwards to the canonical world::AmtMoneyMultiplyByRate, which models the
+// runtime table as a settable rate hook (identity by default). With no hook set
+// the result is the amount unchanged for ANY currency index (the prior golden's
+// "*rate/100" was a wrong reconstruction and is corrected here).
 TEST(AppSessionInit, MoneyMultiplyByRate) {
-    CHECK_EQ(app::MoneyMultiplyByRate(1000, 100), 1000); // identity at 100%
-    CHECK_EQ(app::MoneyMultiplyByRate(1000, 50), 500);
-    CHECK_EQ(app::MoneyMultiplyByRate(1250, 100), 1250);
+    world::AmtSetRateHook(nullptr); // identity default (no runtime city table)
+    CHECK_EQ(app::MoneyMultiplyByRate(1000, 100), 1000); // identity (not 1000)
+    CHECK_EQ(app::MoneyMultiplyByRate(1000, 50), 1000);  // NOT 500: index, not %
+    CHECK_EQ(app::MoneyMultiplyByRate(1250, 0), 1250);
+    CHECK_EQ(app::MoneyMultiplyByRate(1250, 7), 1250);   // index 7 -> still identity
+
+    // Routes to the canonical 0x58f19c: install a rate hook reproducing the exact
+    // expression `amount * dword_649A88[dword_13CD6F2[189*cur] >> 16]` over a
+    // cold-image stand-in (record field 0 -> high word 0 -> dword_649A88[0]==0x15).
+    world::AmtSetRateHook([](i32 amount, guild::u8 cur) -> i32 {
+        static const i32 kCurve0 = 0x15; // dword_649A88[0] (cold image)
+        (void)cur;
+        return amount * kCurve0;
+    });
+    CHECK_EQ(app::MoneyMultiplyByRate(1000, 0), 1000 * 0x15);
+    CHECK_EQ(app::MoneyMultiplyByRate(1000, 3), 1000 * 0x15);
+    world::AmtSetRateHook(nullptr); // restore identity for the rest of the suite
 }
 
 // ----------------------------------------------------------------------------
@@ -246,4 +293,47 @@ TEST(AppSessionInit, WorldResetSeedsLatchesAndClock) {
     CHECK_EQ(static_cast<int>(st.victoryFlag), 0);
     CHECK(ctx.worldInited);
     CHECK_EQ(app::WorldClock().day, 2); // qword_13CE852 day = 2
+}
+
+// ----------------------------------------------------------------------------
+// Rule-13 wiring: the NewGameSyncScene step (0x533fXX inside InitOrLoadSession
+// @0x533a54) dispatches the REAL VIBE_Scene_SyncMeisterBuildings @0x504ce0
+// (sim/buildingtype_callers.cpp), not a recorded no-op. We seed the live
+// g_persons table from the NewGameLoadCty hook (the point where the .cty world
+// load would populate it) and verify the meister anchors + shop list were
+// published by the time the bootstrap finishes.
+// ----------------------------------------------------------------------------
+namespace {
+void SeedPersonsOnCtyLoad(SetupStep s, int, void*) {
+    if (s != SetupStep::NewGameLoadCty)
+        return;
+    // kind byte @+2 (byte_12CE912), sub-state byte @+12 (HIBYTE(dword_12CE919)).
+    auto pb = [](int idx) {
+        return reinterpret_cast<guild::u8*>(&guild::sim::g_persons[idx]);
+    };
+    pb(3)[2] = 12; pb(3)[12] = 0;   // anchorA (kind 12 / sub-state 0)
+    pb(5)[2] = 12; pb(5)[12] = 1;   // anchorB (kind 12 / sub-state 1)
+    pb(7)[2] = 11;                  // shop-list entry (kind 11)
+}
+} // namespace
+
+TEST(AppSessionInit, NewGameSyncSceneRunsRealMeisterSync) {
+    SessionInitCtx ctx;
+    ctx.step = &SeedPersonsOnCtyLoad;
+    ctx.rngSeed = 1;
+    // Bit 0x40 of word_63C740 (SceneSyncFlagsWord) skips the recalc/stats and
+    // RegisterNames passes so the scan core is isolated; the anchor publication
+    // is the observable wire.
+    sim::SetSceneSyncFlagsWord(0x40);
+    app::InitOrLoadSession(app::session::kNewGame, ctx, 1);
+
+    CHECK(contains(ctx.order, SetupStep::NewGameSyncScene));
+    CHECK(sim::MeisterAnchorA() == &sim::g_persons[3]);  // dword_6498E8
+    CHECK(sim::MeisterAnchorB() == &sim::g_persons[5]);  // dword_6498EC[0]
+    CHECK_EQ(sim::MeisterShopCount(), 1);
+    CHECK(sim::MeisterShopAt(0) == &sim::g_persons[7]);
+
+    // cleanup: scrub the seeded records + flags for the other tests.
+    sim::SetSceneSyncFlagsWord(0);
+    sim::ResetEntityArrays();
 }

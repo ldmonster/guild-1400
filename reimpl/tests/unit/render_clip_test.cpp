@@ -123,7 +123,11 @@ TEST(RenderClip, FullyOutsideRemoved) {
 
 // ---------------------------------------------------------------------------
 // DISPATCH: key>>24 routes to the expected raster variant.
-//   slot 0..2,5,6 = NullStub ; slot 4 = opaque ; slot 3 = blend.
+//   slot 0..2,5 = NullStub ; slot 4 = opaque ; slot 3 = blend.
+// The dispatch table dword_13D8780 is SIX slots (0..5), confirmed by W5-RAS
+// against InitEngineDevice @0x5AF984 (its only writer); the apparent "7th slot"
+// at 0x13D8798 is the 3-entry clip-input vertex-pointer array, not a dispatch
+// slot. (Previously this test read a non-existent slot[6].)
 // ---------------------------------------------------------------------------
 TEST(RenderClip, SpanDispatchTableSlots) {
     SpanDispatch disp;
@@ -133,7 +137,6 @@ TEST(RenderClip, SpanDispatchTableSlots) {
     CHECK(disp.slot[3] == &SpanFillTexturedBlend);
     CHECK(disp.slot[4] == &SpanFillTexturedOpaque);
     CHECK(disp.slot[5] == &SpanFillNullStub);
-    CHECK(disp.slot[6] == &SpanFillNullStub);
 
     // key>>24 selects the slot: key 0x04000000 -> 4 (opaque), 0x03000000 -> 3.
     u32 keyOpaque = 0x04000000u;
@@ -187,5 +190,117 @@ TEST(RenderClip, ReprojectScalarsViaFlush) {
     // Pool vertex (3,2,1): sx=326, sy=244.
     CHECK(std::fabs(sc.newVerts[0].screenX - 326.0f) < 1e-3f);
     CHECK(std::fabs(sc.newVerts[0].screenY - 244.0f) < 1e-3f);
+    SurfaceDestroy(fb);
+}
+
+// ===========================================================================
+// WAVE-10 HARDENING: degenerate / edge-case memory-safety coverage for the clip
+// + meshlist flush. Drives the Sutherland-Hodgman pass and the dispatch loop
+// with empty / null / boundary inputs an ASAN build must survive cleanly.
+// ===========================================================================
+
+// --- CLIP: zero-plane context returns the input list unchanged, no OOB --------
+// planeCount 0 means the for-loop breaks on the first iteration (planeCount <= 0)
+// before touching any plane; outCount stays 0 and the seeded list is returned.
+TEST(RenderClip, ZeroPlaneContextNoPass) {
+    Vertex tri[3];
+    std::memset(tri, 0, sizeof(tri));
+    SetXYZ(tri[0], 0, 0, 5); SetXYZ(tri[1], 4, 0, 5); SetXYZ(tri[2], 2, 4, 5);
+    ClipScratch sc;
+    std::memset(&sc, 0, sizeof(sc));
+    sc.listPtrs[0][0] = &tri[0];
+    sc.listPtrs[0][1] = &tri[1];
+    sc.listPtrs[0][2] = &tri[2];
+    ClipContext ctx{0, nullptr};          // no planes
+    Vertex** out = ClipPolygonToPlane(sc, ctx, 3);
+    CHECK(out == sc.listPtrs[0]);         // i==0 -> side 0 returned
+    CHECK_EQ(sc.outCount, 0);             // no plane pass ran
+}
+
+// --- CLIP: fully-degenerate empty input (no planes, no seed) -> nullptr -------
+TEST(RenderClip, EmptyEverythingReturnsNull) {
+    ClipScratch sc;
+    std::memset(&sc, 0, sizeof(sc));
+    ClipContext ctx{0, nullptr};
+    Vertex** out = ClipPolygonToPlane(sc, ctx, 0);
+    CHECK(out == nullptr);
+    CHECK_EQ(sc.outCount, 0);
+}
+
+// --- CLIP: many-vertex polygon stays within the 128-ptr ping-pong lists -------
+// Seed close to the list capacity and clip with a plane that keeps all verts
+// inside (no new pool verts) — the closing copy `in[inCount] = in[0]` must stay
+// in bounds (index inCount <= 127). Drives the capacity boundary (ASAN).
+TEST(RenderClip, NearCapacityPolygonNoOverflow) {
+    static Vertex poly[120];
+    std::memset(poly, 0, sizeof(poly));
+    ClipScratch sc;
+    std::memset(&sc, 0, sizeof(sc));
+    const int N = 120;                    // < 128, leaves room for the close copy
+    for (int i = 0; i < N; ++i) {
+        SetXYZ(poly[i], (float)i, 0.0f, 5.0f);   // all z=5 -> inside z>=1
+        sc.listPtrs[0][i] = &poly[i];
+    }
+    ClipContext ctx{1, &kNearPlane};
+    Vertex** out = ClipPolygonToPlane(sc, ctx, N);
+    CHECK(out != nullptr);
+    CHECK_EQ(sc.outCount, N);             // all kept, none generated
+}
+
+// --- FLUSH: empty draw list draws nothing, no OOB ----------------------------
+TEST(RenderClip, FlushEmptyListDrawsNothing) {
+    MeshList list{nullptr, 0};
+    SpanDispatch disp;
+    ClipContext ctx{1, &kNearPlane};
+    ProjectScalars proj{2.0f, 320.0f, 2.0f, 240.0f};
+    ClipScratch sc;
+    std::memset(&sc, 0, sizeof(sc));
+    Surface* fb = SurfaceCreate(64, 64, 16);
+    CHECK(fb != nullptr);
+    int drawn = RasterizeMeshList(list, fb, disp, ctx, proj, sc);
+    CHECK_EQ(drawn, 0);
+    SurfaceDestroy(fb);
+}
+
+// --- FLUSH: a null poly entry is skipped (continue), no deref ----------------
+TEST(RenderClip, FlushNullPolyEntrySkipped) {
+    DrawListEntry e{0u, nullptr};
+    MeshList list{&e, 1};
+    SpanDispatch disp;
+    ClipContext ctx{1, &kNearPlane};
+    ProjectScalars proj{2.0f, 320.0f, 2.0f, 240.0f};
+    ClipScratch sc;
+    std::memset(&sc, 0, sizeof(sc));
+    Surface* fb = SurfaceCreate(64, 64, 16);
+    CHECK(fb != nullptr);
+    int drawn = RasterizeMeshList(list, fb, disp, ctx, proj, sc);
+    CHECK_EQ(drawn, 0);                    // null poly -> not counted, no crash
+    SurfaceDestroy(fb);
+}
+
+// --- FLUSH: direct (un-clipped) translucent poly routes to slot 3, no clip ----
+// flags38 bit0 set -> dispIdx 3; no vertex clip bits -> direct dispatch (no
+// clipper pass). Exercises the non-clip branch + the slot-3 index.
+TEST(RenderClip, FlushDirectTranslucentRoutesSlot3) {
+    Vertex tri[3];
+    std::memset(tri, 0, sizeof(tri));
+    SetXYZ(tri[0], 2, 2, 5); SetXYZ(tri[1], 11, 4, 5); SetXYZ(tri[2], 4, 11, 5);
+    tri[0].screenX = 2; tri[0].screenY = 2;
+    tri[1].screenX = 11; tri[1].screenY = 4;
+    tri[2].screenX = 4; tri[2].screenY = 11;
+    Polygon poly{};
+    poly.v0 = &tri[0]; poly.v1 = &tri[1]; poly.v2 = &tri[2];
+    poly.flags38 = 0x01;                   // translucent -> dispIdx 3
+    DrawListEntry e{0u, &poly};
+    MeshList list{&e, 1};
+    SpanDispatch disp;
+    ClipContext ctx{1, &kNearPlane};
+    ProjectScalars proj{2.0f, 320.0f, 2.0f, 240.0f};
+    ClipScratch sc;
+    std::memset(&sc, 0, sizeof(sc));
+    Surface* fb = SurfaceCreate(32, 32, 16);
+    CHECK(fb != nullptr);
+    int drawn = RasterizeMeshList(list, fb, disp, ctx, proj, sc);
+    CHECK_EQ(drawn, 1);
     SurfaceDestroy(fb);
 }

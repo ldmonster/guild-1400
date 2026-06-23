@@ -528,6 +528,31 @@ TEST(WorldStraftatSync, BroadcastAccusationDeliversWithEvidence) {
     }
 }
 
+// WAVE-16: pin the binary's flagField mask-out side effect (0x4c382b):
+// dword_12CEAF4[134 * v8] &= v12, where v8 == the matching evidence-pair index.
+TEST(WorldStraftatSync, BroadcastAccusationMasksRecipientByPairIndex) {
+    CrimeAndEvidenceReset();
+    StraftatAccusationLogReset();
+    g_crimeTable[0].id = 4321; g_crimeTable[0].perpetrator = 99;
+    g_crimeTable[0].provenState = 1;
+    // The matching evidence pair sits at slot index 2 (e==4 -> v8 == 2), so the
+    // recipient masked is recipients[2], NOT the delivering recipient.
+    g_evidenceOwner[4] = 50; g_evidenceCrimeId[4] = 4321;
+
+    AccusationRecipient recips[3];
+    recips[0] = AccusationRecipient{6, 50, 0};      // delivers (has evidence)
+    recips[1] = AccusationRecipient{6, 60, 0};      // no evidence
+    recips[2] = AccusationRecipient{6, 70, 0x0F};   // gets its flagField &= mask
+
+    int delivered = StraftatBroadcastAccusation(
+        4321, /*ownerId*/7, /*mask*/0x06, recips, 3, 99, true);
+    CHECK_EQ(delivered, 1);
+    // recipients[v8=2].flagField &= 0x06  -> 0x0F & 0x06 == 0x06.
+    CHECK_EQ(recips[2].flagField, 0x06);
+    // The delivering recipient (index 0) is NOT the one masked.
+    CHECK_EQ(recips[0].flagField, 0);
+}
+
 TEST(WorldStraftatSync, BroadcastAccusationSkipsOwnerAndMasked) {
     CrimeAndEvidenceReset();
     StraftatAccusationLogReset();

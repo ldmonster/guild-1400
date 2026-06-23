@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::printf("guild_run: Vulkan graphics + SDL2 audio | movie=SKIPPED | drm=SKIPPED\n");
+    std::printf("guild_run: Vulkan graphics + SDL2 audio | movie=pl_mpeg(MPEG-1) | drm=bypass(stub; 1:1 recon exists)\n");
 
     // --- real backends ---------------------------------------------------
     shim::VulkanGraphicsDevice gfx;
@@ -212,6 +212,12 @@ int main(int argc, char** argv) {
         cfg.cityPath  = cityPath;
         cfg.fbW = W; cfg.fbH = H;
         cfg.frameCapMs = windowed ? 16 : 0;   // uncapped headless so tests are fast
+        // Wave-2 session integration: the REAL 3D city view (CityView3D over the
+        // .cty's embedded scene + SessionInput pick chain) and the continuous
+        // game clock (SessionTick: TimeBase -> clock proc -> opcode-30 commits,
+        // day rollover through RunGameDay). SPACE day-advance stays.
+        cfg.city3d = true;
+        cfg.continuousClock = true;
 
         // Enumerate the shipped cities for the New-Game screen.
         play::SdlMenuConfig mcfg;
@@ -241,37 +247,113 @@ int main(int argc, char** argv) {
             // play; then we run the session and re-enter the real menu (ESC in-game).
             std::printf("  --play: %zu cities; booting the 1:1 main menu (Menu_RunMainMenu) ...\n",
                         mcfg.cities.size());
+            // Bring up the audio device so the menu can play the looping CD track
+            // (32 voices, stereo, 44.1kHz; harmless dummy device when headless).
+            const bool haveAudio = audioDev.init(32, 2, 44100);
             bool running = true;
             while (running) {
                 play::NativeMenuResult m = play::RunNativeMainMenu(
-                    gfx, playPlat, fs, gameDir, mcfg.cities, W, H, /*frameCapMs=*/16, /*maxFrames=*/-1);
+                    gfx, playPlat, fs, gameDir, mcfg.cities, W, H, /*frameCapMs=*/16, /*maxFrames=*/-1,
+                    haveAudio ? &audioDev : nullptr);
                 std::printf("  menu: action=%d city='%s' frames=%d quitWin=%d\n",
                             (int)m.action, m.cityPath.c_str(), m.framesPresented, (int)m.quitByWindow);
                 if (m.quitByWindow || m.action == play::NativeMenuResult::kQuit) break;
-                if (m.action != play::NativeMenuResult::kPlayCity || m.cityPath.empty()) continue;
 
-                cfg.cityPath = m.cityPath;
                 cfg.maxFrames = -1;   // play until ESC/close, then back to the menu
-                std::printf("  --play: loading '%s' ...\n", cfg.cityPath.c_str());
+                cfg.audioDev = haveAudio ? &audioDev : nullptr;  // real session audio
+                if (m.action == play::NativeMenuResult::kLoadGame && !m.savePath.empty()) {
+                    // LOAD GAME: enter the session from the picked save
+                    // (play::LoadLiveWorld), WITHOUT the new-game commit.
+                    cfg.loadSavePath = m.savePath;
+                    cfg.applyNewGame = false;
+                    std::printf("  --play: loading save '%s' (%s) ...\n",
+                                m.savePath.c_str(), m.saveName.c_str());
+                } else if (m.action == play::NativeMenuResult::kPlayCity &&
+                           !m.cityPath.empty()) {
+                    // NEW GAME: the full chosen parameter block (the 0x122F4A0..
+                    // image) commits right after the world load — the original's
+                    // VIBE_Command_EnqueueInheritanceTransfer @0x533e03 call site.
+                    cfg.loadSavePath.clear();
+                    cfg.cityPath = m.cityPath;
+                    cfg.newGame = m.params;
+                    cfg.applyNewGame = m.params.started;
+                    std::printf("  --play: loading '%s' (new game: %s %s, diff %d) ...\n",
+                                cfg.cityPath.c_str(), m.params.firstName.c_str(),
+                                m.params.familyName.c_str(), m.params.difficulty);
+                } else {
+                    continue;
+                }
                 play::SdlSessionTrace tr = play::RunSdlSession(fs, gfx, playPlat, cfg);
                 std::printf("  session: loaded=%d objects=%d frames=%d days=%d orders=%d "
+                            "view3d=%d(%d inst) newGame=%d player=%d clock=%d/%d "
                             "quitWin=%d quitEsc=%d\n",
                             (int)tr.loaded, tr.liveObjects, tr.framesPresented,
                             tr.daysAdvanced, tr.ordersIssued,
+                            (int)tr.view3dActive, tr.view3dInstances,
+                            (int)tr.newGameApplied, tr.playerId,
+                            tr.worldDay, tr.worldHour,
                             (int)tr.quitByWindow, (int)tr.quitByEsc);
+                // Wave-3: load-game 3D derives the city when the partial .SAV
+                // embeds no scene (see sdl_session.cpp); report what was used.
+                if (!tr.city3dCityName.empty())
+                    std::printf("  session: 3D scene from stadt_%s.ed3 "
+                                "(save-header/INI city derivation)\n",
+                                tr.city3dCityName.c_str());
+                if (tr.npcMovementActive && (tr.dailyAssigned || tr.moveSteps))
+                    std::printf("  session living city: dispatched=%d assigned=%d "
+                                "steps=%d moved=%d moving=%d\n",
+                                tr.dailyDispatched, tr.dailyAssigned,
+                                tr.moveSteps, tr.personsMoved, tr.personsMoving);
                 if (tr.quitByWindow) running = false;   // window closed -> exit; ESC -> back to menu
             }
         } else {
             // Headless (no display): no input to drive the menu, so run the session
             // directly so a no-display smoke still renders + presents the city.
             cfg.maxFrames = framesSet ? frames : 240;
+            cfg.dumpFramePath = "/tmp/guild_session_city3d.ppm";  // visual artifact
+            // Park the idle headless mouse at the screen centre: NullPlatform
+            // defaults to (0,0) == the top-left corner, which the REAL edge-scroll
+            // (EdgeScroll @0x4b2c34, faithfully wired) treats as a held corner
+            // scroll — 240 frames of it pans the camera clean off the city.
+            {
+                shim::MouseState centre{};
+                centre.x = W / 2;
+                centre.y = H / 2;
+                nullPlat.setMouse(centre);
+            }
             std::printf("  --play: headless; loading '%s' from %s ...\n",
                         cfg.cityPath.c_str(), gameDir.c_str());
             play::SdlSessionTrace tr = play::RunSdlSession(fs, gfx, playPlat, cfg);
             std::printf("  --play trace: mounted=%d loaded=%d liveObjects=%d persons=%d "
-                        "framesPresented=%d daysAdvanced=%d\n",
+                        "framesPresented=%d daysAdvanced=%d view3d=%d(%d inst, %d px) "
+                        "clock=%d fires=%d dump=%d\n",
                         (int)tr.mounted, (int)tr.loaded, tr.liveObjects, tr.persons,
-                        tr.framesPresented, tr.daysAdvanced);
+                        tr.framesPresented, tr.daysAdvanced, (int)tr.view3dActive,
+                        tr.view3dInstances, tr.view3dNonClear, (int)tr.clockActive,
+                        tr.clockFires, (int)tr.frameDumped);
+            // Wave-4 living city: the NPC movement outcome (the daily director
+            // dispatches only persons with populated building columns — see
+            // progress/living-city-wave4.md).
+            if (tr.npcMovementActive)
+                std::printf("  --play living city: dispatched=%d assigned=%d "
+                            "steps=%d moved=%d arrivals=%d moving=%d\n",
+                            tr.dailyDispatched, tr.dailyAssigned, tr.moveSteps,
+                            tr.personsMoved, tr.moveArrivals, tr.personsMoving);
+            // WAVE-8 world entities: the per-vertex sun lighting + smoke + gait +
+            // animals lifecycle + the overview map.
+            if (tr.view3dActive)
+                std::printf("  --play wave8: sceneLights=%d sunLitVerts=%d "
+                            "smokeSystems=%d gaitFlips=%d animalTicks=%d "
+                            "animalsAtExit=%d mapOpened=%d mapMarkers=%d\n",
+                            tr.view3dSceneLights, tr.view3dSunLitVerts,
+                            tr.view3dSmokeSystems, tr.view3dGaitFlips,
+                            tr.view3dAnimalTicks, tr.view3dAnimalCount,
+                            (int)tr.view3dMapOpened, tr.view3dMapMarkers);
+            if (tr.view3dActive)
+                std::printf("  --play wave9: flagObjects=%d vegRelit=%d "
+                            "reflectiveMeshes=%d animalsDrawn=%d\n",
+                            tr.view3dFlagObjects, tr.view3dVegRelit,
+                            tr.view3dReflectiveMeshes, tr.view3dAnimalsDrawn);
         }
         std::printf("  vulkan device: %s (API %s)\n",
                     gfx.deviceName().c_str(), gfx.apiVersion().c_str());

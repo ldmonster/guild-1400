@@ -139,42 +139,47 @@ int CountWithTransport(int ownerUniverse, int anyMesh) {
 }
 
 // gilde.exe 0x4b99ac — VIBE_Character_CollectByOwner.
-//   (a1 != 0 branch) for each Person p:
-//     v7 = *((DWORD*)p + 97);                 // p+388 live actor
-//     if (v7 && *(DWORD*)(v7+44) == *(DWORD*)(a1+1)) {  // actor home == owner key
-//       ++matches; out[++idx] = p;
-//       if (matches > 8) SetVisible(p+388, 0);          // hide overflow
-//     }
-//     loop while (scanned < 768 && matches < 31)
-//   (a1 == 0 branch) collect actors with home universe id == -1 (wild).
+//   (a1 != 0 branch)  v3 = 0; v5 = 0; v6 = 0;
+//     do {
+//       v7 = *((DWORD*)v4 + 97);                 // p+388 live actor
+//       if (v7 && *(DWORD*)(v7+44) == *(DWORD*)(a1+1)) {  // home == owner key
+//         ++v6; ++v3;
+//         dword_11BB69C[v6] = v4;                 // PRE-increment: writes [1],[2],...
+//         if (v3 > 8) SetVisible(p+388, 0);        // hide overflow (9th match on)
+//       }
+//       ++v5; v4 += 268;
+//     } while (v5 < 768 && v3 < 31);
+//   (a1 == 0 branch) collect actors with home universe id == -1 (wild),
+//   same pre-incremented index (dword_11BB69C[++v11]).
 // `ownerKeyId` is the *(DWORD*)(a1+1) value already resolved by the caller.
+//
+// IMPORTANT (1:1): the original stores matches into the global result buffer
+// dword_11BB69C using a PRE-incremented index, so the first match lands at
+// outPersons[1], the second at outPersons[2], ... — outPersons[0] is reserved
+// (slot 0 == dword_11BB69C[0], read separately by the renderer). We reproduce
+// that exact layout here.
 int CollectByOwner(int ownerKeyId, LiveActor* const* personLiveActor,
                    int personCount, LiveActor** outPersons, int maxOut) {
-    int matches = 0;
-    int idx = 0;
+    int matches = 0;  // v3 / v6 (== v11 in the wild branch)
     if (ownerKeyId) {
-        for (int i = 0; i < personCount; ++i) {
+        for (int i = 0; i < personCount && matches < 31; ++i) {
             LiveActor* a = personLiveActor[i];
             if (a && a->universeId == ownerKeyId) {
-                if (idx < maxOut)
-                    outPersons[idx++] = a;
-                ++matches;
+                ++matches;                                // pre-increment index
+                if (matches < maxOut)
+                    outPersons[matches] = a;              // dword_11BB69C[v6]
                 if (matches > 8)
                     GetCharQueryHooks().setVisible(a, 0);
             }
-            if (matches >= 31)
-                break;
         }
     } else {
-        for (int i = 0; i < personCount; ++i) {
+        for (int i = 0; i < personCount && matches < 31; ++i) {
             LiveActor* a = personLiveActor[i];
             if (a && a->universeId == -1) {
-                if (idx < maxOut)
-                    outPersons[idx++] = a;
                 ++matches;
+                if (matches < maxOut)
+                    outPersons[matches] = a;
             }
-            if (matches >= 31)
-                break;
         }
     }
     return matches;

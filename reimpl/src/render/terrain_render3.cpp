@@ -263,12 +263,13 @@ SkyDome* SkyCreate(i32 owner, i32 param1, i32 param2) {
 // gilde.exe 0x5efda0 — VIBE_Sky_Destroy
 // ---------------------------------------------------------------------------
 SkyDome* SkyDestroy(SkyDome* dome) {
+    // 0x5efda0: drain layers via RemoveLayer, then FreeDebug. The original does
+    // NOT touch the global-dome slot here (dword_64A7C8); only DestroyGlobal does.
     if (dome) {
         while (dome->headLayer)
             RemoveLayer(dome, dome->headLayer);
         SkyDome* saved = dome;
         g_hooks.freeDebug(dome);
-        if (g_globalDome == saved) g_globalDome = nullptr;
         return saved;
     }
     return dome;

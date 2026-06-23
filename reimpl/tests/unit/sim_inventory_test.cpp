@@ -306,6 +306,11 @@ TEST(SimInvTrade, SellableAmountResolution) {
     cap.outStockRec = StockChild{1, 1};                // cap 20 -> free 20; /2 = 10; min(7,10)=7
     SellableResult c2 = TradeComputeSellableAmount(cap, false);
     CHECK_EQ(c2.produced, 7);
+    // 0x4976c8..0x4976e0: proceeds = trunc(price * v15) — the CRAFT count, NOT
+    // price * outputCount*v15.  Here outputCount=2, produced(v15)=7, price 12.5:
+    //   correct  : trunc(12.5 * 7)     = 87
+    //   (the old buggy outputCount*v15 path gave trunc(12.5*2*7)=175).
+    CHECK_EQ(c2.proceeds, 87);
 
     TradeSetMarketPriceHook(nullptr);
 }

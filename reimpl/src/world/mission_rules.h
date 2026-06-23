@@ -26,17 +26,21 @@ struct EventDesc;   // world/event.h (the 24-byte descriptor record)
 // on byte_122FEC0[0], the active mission slot's type.)
 int MissionFindDescriptorByValue(u8 value);
 
-// Convenience: returns the matched descriptor (or nullptr), and its text/param
-// fields the reward-summary renders:
-//   nameTextId  = *(int*)(rec+4) + 1   (RunSpecialDialog: VIBE_Text(... +1))
-//   bodyTextId  = *(int*)(rec+4) + 2   (RunRewardSummary: *(v37+4)+2)
-//   voiceIndex  = *(int*)(rec+12)      (the "_AUFTRAEGE_*_HS_%.2d" suffix; rec+0x0C)
+// Convenience: returns the matched descriptor index and the text/voice fields the
+// special-mission and reward-summary dialogs render. The dialogs key off the +4
+// value byte address (v15 = &byte_63CD4C[v4]); the text id lives one dword past it
+// (rec+8 == paramA) and each dialog uses a different voice-suffix dword:
+//   nameTextId        = *(int*)(rec+8) + 1   RunSpecialDialog VIBE_Text(*(v15+1)+1)
+//   bodyTextId        = *(int*)(rec+8) + 2   RunRewardSummary VIBE_Text(*(v42+4)+2)
+//   specialVoiceIndex = *(int*)(rec+0x0C)    RunSpecialDialog "_AUFTRAEGE_VERGABE_HS_%.2d"
+//   rewardVoiceIndex  = *(int*)(rec+0x10)    RunRewardSummary "_AUFTRAEGE_ERFOLG_HS_%.2d"
 // Returns false (and leaves outputs untouched) when no descriptor matches.
 struct MissionRewardInfo {
-    int descriptorIndex;  // matched table index
-    int nameTextId;       // rec.value field (+4) used as a text id, + 1
-    int bodyTextId;       // rec.value field (+4) used as a text id, + 2
-    int voiceIndex;       // rec.paramC (+0x10? no: +0x0C) voice suffix
+    int descriptorIndex;     // matched table index
+    int nameTextId;          // rec.paramA (+8) used as a text id, + 1
+    int bodyTextId;          // rec.paramA (+8) used as a text id, + 2
+    int specialVoiceIndex;   // rec.paramB (+0x0C) special-dialog voice suffix
+    int rewardVoiceIndex;    // rec.paramC (+0x10) reward-summary voice suffix
 };
 bool MissionResolveReward(u8 value, MissionRewardInfo* out);
 

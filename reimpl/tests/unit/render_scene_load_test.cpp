@@ -167,6 +167,116 @@ TEST(SceneLoad, ObjectFramingChildSiblingRecursion) {
     CHECK(!floor);                      // floor flag was 0
 }
 
+// ===========================================================================
+// HARDENING (wave-11): malformed / truncated / over-deep scene streams. These
+// drive the real parse entries with degenerate input and must fail SAFE (no OOB,
+// no stack overflow) under ASAN+UBSAN, never reading past the buffer.
+// ===========================================================================
+
+TEST(SceneLoadHarden, EmptyAndTinyBuffers) {
+    SceneObjectHooks none;  // null consumeBody -> header + count only
+    for (std::size_t n = 0; n <= 8; ++n) {
+        std::vector<u8> buf(n, 0xFF);
+        ParsedScene ps = ParseScene(buf.data(), buf.size(), none);
+        // A 0xFF-filled tiny buffer has an invalid tag -> headerOk false, no reads
+        // past the end. (0-byte must not crash the reader either.)
+        CHECK(!ps.headerOk);
+    }
+}
+
+TEST(SceneLoadHarden, HeaderTruncatedMidField) {
+    // Valid tag but the stream is cut after the tag: every subsequent Bio read
+    // runs off the end and returns zero-filled, EOF-safe. ParseSceneHeader still
+    // returns true (tag was valid) but reads nothing past the buffer.
+    Buf s; s.dword(0x3A6C00BBu);   // just the tag, nothing else
+    SceneReader r(s.b);
+    SceneHeader h;
+    CHECK(ParseSceneHeader(r, h));         // tag accepted
+    CHECK(r.eof());                        // ran off the end safely
+}
+
+TEST(SceneLoadHarden, ReadStringNoTerminatorEofSafe) {
+    // A name with no NUL before EOF must stop at the buffer end, not over-read.
+    std::vector<u8> raw = {'A','B','C','D'};   // no terminator
+    SceneReader r(raw.data(), raw.size());
+    std::string s = r.ReadString();
+    CHECK(s == "ABCD");
+    CHECK(r.eof());
+}
+
+TEST(SceneLoadHarden, ObjectCountTooLargeNoOverRead) {
+    // Declare a huge object count but provide no record bytes. ReadObjectList must
+    // stop at end-of-buffer (the `!r.atEnd()` gate) without over-reading.
+    Buf s = BuildSceneV(0x3A6C00BBu, 0xFFFFFFFFu);
+    SceneObjectHooks hooks;
+    hooks.consumeBody = [](SceneReader& rr, u32, SceneObjectRecord&) -> bool {
+        rr.ReadDword(); return true;
+    };
+    SceneReader r(s.b);
+    SceneHeader h; CHECK(ParseSceneHeader(r, h));
+    bool floor = false;
+    auto objs = ReadObjectList(r, h.tag, hooks, &floor);  // must terminate safely
+    (void)objs;
+    CHECK(r.atEnd());
+}
+
+TEST(SceneLoadHarden, TruncatedMidObjectRecord) {
+    // One object record that is cut off mid-body. The hook's ReadDword over-reads
+    // EOF-safely; the framing must not run off the buffer.
+    Buf s = BuildSceneV(0x3A6C00BBu, 1);
+    s.byte(1);                 // present
+    s.cstr("partial");         // name
+    s.dword(0xAAAA);           // field116
+    // ...stream ends here, before field115/kind/body/child/sibling.
+    SceneObjectHooks hooks;
+    hooks.consumeBody = [](SceneReader& rr, u32, SceneObjectRecord&) -> bool {
+        rr.ReadDword(); return true;
+    };
+    SceneReader r(s.b);
+    SceneHeader h; CHECK(ParseSceneHeader(r, h));
+    bool floor = false;
+    auto objs = ReadObjectList(r, h.tag, hooks, &floor);
+    CHECK_EQ((int)objs.size(), 1);
+    CHECK(objs[0].name == "partial");
+    CHECK(r.atEnd());
+}
+
+TEST(SceneLoadHarden, OverDeepChildChainDepthGuard) {
+    // A pathological scene: one top-level object whose body is empty and which has
+    // a child, whose child has a child, ... far deeper than kSceneMaxNodeDepth.
+    // Without the depth guard this recurses one native frame per level and blows
+    // the stack; with it the walk stops safely. ASAN/UBSAN must stay clean.
+    Buf s = BuildSceneV(0x3A6C00BBu, 1);
+    const int kDeep = kSceneMaxNodeDepth + 5000;
+    auto objHdr = [&]() {
+        s.byte(1);                 // present
+        s.byte(0);                 // empty name (immediate NUL)
+        s.dword(0); s.dword(0);    // field116, field115
+        s.dword(0);                // kind dword
+        s.byte(0);                 // kind byte (>=0xA6)
+        s.dword(0);                // fixture body dword (hook eats it)
+    };
+    for (int i = 0; i < kDeep; ++i) {
+        objHdr();
+        s.byte(1);                 // hasChild -> recurse one level deeper
+    }
+    // innermost: terminate child + sibling, then unwind with hasSibling=0.
+    objHdr();
+    s.byte(0);                     // innermost hasChild = 0
+    s.byte(0);                     // innermost hasSibling = 0
+    // every ancestor's hasSibling byte (after its child returns) reads 0 at EOF.
+
+    SceneObjectHooks hooks;
+    hooks.consumeBody = [](SceneReader& rr, u32, SceneObjectRecord&) -> bool {
+        rr.ReadDword(); return true;
+    };
+    SceneReader r(s.b);
+    SceneHeader h; CHECK(ParseSceneHeader(r, h));
+    bool floor = false;
+    auto objs = ReadObjectList(r, h.tag, hooks, &floor);  // must NOT stack-overflow
+    CHECK_EQ((int)objs.size(), 1);
+}
+
 // =============================== script_run ================================
 using namespace guild::sim;
 

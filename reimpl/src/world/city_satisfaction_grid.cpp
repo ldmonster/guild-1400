@@ -116,14 +116,21 @@ int CityAddCrimeToGrid(GridEnv& env, u8 lawId, int* outX, int* outY) {
 
     // The original gates on the scene ptr (*(obj+97)); ResolvePlayerObject==true
     // implies a placed object here.
-    if (!env.WorldToCityTile(wx, wz, x, y))
-        return y;
+    //
+    // 1:1 FIX (0x578032..0x578076): the original IGNORES WorldToCityTile's return
+    // value — it calls it (which leaves x/y at the RNG fallback when off-map) and
+    // then writes the centre + ring UNCONDITIONALLY. Our CoordWorldToCityTile does
+    // not touch x/y on failure, so x/y keep the RNG draw, exactly like v20/v21.
+    env.WorldToCityTile(wx, wz, x, y);
 
-    // Centre cell: word_12349A2[96*x + 12*y] += weight.
+    // Centre cell: word_12349A2[96*x + 12*y] += weight  (byte 192*x+24*y+26).
     GridCrimeCentre(x, y) = static_cast<i16>(GridCrimeCentre(x, y) + weight);
-    // 3x3 ring: word_1234988 += weight.
+    // 3x3 ring: word_1234988 += weight. 1:1 FIX (0x5780d2): the inner loop
+    // PRE-increments the cell pointer by 24 before the store, so the area write
+    // lands one CELL to the right in y — byte 192*cx + 24*(cy+1) == GridCrimeArea(cx,cy+1).
     CrimeRing(x, y, [&](int cx, int cy) {
-        GridCrimeArea(cx, cy) = static_cast<i16>(GridCrimeArea(cx, cy) + weight);
+        GridCrimeArea(cx, cy + 1) =
+            static_cast<i16>(GridCrimeArea(cx, cy + 1) + weight);
     });
 
     if (outX) *outX = x;
@@ -146,12 +153,15 @@ int CityRemoveCrimeFromGrid(GridEnv& env, u8 lawId) {
     if (!haveObj)
         return y;
 
-    if (!env.WorldToCityTile(wx, wz, x, y))
-        return y;
+    // 1:1: like AddCrime, the original ignores WorldToCityTile's return and writes
+    // unconditionally (x/y keep the RNG fallback when off-map).
+    env.WorldToCityTile(wx, wz, x, y);
 
     GridCrimeCentre(x, y) = static_cast<i16>(GridCrimeCentre(x, y) - weight);
+    // Same +24 pre-increment as Add: area write lands at GridCrimeArea(cx, cy+1).
     CrimeRing(x, y, [&](int cx, int cy) {
-        GridCrimeArea(cx, cy) = static_cast<i16>(GridCrimeArea(cx, cy) - weight);
+        GridCrimeArea(cx, cy + 1) =
+            static_cast<i16>(GridCrimeArea(cx, cy + 1) - weight);
     });
     return y;
 }
@@ -213,18 +223,20 @@ void CityBuildSatisfactionGrid(GridEnv& env) {
         GridSatWeight(x, y) =
             static_cast<float>(contrib * kSatSpreadWeight + GridSatWeight(x, y));
 
-        // 3x3-ring spread: field B (1234998) += contrib; field A (1234994) +=
-        // contrib*0.5. Faithful to the two interleaved accumulators (v15/v13).
-        float ringB = contrib;
-        float ringA = contrib * kSatSpreadWeight;
+        // 3x3-ring spread. 1:1 FIX (0x578a7f..0x578a93): the inner loop reads the
+        // +40 field (SatDenom) of cell (cx,cy) and writes the +16 field of cell
+        // (cx,cy+1) — but the +24 PRE-increment makes those the SAME byte:
+        //   write byte 192*cx + 24*(cy+1) + 16  ==  192*cx + 24*cy + 40  (SatDenom(cx,cy))
+        //   write byte 192*cx + 24*(cy+1) + 12  ==  192*cx + 24*cy + 36  (SatWeight(cx,cy))
+        // So the ring effectively does SatDenom(cx,cy) += contrib (v14) and
+        // SatWeight(cx,cy) += contrib*0.5 (v13). The previous reconstruction wrote
+        // the un-shifted +16/+12 bytes, corrupting every cell except where the
+        // alias happened to coincide.
+        float ringB = contrib;                  // v14 (== v22)
+        float ringA = contrib * kSatSpreadWeight;  // v13 (== v23 = v22*0.5)
         CrimeRing(x, y, [&](int cx, int cy) {
-            // *(float*)(1234998 + idx) = *(float*)(12349B0 + idx) + ringB;
-            // The original reads the +40 field (SatDenom) and writes the +16
-            // field; we reproduce the cross-field read/write exactly.
-            float prevDenom = GridSatDenom(cx, cy);
-            *reinterpret_cast<float*>(&GridSatB(cx, cy)) = prevDenom + ringB;
-            float prevA = *reinterpret_cast<float*>(&GridSatA(cx, cy));
-            *reinterpret_cast<float*>(&GridSatA(cx, cy)) = prevA + ringA;
+            GridSatDenom(cx, cy)  = GridSatDenom(cx, cy)  + ringB;
+            GridSatWeight(cx, cy) = GridSatWeight(cx, cy) + ringA;
         });
     }
 }

@@ -12,7 +12,13 @@
 
 namespace guild::world {
 
-// gilde.exe 0x538638 — VIBE_Mission_SlotSetSingle  (eax=owner, dl=type).
+// gilde.exe 0x538638 — VIBE_Mission_SlotSetSingle  (eax=owner, dl=type).  VERIFIED-1:1
+// Disasm-checked: byte_122FEC0[0]=dl(type); dword_122FEC4[0]=eax(owner);
+// dword_122FEC8[0]=0 (deadline[0..3]); then VIBE_GameTime_Set(&deadline,0,0,0) at
+// 0x5831f0 writes *(WORD)(p+4)=0, *(DWORD)(p+6)=0, *(DWORD)(p+10)=0 — covering
+// deadline bytes [4,5],[6..9],[10..13]; combined with the +0 dword that zeroes all
+// 14 deadline bytes, so memset(&deadline,0,14) is behavior-identical. byte_122FEE0[0]
+// (state) = 0. Return eax is unused (sole caller 0x498d39 discards it) -> void.
 void MissionSlotSetSingle(i32 owner, u8 type) {
     g_missionSlots[0].type  = type;            // byte_122FEC0[0]   = a2
     g_missionSlots[0].owner = owner;           // dword_122FEC4[0]  = a1
@@ -41,7 +47,12 @@ bool StreamRead(MissionStream& s, void* dst, std::size_t n) {
 }
 } // namespace
 
-// gilde.exe 0x53b148 — VIBE_Mission_SaveSlotTable.
+// gilde.exe 0x53b148 — VIBE_Mission_SaveSlotTable.  VERIFIED-1:1
+// Disasm-checked field order/widths/stride: mode WriteStream(byte_63C8F4,1) once;
+// per slot edi=byte_122FEC0: +0 size 1 (loop cond), +4 size 4, +8 size 0Eh(14),
+// +24 size 4, +28 size 4, +32 size 1; edi += 24h(36); loop while ebp<80h(128);
+// returns eax=1 after slot 128, eax=0 on any WriteStream==-1. The IFileSystem byte
+// stream here models VIBE_Vfs_WriteStream(ptr,size,handle,1) [rules 3-5 boundary].
 bool MissionSaveSlotTable(MissionStream& s) {
     // VIBE_Vfs_WriteStream(&byte_63C8F4, 1, handle, 1)  (the single-slot mode byte).
     if (!StreamWrite(s, &g_missionSlotMode, 1))
@@ -58,7 +69,10 @@ bool MissionSaveSlotTable(MissionStream& s) {
     return true;                                            // v3 >= 128 -> return 1
 }
 
-// gilde.exe 0x53b25c — VIBE_Mission_LoadSlotTable (byte-exact read counterpart).
+// gilde.exe 0x53b25c — VIBE_Mission_LoadSlotTable (byte-exact read counterpart).  VERIFIED-1:1
+// Disasm-checked: mirrors save exactly via VIBE_Vfs_ReadStreamBool (nonzero=ok):
+// mode(1) then per slot +0:1,+4:4,+8:14,+24:4,+28:4,+32:1; stride 36; 128 slots;
+// returns 1 after slot 128, breaks (returns last !ok result, i.e. 0) on short read.
 bool MissionLoadSlotTable(MissionStream& s) {
     if (!StreamRead(s, &g_missionSlotMode, 1))
         return false;

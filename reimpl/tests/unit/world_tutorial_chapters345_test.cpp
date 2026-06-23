@@ -133,8 +133,8 @@ TEST(TutCh345, Chapter3NodeGAnim) {
 TEST(TutCh345, Chapter4Callbacks) {
     int n = 0;
     const TutorialNodeSpecEx* c = TutorialChapter4Steps(&n);
-    CHECK_EQ(c[0].kind, 4);
-    CHECK_EQ(c[4].kind, 4);
+    CHECK_EQ(c[0].kind, 3);                         // intro: *(_DWORD*)v2 = 3 @0x59a65d
+    CHECK_EQ(c[4].kind, 4);                          // outro: *(_DWORD*)v31 = 4
     CHECK_EQ(c[4].mask, 6199);                      // outro mask
     // node D (idx1)
     CHECK_EQ(c[1].kind, 1);                         // builder writes 1 for the inner step
@@ -226,4 +226,42 @@ TEST(TutCh345, AdvanceChapterFreed) {
     bool armed = TutorialAdvanceChapterOrFree(st, &node, &freed);
     CHECK(!armed);
     CHECK(freed);                      // VIBE_He_FreeHandlerEntry path taken
+}
+
+// ---------------------------------------------------------------------------
+// Chapters 1/2 + main intro/outro: the +8 nameByte8 (idx2 low byte) the builders
+// write via v[N+8] = K. Golden vectors from the decompiled InitChapter1/2Steps,
+// InitMainIntro (v1[8]=4) and InitMainOutro (result[8]=5) (gilde.exe).
+// ---------------------------------------------------------------------------
+TEST(TutCh12, NameByte8GoldenChapter1) {
+    int n = 0;
+    const TutorialNodeSpec* c1 = TutorialChapter1Steps(&n);
+    CHECK_EQ(n, 11);
+    const guild::u8 want[11] = {0,1,2,2,2,1,1,1,1,1,3};  // intro,A,C,D,E,F,G,H,I,J,outro
+    for (int i = 0; i < 11; ++i)
+        CHECK_EQ(c1[i].nameByte8, want[i]);
+}
+
+TEST(TutCh12, NameByte8GoldenChapter2) {
+    int n = 0;
+    const TutorialNodeSpec* c2 = TutorialChapter2Steps(&n);
+    CHECK_EQ(n, 9);
+    const guild::u8 want[9] = {0,1,1,1,1,1,1,1,3};  // intro,A,B,C,C1,D,E,F,outro
+    for (int i = 0; i < 9; ++i)
+        CHECK_EQ(c2[i].nameByte8, want[i]);
+}
+
+TEST(TutCh12, NameByte8GoldenMainIntroOutro) {
+    CHECK_EQ(TutorialMainIntro().nameByte8, (guild::u8)4);  // v1[8] = 4
+    CHECK_EQ(TutorialMainOutro().nameByte8, (guild::u8)5);  // result[8] = 5
+}
+
+// BuildChain materialises nameByte8 into the node's name[4] (+8) slot.
+TEST(TutCh12, BuildChainWritesNameByte8) {
+    int n = 0;
+    const TutorialNodeSpec* c1 = TutorialChapter1Steps(&n);
+    TutorialChapterNode nodes[11]{};
+    TutorialBuildChain(c1, n, nodes);
+    CHECK_EQ((guild::u8)nodes[2].name[4], (guild::u8)2);   // Cs1c: v17[8] = 2
+    CHECK_EQ((guild::u8)nodes[10].name[4], (guild::u8)3);  // 1rtu: v73[8] = 3
 }

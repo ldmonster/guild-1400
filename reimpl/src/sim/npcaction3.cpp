@@ -23,7 +23,7 @@ const float  kJailCrowdMul       = 0.1f;
 const float  kJailStationMul     = 0.01f;
 const double kJailEscapeBias     = 0.3;
 const double kJailFineMul        = 0.5;
-const double kJailFineRandMul    = 0.5;   // dbl_61FAA8 (loot scatter scale)
+const double kJailFineRandMul    = 0.7;   // dbl_61FAA8 = 0.7 (0x3fe6666666666666; loot scatter scale)
 const float  kRecruitMoodCeil    = 1.1f;
 
 // ===========================================================================
@@ -82,11 +82,15 @@ HeRecord* NpcAction3_BurglaryStep(HeRecord* h) {
                 return;
             if (H->queueSingle49)
                 H->queueSingle49(id);
+            // 0x4eb5cd: emit namedObject53 unconditionally; when bldg && storable
+            // use their ids, otherwise the (-1,-1) fallback (0x4ec6ab).
             if (bldg && storable) {
                 i32 objId = H->objectIdField ? H->objectIdField(bldg) : -1;
                 i32 stId  = H->objectIdField ? H->objectIdField(storable) : -1;
                 if (H->queueNamedObject53)
                     H->queueNamedObject53(id, objId, 0, stId, 0, "Einbruch");
+            } else if (H->queueNamedObject53) {
+                H->queueNamedObject53(id, -1, 0, -1, 0, "Einbruch");
             }
             u16 kw = H->personMarkerWord ? H->personMarkerWord(rec) : 0;
             if (H->changePlayerAction)
@@ -271,13 +275,23 @@ HeRecord* NpcAction3_JailCellStep(HeRecord* h) {
     case 1u: { // state -1 -> teardown / recall escorts
         void* bldg = H->personQueryBegin ? H->personQueryBegin(He_FilterB(h)) : nullptr; // +176
         void* storable = (bldg && H->findStorableObject) ? H->findStorableObject(bldg) : nullptr;
-        (void)storable;
         ForEachMember(h, [&](int, i32 id) {
             void* rec = H->findPersonById ? H->findPersonById(id) : nullptr;
             if (!rec)
                 return;
+            // 0x4eaab3: QueueRequestSingle49(memberId) then, if bldg && storable,
+            // QueueRequestNamedObject53(memberId, bldg+1, 0, storable+?, 0, "Entf").
+            if (H->queueSingle49)
+                H->queueSingle49(id);
+            if (bldg && storable) {
+                i32 objId = H->objectIdField ? H->objectIdField(bldg) : -1;
+                i32 stId  = H->objectIdField ? H->objectIdField(storable) : -1;
+                if (H->queueNamedObject53)
+                    H->queueNamedObject53(id, objId, 0, stId, 0, "Entf");
+            }
             u16 kw = H->personMarkerWord ? H->personMarkerWord(rec) : 0;
-            if (H->changePlayerAction)
+            // 0x4eaaff: ChangePlayerAction(eax=bldg, edx=0, ecx=0, kindWord).
+            if (bldg && H->changePlayerAction)
                 H->changePlayerAction(bldg, nullptr, kw);
         });
         i32 r = H->freeHandlerEntry ? H->freeHandlerEntry(h) : 0;
@@ -297,14 +311,16 @@ HeRecord* NpcAction3_JailCellStep(HeRecord* h) {
         ForEachMember(h, [&](int, i32 id) {
             void* rec = H->findPersonById ? H->findPersonById(id) : nullptr;
             u16 kw = (rec && H->personMarkerWord) ? H->personMarkerWord(rec) : 0;
+            // 0x4ea2f4: ChangePlayerAction(eax=0, ecx=record) — building arg is null.
             if (H->changePlayerAction)
-                H->changePlayerAction(bldg, h, kw);   // eax=0,ecx=record in disasm
+                H->changePlayerAction(nullptr, h, kw);
             if (H->queueSingle49)
                 H->queueSingle49(id);
             i32 objId = H->objectIdField ? H->objectIdField(bldg) : -1;
             i32 stId  = H->objectIdField ? H->objectIdField(storable) : -1;
+            // 0x4ea320: name = aEntf ("Entf"), flag = 1.
             if (H->queueNamedObject53)
-                H->queueNamedObject53(id, objId, 0, stId, 1, "");
+                H->queueNamedObject53(id, objId, 0, stId, 1, "Entf");
         });
         StampAppt(h);
         ApptAdvance(h, 0, 0, 30);   // +30 min
@@ -343,7 +359,9 @@ HeRecord* NpcAction3_JailCellStep(HeRecord* h) {
     }
     case 4u: { // state 2 -> arrest resolution (escape roll, transfer, broadcast)
         void* arrestee = H->findPersonById ? H->findPersonById(He_FilterA(h)) : nullptr; // +172
-        void* cell     = H->personQueryBegin ? H->personQueryBegin(He_FilterB(h)) : nullptr; // +180
+        // 0x4ea45d: VIBE_Person_QueryBegin(*(a1+180), ...) — the cell query keys off
+        // the +180 dword (He_ViolationPk slot), NOT FilterB(+176).
+        void* cell     = H->personQueryBegin ? H->personQueryBegin(He_ViolationPk(h)) : nullptr; // +180
         if (!arrestee || !cell) {
             He_State(h) = -1;
             return h;

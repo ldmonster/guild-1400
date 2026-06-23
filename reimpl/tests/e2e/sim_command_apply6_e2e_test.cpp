@@ -15,6 +15,7 @@
 #include "sim/command_apply3.h"
 #include "sim/command_apply4.h"
 #include "sim/command_apply5.h"
+#include "sim/entity.h"          // g_persons — the live table the 0x1B handler scans
 #include "sim/trade_sell.h"
 
 using namespace guild;
@@ -142,15 +143,24 @@ void SeedSellResolve() {
     });
 }
 
+// Seed a live Person slot exactly as the binary's columns look (marker @+0,
+// id @+4; the 0x1B handler scans the live g_persons table).
+void SeedRelPerson(int idx, i32 id) {
+    std::memset(&g_persons[idx], 0, sizeof(Person));
+    g_persons[idx].marker = 0;
+    g_persons[idx].id = id;
+}
+
 StreamResult RunStream() {
     ResetApply6State();
+    ResetEntityArrays();
     SeedSellResolve();
     TradeSetCmdHook(nullptr);
 
-    // Seed relation persons.
+    // Seed relation persons in the LIVE table.
     RelationState& rel = Apply6_Relations();
-    rel.personId[0] = 100; rel.aliveMarker[0] = 0;
-    rel.personId[1] = 200; rel.aliveMarker[1] = 0;
+    SeedRelPerson(0, 100);
+    SeedRelPerson(1, 200);
     rel.A(1, 0) = 10; rel.B(1, 0) = 4;
 
     // Tick gates / persons.
@@ -210,9 +220,10 @@ TEST(SimApply6E2E, MixedStreamDeterministic) {
 TEST(SimApply6E2E, RelationReplayByteIdentical) {
     auto run = []() -> int {
         ResetApply6State();
+        ResetEntityArrays();
         RelationState& rel = Apply6_Relations();
-        rel.personId[0] = 1; rel.aliveMarker[0] = 0;
-        rel.personId[1] = 2; rel.aliveMarker[1] = 0;
+        SeedRelPerson(0, 1);
+        SeedRelPerson(1, 2);
         rel.A(1, 0) = 3;
         CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
         p.put32(16, 2); p.put32(20, 1); p.put32(24, 9); p.put32(28, 0);

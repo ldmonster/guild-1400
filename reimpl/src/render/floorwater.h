@@ -1,6 +1,8 @@
 #pragma once
 #include "guild/common/types.h"
 
+#include <vector>
+
 // Water-surface support for the guild::render terrain layer (d3_engine.c floor/water).
 //
 //   VIBE_FloorWater_FloodFillMask     @0x5ba750  (4-way recursive region flood fill)
@@ -82,5 +84,163 @@ void FillHeightGradient(u8* dst, int lo, int hi, u8 loVal, u8 hiVal);
 // trig amplitude multiplier; it is a parameter here for testability.
 void AnimateWaterWaveGrid(float* out16x4, const float amp[4], const float phase[4],
                           double t);
+
+// ===========================================================================
+// gilde.exe 0x5ba95c — VIBE_FloorWater_PrepareRegions (the water-region builder).
+//
+// This is the INPUT producer for VIBE_Floor_AnimateWaterVertices (@0x5be428,
+// water_vertices.cpp): it turns the floor's water-mask grid into the array of
+// animated water-region meshes the per-frame animator walks, i.e. the contents
+// of Floor+0x19E0 (waterMeshes, the 344-byte WaterMesh records) and the count
+// byte Floor+0x1C6D (waterMeshCount).
+//
+// The original operates IN PLACE on the live Floor record. Its passes:
+//   1. (loc_5BAA1D)  WATER-MASK + DILATE: alloc an N*N "d3_fl:Water(water_mask)"
+//      scratch; for every interior cell (y,x in [0,N-4)) whose waterMaskGrid
+//      cell == the water-type byte (Floor+7276), stamp that cell AND a 3x3
+//      wrap-around dilation block to 0xFF, set the global anyWater flag, and set
+//      per-tile/edge corner flags inside the Floor tile blocks (Floor-coupled —
+//      see WaterRegionTileFlags). Cell linear index uses (x + y*N).
+//   2. (loc_5BACD0)  HEIGHTS: if Floor+0x18 (waterHeights) exists, AND it with
+//      the mask (and where mask==0xFF and height==0, copy 0xFF in); else alloc a
+//      fresh "d3_fl:Water(height)" buffer = a copy of the mask. Then per ROW,
+//      VIBE_FloorWater_FillHeightGradient ramps the height across each run of
+//      0xFF cells, seeding the ramp endpoints from the neighbouring terrain
+//      heightmap (Floor+0x10) clamped to >= 1 (val-2, min 1).
+//   3. (loc_5BAE61)  EDGE BITCODE: per cell, a 4-neighbour water test (self<<3 |
+//      up<<2 | right<<1 | diag) drives a switch that sets/clears bit7 (0x80) of
+//      the Floor+0x24 (a1[9]) per-cell edge buffer.
+//   4. (loc_5BAF56)  REGIONS: alloc an N*N "d3_fl:Water(CalcRegions)" buffer init
+//      to 0xFF; mark every interior cell whose own height and its +1 row/+1 col
+//      neighbours are all water as 0xFE; then VIBE_FloorWater_FloodFillMask each
+//      0xFE seed with an incrementing region id (Floor+7277). regionCount =
+//      number of distinct flood-filled regions.
+//   5. (loc_5BB169)  STRIP/POLY/MESH build: per Floor tile (8x8 tiles, each
+//      tileSpan==N/8 cells) with a water corner, scan its cell rows building
+//      20-byte horizontal SPAN records ("d3_fl:Water(strips)"), 80-byte POINT
+//      records ("d3_fl:Water(points)"), and 40-byte POLY records
+//      ("d3_fl:Water(polys)") whose corner offsets resolve through
+//      VIBE_FloorWater_FindRegionOffset; plus the 344-byte WaterMesh array
+//      ("d3_fl:Water(Regions)") loaded with the water texture "EF_WASS_06A_2T_W
+//      _AN0" (VIBE_Texture_LoadByName @0x5da714, present-coupled — hooked by
+//      callback). The per-region span list is then compacted (removing spans
+//      whose marker stayed 0xFF — never referenced by a poly).
+//
+// Reconstructed here as a clean builder over the PARSED grid (W5-WATER handoff):
+// the grid-level passes (1 mask/dilate, 2 height gradient, 3 edge bitcode, 4
+// region flood-fill) are reproduced exactly; the per-tile strip/poly geometry is
+// reconstructed as pure data; the 344-byte WaterMesh array is produced ready for
+// AnimateWaterVertices. The Floor-tile-block side effects (pass-1 corner flags,
+// the Floor+0x24 edge buffer write, and the in-Floor allocation churn) are
+// modelled as documented outputs (the terrain-walk owner installs them — see the
+// install handoff in progress/water-regions-wave5.md). Present-coupled leaves
+// (the DDraw texture upload VIBE_Texture_UploadToSurface @0x5db234) are reached
+// only through the injected callback.
+// ===========================================================================
+
+// One horizontal water span record — the 20-byte "d3_fl:Water(strips)" record
+// the strip builder emits and VIBE_FloorWater_FindRegionOffset walks. Matches
+// WaterRegionSpan but produced (not consumed) here.
+//   +0x00 base    running cumulative point index (sum of prior span lengths)
+//   +0x04 row     the row this span lives on (== a1[1]*tileRow + relative)
+//   +0x08 lo      inclusive low column of the run
+//   +0x0C hi      inclusive high column of the run
+//   +0x10 marker  0xFF (unmarked; FindRegionOffset stamps a region id later)
+struct WaterStripSpan {
+    i32 base;   // +0x00
+    i32 row;    // +0x04 (the original stores the row at +4; type/row are the same field)
+    i32 lo;     // +0x08
+    i32 hi;     // +0x0C
+    u8  marker; // +0x10
+    // ---- reconstruction helper (NOT a 32-bit-record field) ------------------
+    // The engine's strips/points/polys buffers are PER FLOOR TILE (v190[7]/[11]/
+    // [13], allocated per (tileRow,tileCol) inside the 0x5bb169 build loop), so a
+    // span's `base` is a per-tile cumulative POINT index (it restarts at 0 each
+    // tile). The compacted WaterRegions::spans/polys are flattened across all
+    // tiles; this id restores the tile grouping the render arm needs to resolve
+    // FindRegionOffset point indices into the right per-tile point buffer.
+    i32 tile = 0;   // tileRow*8 + tileCol (the v211/v212 tile this span belongs to)
+};
+
+// One 40-byte water poly record (the "d3_fl:Water(polys)" stride). The original
+// holds two vec3+uv corner triplets resolved through FindRegionOffset; we keep
+// the fields the build writes that are observable downstream.
+//   regionId   = the CalcRegions byte at the cell (rec+37 / rec+77)
+//   cell       = the linear cell index (kk) this poly covers
+//   col        = the cell column (kk)
+//   off0..off3 = the four FindRegionOffset results (rec+0/+4/+8 ; +40/+44/+48)
+struct WaterPoly {
+    u8  regionId;
+    i32 cell;
+    i32 col;
+    i32 off0, off1, off2, off3;
+    // ---- reconstruction helpers (NOT 32-bit-record fields) ------------------
+    // The tile this poly belongs to (matches WaterStripSpan::tile); off0..off3
+    // are FindRegionOffset results into THIS tile's point buffer (bufferBase 0,
+    // so off/80 is the per-tile point index). The render arm forms the same two
+    // triangles the engine writes (the 80-byte poly == two 40-byte sub-polys):
+    //   tri0 = P(kk,prow), P(kk+1,prow+1), P(kk,prow+1)
+    //          = off0/80,   off1/80,        off2/80
+    //   tri1 = P(kk,prow), P(kk+1,prow),   P(kk+1,prow+1)
+    //          = off0/80,   off3/80,        off1/80
+    // (0x5bb50f.. : v87+0 = off(kk,prow); v87+4 = off(kk+1,prow+1); v87+8 =
+    //  off(kk,prow+1); v87+40 = off(kk,prow); v87+44 = off(kk+1,prow); v87+48
+    //  = off(kk+1,prow+1).)
+    i32 tile = 0;
+    // The four resolved per-tile point indices (off/80) for the corner lookups,
+    // or -1 when FindRegionOffset returned 0 (no matching span — a boundary
+    // corner the engine would have culled by the span point list).
+    i32 pTL = -1;   // P(kk,   prow)    == off0/80
+    i32 pBR = -1;   // P(kk+1, prow+1)  == off1/80
+    i32 pBL = -1;   // P(kk,   prow+1)  == off2/80
+    i32 pTR = -1;   // P(kk+1, prow)    == off3/80
+};
+
+// Injected water-texture loader (VIBE_Texture_LoadByName @0x5da714 +
+// VIBE_Texture_UploadToSurface @0x5db234, present-coupled). Returns an opaque
+// non-null handle for the loaded "EF_WASS_06A_2T_W_AN0" texture (stored at
+// WaterMesh.float[0]/[1]), or 0 when no backend is present (headless build).
+//   name  == "EF_WASS_06A_2T_W_AN0"
+//   flags == 172 (0xAC; the original's VIBE_Texture_LoadByName(name,172,0,0)).
+using WaterTextureLoadFn = void* (*)(const char* name, int flags, void* ctx);
+
+// The full result of the builder — every grid pass output plus the geometry.
+struct WaterRegions {
+    int  n = 0;                      // grid edge N (Floor+0)
+    bool anyWater = false;           // v215 — at least one water cell found
+    u8   regionCount = 0;            // Floor+7277 — distinct flood-filled regions
+
+    std::vector<u8> mask;            // pass 1: N*N dilated water mask (0xFF/0x00)
+    std::vector<u8> heights;         // pass 2: N*N gradient-filled water heights
+    std::vector<u8> edge;            // pass 3: N*N edge bitcode buffer (bit7 set/clear)
+    std::vector<u8> regionGrid;      // pass 4: N*N region-id grid (0xFF=none)
+
+    std::vector<WaterStripSpan> spans; // pass 5: compacted horizontal span records
+    std::vector<WaterPoly>      polys; // pass 5: per-cell poly records
+
+    // pass 5: the 344-byte WaterMesh array (Floor+0x19E0). One record per region;
+    // sized regionCount*344 bytes. `meshTexture` is the loaded texture handle
+    // written into each record's float[0]/[1] (0 in headless builds).
+    std::vector<u8> waterMeshes;
+    void*           meshTexture = nullptr;
+};
+
+// gilde.exe 0x5ba95c — VIBE_FloorWater_PrepareRegions (builder form).
+//   waterMaskGrid : N*N per-cell water-type bytes (Floor+0x14, a1[5]). The cell
+//                   at (col,row) is water iff waterMaskGrid[col + row*N]==waterType.
+//   terrainHeights: N*N elevation bytes (Floor+0x10, a1[4]) seeding the gradient.
+//   waterHeights  : N*N water-height bytes (Floor+0x18, a1[6]) or null/empty to
+//                   allocate fresh (== a copy of the mask).
+//   waterType     : the water-type byte (Floor+7276) cells are matched against.
+//   n             : grid edge N. tileSpan := n/8 (the Floor+4 per-tile cell span).
+//   loadTexture/ctx : the present-coupled water-texture loader (may be null).
+// Returns the fully-built WaterRegions (the Floor+0x19E0/+0x1C6D contents the
+// per-frame AnimateWaterVertices consumes). The traversal is the exact decompile
+// (cell index x + y*N, wrap mask N*N-1, the per-row gradient seeding, the 4-bit
+// edge code, the 2x2 interior region seed, the per-tile span/poly build).
+WaterRegions BuildWaterRegions(const u8* waterMaskGrid, const u8* terrainHeights,
+                               const u8* waterHeights, u8 waterType, int n,
+                               WaterTextureLoadFn loadTexture = nullptr,
+                               void* ctx = nullptr);
 
 } // namespace guild::render

@@ -84,8 +84,11 @@ inline float Hud_StatusBannerScale(int modeFlags) {
 
 // gilde.exe 0x4bcb74 / 0x4bcc0c — the banner's lifetime test.
 //   visible while (startTick + 350 > now); expires (returns true) when reached.
+// 0x4bcc0c: `dword_631678 + 350 <= (unsigned int)dword_62EB38` — the compare is
+// UNSIGNED (cmp/jbe), so reproduce that so the tick wraparound matches the original.
 inline bool Hud_StatusBannerExpired(int startTick, int now) {
-    return startTick + kStatusBannerLifetime <= now;
+    return static_cast<unsigned>(startTick + kStatusBannerLifetime) <=
+           static_cast<unsigned>(now);
 }
 
 // ===========================================================================

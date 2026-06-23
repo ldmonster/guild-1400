@@ -67,6 +67,8 @@ struct ScriptEngineState {
     ScriptCmdRecord* execCmd    = nullptr;  // dword_62E8CC
     u32              gameTick   = 0;        // dword_62EB38
     i32              ownerId    = 0;        // dword_62E8D4
+    i32              sceneId    = 0;        // dword_649D60 (RunWithArgs writes it
+                                            // into ctx+2576 / kScSceneSlot)
 };
 ScriptEngineState& ScriptEngine();
 

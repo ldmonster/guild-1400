@@ -74,17 +74,23 @@ TEST(RealTextureSourceIT, ResolveTableAndSample) {
 
     // Sample poly 0 at the UV hitting the bright-green texel (3,5) in an 8x8 tex:
     // normalized u=3.5/8, v=5.5/8.
+    // 24-bit sources are soft-palettized at the resolve layer (the original's
+    // VIBE_Texture_LoadSoftPalettize @0x5da34c chain — render/texture_palettize.h),
+    // so the sample reads index -> palette. The quantizer's 15-bit histogram
+    // buckets each channel to (c & 0xF8) + 4 (@0x602d2c), so the seeded
+    // (0,240,0) green texel resolves to the palette entry (4,244,4) — the
+    // engine's own <=256-colour approximation, pinned here.
     play::TexSample s = src.SamplePoly(*tbl, 0, 3.5f / 8.0f, 5.5f / 8.0f);
     CHECK(s.ok);
     if (s.ok) {
-        CHECK_EQ((int)s.g, 240);
-        CHECK_EQ((int)s.r, 0);
-        CHECK_EQ((int)s.b, 0);
+        CHECK_EQ((int)s.g, 244);
+        CHECK_EQ((int)s.r, 4);
+        CHECK_EQ((int)s.b, 4);
     }
-    // A different UV (corner) is the dark fill, not green.
+    // A different UV (corner) is the dark fill bucket, not green.
     play::TexSample s2 = src.SamplePoly(*tbl, 0, 0.01f, 0.01f);
     CHECK(s2.ok);
-    if (s2.ok) CHECK(s2.g != 240);
+    if (s2.ok) CHECK(s2.g != 244);
 
     // Poly 1 (missing material) -> untextured fallback.
     play::TexSample s3 = src.SamplePoly(*tbl, 1, 0.5f, 0.5f);

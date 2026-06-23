@@ -88,6 +88,14 @@ struct SessionState {
     // byte_63CC41 (0x63CC41): "victory condition met this turn". Static image 0.
     std::uint8_t  victoryFlag = 0;      // byte_63CC41
 
+    // dword_631DB4 (0x631DB4): world-active / "a session is running" gate, set to
+    // 1 by Game_InitWorldAndSounds (0x52f303). Static image: 0.
+    std::int32_t  worldActive = 0;      // dword_631DB4
+
+    // dword_631284 (0x631284): the day-cycle clock proc's registered tick state,
+    // set to 2 by Game_InitWorldAndSounds (0x52f333). Static image: 0.
+    std::int32_t  clockProcState = 0;   // dword_631284
+
     // dword_11BC2D0 (0x11BC2D0): the round sync token / last error code (also the
     // frame-loop feature-mask publish slot). Static image: 0.
     std::int32_t  syncToken = 0;        // dword_11BC2D0
@@ -239,11 +247,17 @@ struct SessionInitCtx {
 };
 
 // ===========================================================================
-// gilde.exe 0x58f19c — VIBE_Money_MultiplyByRate(amount@eax, ratePct@dl).
-// The per-player starting purse is scaled by the city money-rate byte
-// (byte_6477A1) via this helper: result = amount * ratePct / 100. Reproduced
-// (the rate byte defaults to 100 == identity for a fresh city).
-std::int32_t MoneyMultiplyByRate(std::int32_t amount, std::uint8_t ratePct);
+// gilde.exe 0x58f19c — VIBE_Money_MultiplyByRate(amount@eax, currencyId@dl).
+//   return amount * dword_649A88[dword_13CD6F2[189 * currencyId] >> 16];
+// NOT a percentage: the second arg is the active city/currency index
+// (byte_6477A1); it indexes the runtime 189-dword-stride city record table
+// (dword_13CD6F2), whose +0 field's high word selects a multiplier from the
+// static curve dword_649A88[] (cold image: dword_649A88[0] == 0x15). The
+// canonical reconstruction of 0x58f19c lives once in world::AmtMoneyMultiply-
+// ByRate (world/amt.h), which models the runtime table as a settable rate hook
+// (identity default). This is a thin forwarder so the bootstrap uses the SAME
+// 0x58f19c logic (no duplicate/divergent formula).
+std::int32_t MoneyMultiplyByRate(std::int32_t amount, std::uint8_t currencyId);
 
 // gilde.exe 0x533c5e — the new-game starting-purse base before the rate scale:
 //   cheat -> 75000 ; else 1250 - 250 * difficulty.

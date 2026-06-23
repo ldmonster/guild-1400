@@ -27,23 +27,24 @@ TEST(GuiTextE2E, MixedRichString) {
     int town = db.Add("Cologne", "town");  // id 0
 
     GameTimeSource when{};
-    when.yearQuarter = 1;  // Summer 1401
+    when.yearQuarter = 1;  // year 1401, season 1401%4=1 -> Summer
 
+    // Codes per gilde.exe 0x59d6e8: %i grouped int, %T money, %a count, %D date.
+    // (%s is not a value code -- it copies through verbatim.)
     std::vector<Arg> args = {
-        Arg::MakeStr("Cologne"),    // %s
         Arg::MakeInt(12345),        // %i
-        Arg::MakeMoney(1234, 1),    // %m
+        Arg::MakeMoney(1234, 1),    // %T (money)
         Arg::MakeInt(3),            // %a
-        Arg::MakeDate(when),        // %T
+        Arg::MakeDate(when),        // %D
     };
     (void)town;
 
     auto r = RenderRichString(
-        "Town %s pop %i, tax %m for %a guards, $Mfounded %T (100%%).",
+        "Town pop %i, tax %T for %a guards, $Mfounded %D (100%%).",
         args, &db, kSeasons);
 
     std::string expected =
-        "Town Cologne pop 12.345, tax 1.234\x11 for 3\x14 guards, "
+        "Town pop 12.345, tax 1.234\x11 for 3\x14 guards, "
         "$Mfounded Summer 1401 (100\x16).";
     CHECK(r == expected);
 }
@@ -53,7 +54,7 @@ TEST(GuiTextE2E, MixedRichString) {
 TEST(GuiTextE2E, FormattedMessageById) {
     TextDb db;
     db.Add("Plain entry", "intro");                       // id 0
-    int msg = db.Add("You earned %m today!", "earn_msg"); // id 1
+    int msg = db.Add("You earned %T today!", "earn_msg"); // id 1 (%T = money)
 
     auto r = RenderFormattedMessage(db, msg, {Arg::MakeMoney(5678, 1)}, kSeasons);
     CHECK(r == std::string("You earned 5.678\x11 today!", 24));

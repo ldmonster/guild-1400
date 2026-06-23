@@ -106,8 +106,11 @@ int SpawnDamageNumber(std::vector<DmgNumberRecord>& table, const void* owner,
 
     // v6 = (double)amount / (unitScale * 0.01f); store (int)v6 in the value cell.
     // dword_B5F6D0[v5] = 1115684864 (== 64.0f) seeds the float ttl cell first.
+    // Original: v6 = (double)amount / (*(float*)(a1+28) * dbl_61B1C4). dbl_61B1C4 is
+    // the EXACT double 0.01 (0x3f847ae147ae147b), NOT the float 0.01f promoted, so the
+    // divisor must use the double literal (kDmgNumScale is now a double).
     double v6 = static_cast<double>(amount)
-              / (static_cast<double>(unitScale) * static_cast<double>(kDmgNumScale));
+              / (static_cast<double>(unitScale) * kDmgNumScale);
     DmgNumberRecord& r = table[slot];
     r.owner  = owner;          // dword_B5F6DC[v5] = a1
     r.kind   = kind;           // dword_B5F6E0[v5] = a3

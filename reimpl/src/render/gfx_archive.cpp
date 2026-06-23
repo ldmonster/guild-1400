@@ -28,9 +28,14 @@ constexpr std::size_t kBankOffTable   = 0x45;  // u32[] (relative to blob)
 // Shape header offsets used here.
 constexpr std::size_t kShWidth   = 6;     // u16
 constexpr std::size_t kShHeight  = 0x0A;  // u16
+constexpr std::size_t kShFullFlag = 0x26; // u32: 0xFFFFFFFF for a FULL (uncompressed)
+                                          // RGB bitmap shape; else an RLE shape.
+                                          // (VIBE_Shape_ConvertRgbTo16 @0x5d7c0c
+                                          // branches on *(shape+38) == -1.)
 constexpr std::size_t kShRowTab  = 0x2A;  // u32 byte offset (rel to shape) of the
                                           // per-row offset table (a3[21] in the
                                           // disasm, read as a full 32-bit field).
+constexpr std::size_t kShPixels  = 0x32;  // first pixel/row-stream byte (offset 50).
 
 } // namespace
 
@@ -53,6 +58,29 @@ bool DecodeShapeBlob(const u8* blob, std::size_t blobLen, int shapeNr,
     const int w = (int)RdU16(shape + kShWidth);
     const int h = (int)RdU16(shape + kShHeight);
     if (w <= 0 || h <= 0 || (long long)w * h > (1LL << 28)) return false;
+
+    // FULL bitmap shapes (e.g. _MOUSE_CURSOR): w*h packed 3-byte RGB pixels from
+    // offset 50, row-major, no RLE. Pure black (0,0,0) is the transparent key (the
+    // engine's ConvertRgbTo16 full-bitmap branch does no black->(5,5,5) remap, so
+    // black maps to the 16bpp 0 == transparent slot).
+    if (RdU32(shape + kShFullFlag) == 0xFFFFFFFFu) {
+        const std::size_t need = kShPixels + (std::size_t)w * h * 3;
+        if (need > shapeMax) return false;
+        const u8* px = shape + kShPixels;
+        out.width = w;
+        out.height = h;
+        out.argb.assign((std::size_t)w * h, 0u);
+        int op = 0;
+        for (int i = 0; i < w * h; ++i) {
+            const u8 R = px[i * 3], G = px[i * 3 + 1], B = px[i * 3 + 2];
+            if (R | G | B) {
+                out.argb[(std::size_t)i] = 0xFF000000u | ((u32)R << 16) | ((u32)G << 8) | B;
+                ++op;
+            }
+        }
+        out.opaque = op;
+        return true;
+    }
 
     const u32 rowTabRel = RdU32(shape + kShRowTab);
     // The row table holds h u32 entries (byte offsets relative to the shape).

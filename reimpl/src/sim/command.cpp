@@ -157,6 +157,15 @@ u16 ComputePacketSize(const CommandPacket& pkt) {
             int v6 = 0;
             if (v5) {
                 do {
+                    // 1:1 NOTE (wave-15, MCP-confirmed @0x4930b5): the original's
+                    // 0x16/0x17 size walk is `v7 = v3[1]*v3[0]+4; v4+=v7; v3+=v7`
+                    // looped exactly *(a1+20) times with NO bound (it can read past
+                    // the 153-byte record on a malformed packet). The guard below
+                    // is a never-hit safety net for our standalone layout; on every
+                    // codec-built packet (payload <= kMaxPayload=119) it is
+                    // byte-identical to the unbounded original.
+                    if (v4 + 4 > static_cast<int>(kPacketStride))
+                        break;
                     int v7 = v3[1] * v3[0] + 4;
                     ++v6;
                     v4 += v7;

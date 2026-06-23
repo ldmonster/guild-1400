@@ -55,14 +55,19 @@ namespace guild::play {
 
 // ===========================================================================
 // CouncilPacket::encode — the on-wire image RequestBuildOp68 (0x495454) lays out.
+// Disasm: char v3[16] @ ebp-ACh is the packet buffer (v3[0]=68); v4[4] @ ebp-9Ch ==
+// buffer +0x10 receives qmemcpy(a1, 4) (the applicant dword v17); v5[3] @ ebp-98h ==
+// buffer +0x14 receives qmemcpy(a1+4, 3) (v18/v19/v20). So the applicant dword lands
+// at +0x10 and the three holder bytes at +0x14/+0x15/+0x16 — NOT a contiguous [1..7].
 // ===========================================================================
-void CouncilPacket::encode(u8 out[8]) const {
-    out[0] = opcode;                 // v3[0] = 68
-    // qmemcpy(v4, a1, 4): the applicant id dword (v17 = *(person+4)).
-    std::memcpy(out + 1, &applicant, 4);
-    out[5] = holderA;                // a1+4 byte 0 (v18)
-    out[6] = holderB;                // a1+4 byte 1 (v19)
-    out[7] = officeType;             // a1+4 byte 2 (v20)
+sim::CommandPacket CouncilPacket::encode() const {
+    sim::CommandPacket pkt{};
+    pkt.bytes[0] = opcode;                                       // v3[0] = 68
+    pkt.put32(kCouncilApplicantOff, static_cast<u32>(applicant)); // v4 = qmemcpy(a1,4)
+    pkt.bytes[kCouncilHolderAOff] = holderA;                     // v5[0] (v18)
+    pkt.bytes[kCouncilHolderBOff] = holderB;                     // v5[1] (v19)
+    pkt.bytes[kCouncilOfficeOff]  = officeType;                  // v5[2] (v20)
+    return pkt;
 }
 
 // ===========================================================================

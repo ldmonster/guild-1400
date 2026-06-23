@@ -119,20 +119,21 @@ TEST(OfficeFormsE2E, ElectionAnnouncementSpeechPackets) {
     Cutscene_SetSpeechQueueHook(nullptr, nullptr);
 }
 
-// A torture-choice form (case 2: instrument selection) end-to-end: build the 7
+// A torture-choice form (case 2: instrument selection) end-to-end: build the 3
 // instrument buttons with their wealth-scaled costs, then a click resolves to the
-// chosen instrument index (the a1+148 command value).
+// chosen instrument index (the a1+148 command value). gilde.exe 0x4a410a: the build
+// loop runs 3 times, so only the first 3 shuffled instruments get buttons.
 TEST(OfficeFormsE2E, TortureInstrumentChoiceFlow) {
-    // wealthA=4000, wealthB=6000 -> tier = (4000+6000)/2000 = 5. Shuffle = identity.
-    int order[7] = {6, 5, 4, 3, 2, 1, 0}; // reversed shuffle
+    // wealthA=4000, wealthB=6000 -> tier = (4000+6000)/2000 = 5. Shuffle = reversed.
+    int order[7] = {6, 5, 4, 3, 2, 1, 0}; // reversed shuffle (first 3 -> {6,5,4})
     TortureChoiceForm f = Office_BuildTortureChoiceForm(2, 1024, /*tier*/5, order);
     CHECK(f.built);
-    CHECK_EQ(f.buttons.size(), 7u);
+    CHECK_EQ(f.buttons.size(), 3u);
     CHECK(std::strcmp(f.scene, kSceneFolterwahl) == 0);
 
     // Button k uses instrument order[k]; cost = 5 * costByte[order[k]].
     const int costByte[7] = {8, 10, 12, 15, 18, 21, 24};
-    for (int k = 0; k < 7; ++k) {
+    for (int k = 0; k < 3; ++k) {
         int inst = order[k];
         CHECK_EQ(f.buttons[k].payload, inst);
         CHECK_EQ(f.buttons[k].cost, 5 * costByte[inst]);

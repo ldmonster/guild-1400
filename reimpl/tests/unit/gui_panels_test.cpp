@@ -28,14 +28,29 @@ TEST(GuiPanelChart, ColumnStep) {
     CHECK_EQ(ChartColumnStep(265), 10);   // (265-105)/16
 }
 
+TEST(GuiPanelChart, ConvertXTruncatesTowardZero) {
+    // VIBE_Coord_ConvertX @0x5c6b08 sets RC=0b11 (toward zero) + frndint -> truncate.
+    // This pins the regression away from round-to-nearest(-even).
+    CHECK_EQ(static_cast<int>(ConvertX(3.5)), 3);
+    CHECK_EQ(static_cast<int>(ConvertX(3.9)), 3);
+    CHECK_EQ(static_cast<int>(ConvertX(2.5)), 2);  // nearbyint would give 2 (even) here
+    CHECK_EQ(static_cast<int>(ConvertX(0.5)), 0);  // nearbyint -> 0, but trunc proves it
+    CHECK_EQ(static_cast<int>(ConvertX(1.5)), 1);  // nearbyint -> 2, trunc -> 1 (distinct)
+    CHECK_EQ(static_cast<int>(ConvertX(-1.5)), -1);
+    CHECK_EQ(static_cast<int>(ConvertX(-3.9)), -3);
+    CHECK_EQ(static_cast<int>(ConvertX(0.0)), 0);
+}
+
 TEST(GuiPanelChart, LineSeriesPoints) {
     float series[16] = {0.0f, 0.1f, 0.25f, 0.5f, 0.75f, 1.0f, 0.9f, 0.8f,
                         0.7f, 0.6f, 0.5f,  0.4f, 0.3f,  0.2f, 0.1f, 0.05f};
     auto pts = ComputeLineSeriesPoints(series, 425, 350);
     const int gx[16] = {45, 65, 85, 105, 125, 145, 165, 185,
                         205, 225, 245, 265, 285, 305, 325, 345};
-    const int gy[16] = {328, 296, 248, 168, 88, 8, 40, 72,
-                        104, 136, 168, 200, 232, 264, 296, 312};
+    // ConvertX @0x5c6b08 TRUNCATES toward zero (verified wave-17); the series*height
+    // product is widened to double to match the x87 extended intermediate.
+    const int gy[16] = {328, 295, 248, 168, 88, 8, 40, 71,
+                        104, 135, 168, 199, 231, 263, 295, 311};
     for (int k = 0; k < 16; ++k) {
         CHECK_EQ(pts[k].x, gx[k]);
         CHECK_EQ(pts[k].y, gy[k]);
@@ -55,7 +70,11 @@ TEST(GuiPanelChart, BarAxisLadder) {
     CHECK_EQ(BarAxisMaximum(0), 500);
     CHECK_EQ(BarAxisMaximum(500), 1000);
     CHECK_EQ(BarAxisMaximum(1200), 2000);
-    CHECK_EQ(BarAxisMaximum(60000), 50000);  // exceeds ladder -> max entry
+    CHECK_EQ(BarAxisMaximum(20000), 20000);  // == 20000: not < any of idx0..7 -> peak
+    CHECK_EQ(BarAxisMaximum(15000), 20000);  // 15000 < 20000 (idx7) -> 20000
+    // DrawBarChart @0x55e408 scans only the first 8 ladder entries (cmp esi,20h);
+    // the 9th (50000) is dead, so peaks >= 20000 yield the peak itself, not 50000.
+    CHECK_EQ(BarAxisMaximum(60000), 60000);  // >= 20000 -> peak passes through
 }
 
 TEST(GuiPanelChart, BarSeriesPoints) {
@@ -73,14 +92,78 @@ TEST(GuiPanelChart, BarSeriesPoints) {
 }
 
 TEST(GuiPanelChart, GridlineLayout) {
+    // ConvertX TRUNCATES (verified wave-17): RenderChart @0x55eff7 / 0x55f054.
     auto g = ComputeGridlineX(425);
-    const int gx[4] = {8, 107, 206, 304};
+    const int gx[4] = {8, 106, 205, 304};
     for (int k = 0; k < 4; ++k)
         CHECK_EQ(g[k], gx[k]);
     auto l = ComputeGridLabelX(425);
-    const int lx[4] = {5, 104, 202, 301};
+    const int lx[4] = {5, 103, 202, 301};
     for (int k = 0; k < 4; ++k)
         CHECK_EQ(l[k], lx[k]);
+}
+
+// ---------------------------------------------------------------------------
+// StatPanel — graph-series plotters (wave-20): DrawGraphSeriesA/B/C @0x55e778/
+// 0x55e9b4/0x55ebf0 and DrawGraphLine @0x55e600.  Golden coords computed from the
+// recovered arithmetic (ConvertX truncates; series*height widened to double).
+// ---------------------------------------------------------------------------
+TEST(GuiPanelStat, GraphSeriesPoints) {
+    // A/B/C share this body; same data/window as the line-series golden -> same y.
+    float series[16] = {0.0f, 0.1f, 0.25f, 0.5f, 0.75f, 1.0f, 0.9f, 0.8f,
+                        0.7f, 0.6f, 0.5f,  0.4f, 0.3f,  0.2f, 0.1f, 0.05f};
+    auto pts = ComputeGraphSeriesPoints(series, 425, 350);
+    const int gx[16] = {45, 65, 85, 105, 125, 145, 165, 185,
+                        205, 225, 245, 265, 285, 305, 325, 345};
+    const int gy[16] = {328, 295, 248, 168, 88, 8, 40, 71,
+                        104, 135, 168, 199, 231, 263, 295, 311};
+    for (int k = 0; k < 16; ++k) {
+        CHECK_EQ(pts[k].x, gx[k]);
+        CHECK_EQ(pts[k].y, gy[k]);
+    }
+}
+
+TEST(GuiPanelStat, GraphSeriesFloorClamp) {
+    // Samples < 0 clamp to flt_641DA8 (== 0) -> y == baseline (windowH-22).
+    float series[16] = {-1.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                        0.0f,  0.0f,  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    auto pts = ComputeGraphSeriesPoints(series, 425, 350);
+    CHECK_EQ(pts[0].y, 350 - 22);
+    CHECK_EQ(pts[1].y, 350 - 22);
+}
+
+TEST(GuiPanelStat, GraphSeriesX87Product) {
+    // The series*height product MUST be formed in double (x87-80bit), not float32.
+    // 0.1f as a double is 0.10000000149..; height=320 -> double product 32.00000047..,
+    // so base(328) - product = 295.99999.. -> trunc 295.  Computing (float)(320*0.1f)
+    // first gives exactly 32.0 -> 296.0 -> trunc 296.  Pin the double-widened (295).
+    float series[16] = {0.1f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    auto pts = ComputeGraphSeriesPoints(series, 425, 350);
+    CHECK_EQ(pts[0].y, 295);
+}
+
+TEST(GuiPanelStat, GraphLinePoints) {
+    // DrawGraphLine overlays two series (FAC + F98); NO per-sample clamp, baseline
+    // is a float == windowH-22.  Negative FAC dips ABOVE baseline (y > base).
+    float fac[16] = {0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 0.5f, 0.3f,
+                     0.1f, 0.0f, -0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float f98[16] = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f,
+                     0.2f, 0.1f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    auto lp = ComputeGraphLinePoints(fac, f98, 425, 350);
+    const int facY[16] = {328, 263, 199, 135, 71, 8, 168, 231,
+                          295, 328, 360, 328, 328, 328, 328, 328};
+    const int f98Y[16] = {8, 40, 71, 104, 135, 168, 199, 231,
+                          263, 295, 311, 328, 328, 328, 328, 328};
+    const int gx[16] = {45, 65, 85, 105, 125, 145, 165, 185,
+                        205, 225, 245, 265, 285, 305, 325, 345};
+    for (int k = 0; k < 16; ++k) {
+        CHECK_EQ(lp.seriesFAC[k].x, gx[k]);
+        CHECK_EQ(lp.seriesF98[k].x, gx[k]);
+        CHECK_EQ(lp.seriesFAC[k].y, facY[k]);
+        CHECK_EQ(lp.seriesF98[k].y, f98Y[k]);
+    }
+    // No clamp: the -0.1 FAC sample at k=10 plots BELOW baseline (y=360 > 328).
+    CHECK_EQ(lp.seriesFAC[10].y, 360);
 }
 
 // ---------------------------------------------------------------------------
@@ -93,11 +176,12 @@ TEST(GuiPanelStat, CityReadouts) {
     snap.v[3] = 1.2f;  // price
     snap.v[9] = 0.4f;  // growth
     auto r = ComputeCityStatReadouts(snap);
+    // ConvertX TRUNCATES toward zero (verified wave-17, ShowCityStatistics @0x55f4ac).
     CHECK_EQ(r.floorMark, 0);
-    CHECK_EQ(r.growthPhraseId, 6901);  // round((1.4)*2.5)=4 ; +6897
-    CHECK_EQ(r.supplyPhraseId, 6906);  // round(0.6*5)=3 ; +6903
-    CHECK_EQ(r.demandValue, 250);
-    CHECK_EQ(r.priceValue, 120);
+    CHECK_EQ(r.growthPhraseId, 6900);  // trunc((1.4)*2.5)=trunc(3.5)=3 ; +6897
+    CHECK_EQ(r.supplyPhraseId, 6906);  // trunc(0.6*5)=3 ; +6903
+    CHECK_EQ(r.demandValue, 250);      // trunc(2.5*100)=250
+    CHECK_EQ(r.priceValue, 120);       // trunc(1.2*100)=120
 }
 
 TEST(GuiPanelStat, CityReadoutsClampAndFloor) {

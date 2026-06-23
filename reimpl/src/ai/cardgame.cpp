@@ -37,26 +37,27 @@ const float kCardThresholds[5][6] = {
 // for the RNG values that occur in practice; tests pin exact outcomes via seeds.
 
 // Card-play transition table (gilde.exe dword_46637D pairs / byte_466381 result).
-// Walked as: for v in 0,2,4,..16: if pair[v]==curDecision && pair[v+1]==action ->
-// new decision = byte_466381[v]. The raw bytes at 0x46637D are
-//   c3 00 00 00 | 01 01 | 02 01 | 03 01 | 04 02 | 02 02 | 03 02 | 04 03 | 03 03
-// read as two interleaved hi-byte columns; byte_466381 is the same region+4.
-// Recovered (curDecision, action) -> newDecision pairs:
+// Raw bytes at 0x46637D (24 bytes; byte_466381 == 0x46637D+4):
+//   c3 00 00 00  01 01  02 01  03 01  04 02  02 02  03 02  04 03  03 03  04 00 00 cd
+//   idx: 0  1  2  3   4  5   6  7   8  9  10 11 12 13 14 15 16 17 18 19 20 21 22 23
+// CanPlayCard/PlayCard loop (v5 = 0,2,..,16; stop at >=18):
+//   cur    = *(int*)(0x46637D + v5)     >> 24  == byte[v5+3]
+//   action = *(int*)(0x46637D + v5 + 1) >> 24  == byte[v5+4]
+//   next   = byte_466381[v5]                    == byte[v5+4]   (== action of the match)
+// Decoded (cur, action) -> next:
 struct Transition { u8 cur, action, next; };
 const Transition kTransitions[9] = {
-    {0, 0, 1},  // 0xc3 sentinel row resolves to {0,0}->1 at v==0 (byte_466381[0])
-    {0, 1, 2},
-    {1, 1, 3},
-    {1, 2, 2},
-    {2, 1, 3},
-    {2, 2, 4},
-    {3, 1, 2},  // pair index 12
-    {3, 2, 3},
-    {3, 3, 3},
+    {0, 1, 1},  // v5=0  : byte[3]=0, byte[4]=1 ; next byte_466381[0]=byte[4]=1
+    {1, 2, 2},  // v5=2  : byte[5]=1, byte[6]=2 ; next=byte[6]=2
+    {1, 3, 3},  // v5=4  : byte[7]=1, byte[8]=3 ; next=byte[8]=3
+    {1, 4, 4},  // v5=6  : byte[9]=1, byte[10]=4; next=byte[10]=4
+    {2, 2, 2},  // v5=8  : byte[11]=2,byte[12]=2; next=byte[12]=2
+    {2, 3, 3},  // v5=10 : byte[13]=2,byte[14]=3; next=byte[14]=3
+    {2, 4, 4},  // v5=12 : byte[15]=2,byte[16]=4; next=byte[16]=4
+    {3, 3, 3},  // v5=14 : byte[17]=3,byte[18]=3; next=byte[18]=3
+    {3, 4, 4},  // v5=16 : byte[19]=3,byte[20]=4; next=byte[20]=4
 };
-// The loop indexes the raw stream in steps of 2 over 18 bytes (9 entries). We
-// expose the same lookup semantics: find the first entry whose (cur,action)
-// matches; the table above is the decoded (dword_46637D>>24, +1>>24)->byte_466381.
+// The loop returns on the FIRST matching (cur,action); we mirror that order.
 
 HandStrengthFn g_handStrength = nullptr;
 BetCmdFn       g_betCmd = nullptr;
@@ -112,10 +113,10 @@ u8 DecideMove(CardGameState& st, i32 seatPtr) {
 
     SeatOffsets so = CardGameSeat(seat);
     SeatOffsets opp = CardGameSeat(seat ^ 1);
-    u8 handSize  = st.bytes[so.handSize];
-    u8 decision  = st.bytes[so.decision];
-    u8 moodLow   = st.bytes[so.mood];           // v5 (low byte of mood word)
-    (void)st.bytes[opp.handSize];               // v6/v13 (opp hand size; unused in core)
+    u8 handSize  = st.bytes[so.handSize];        // v3 (own hand size; drives the sum loop)
+    u8 decision  = st.bytes[so.decision];        // v12
+    u8 moodLow   = st.bytes[so.mood];            // v5 (low byte of own mood word)
+    u8 oppHand   = st.bytes[opp.handSize];       // v6 -> v13 (opponent hand size; case-3 only)
 
     int sum = HandSum(st, so.hand, handSize);
 
@@ -138,8 +139,9 @@ u8 DecideMove(CardGameState& st, i32 seatPtr) {
         double thr = static_cast<double>(seat + sum) * kF_61A1D0;
         // SLODWORD(v10) < 1065353216  <=>  thr < 1.0f (as a float bit-compare).
         float thrF = static_cast<float>(thr);
+        // gilde.exe 0x467001: fild word ptr uses v13 = OPPONENT hand size, not own.
         if (thrF < 1.0f
-            && static_cast<double>(6 - moodLow) < thr - static_cast<double>(handSize) * kF_61A1D4)
+            && static_cast<double>(6 - moodLow) < thr - static_cast<double>(oppHand) * kF_61A1D4)
             return 4;
         return 3;
     }
@@ -194,68 +196,76 @@ int EvaluateHand(CardGameState& st, i32 seatPtr, int draw) {
         return 0;
     SeatOffsets so = CardGameSeat(seat);
 
-    // Strength: EvalProductionRating(seat, mode 2) * (1/100) -> /20 -> clamp 4.
+    // gilde.exe 0x4669a6 — v7 = strength * flt_61A1AC (×100) on x87.
+    // 0x4669ac VIBE_Coord_ConvertX sets round-toward-zero; 0x4669b1 `fistp`
+    // TRUNCATES v7 to a 32-bit int. Then 0x4669c3 signed `idiv 20` (eax=quotient).
+    // 0x4669c5 `cmp al,4 / jnb` clamps on the LOW BYTE: (u8)quotient >= 4 -> 4,
+    // else tier = (u8)quotient. (No separate negative clamp in the binary.)
     double strength = HandStrength(seatPtr, 2);
-    double scaled = strength * kF_61A1AC; // matches v7 = v6 * flt_61A1AC (×100)
-    // (int)scaled / 20, clamp to 4.
-    long long sv = static_cast<long long>(scaled);
-    int tierRaw = static_cast<int>(sv / 20);
-    int tier = (static_cast<unsigned>(tierRaw) >= 4u) ? 4 : tierRaw;
-    if (tier < 0) tier = 0;
+    double scaled = strength * kF_61A1AC; // v7
+    int tierRaw = static_cast<int>(scaled) / 20; // (int)v7 / 20, signed
+    int tier = (static_cast<u8>(tierRaw) >= 4u) ? 4 : static_cast<u8>(tierRaw);
 
     if (draw) {
-        // Initial 3-card deal. *handSize = 3, then roll three cards from `tier`.
-        int redeals = static_cast<int>(guild::util::RandomModulo(3)); // v37
+        // gilde.exe 0x466a1a — Initial 3-card deal.
+        //   v37 = RandomModulo(3)  -> branch SELECTOR (0/1/2) for the boost rule.
+        //   *handSize = 3.
+        // The strength-banded burn draw also computes the boost COUNT `v21` from
+        // the draw's (==0) test plus a band offset. The band ladder is NOT a
+        // collapsible `||`: each band yields a different `v21` base offset.
+        //   v35 > flt_61A1B0 (0.8888): RandomModulo(0x10); v21 = (r==0) + 2  -> {2,3}
+        //   else v35 > flt_61A1B4 (0.5555): RandomModulo(0x10); v21 = (r==0)+1 -> {1,2}
+        //   else v35 <= flt_61A1B8 (0.3333): RandomModulo(8);  v21 = (r==0)    -> {0,1}
+        //   else:                             RandomModulo(4);  v21 = (r==0)    -> {0,1}
+        int v37 = static_cast<int>(guild::util::RandomModulo(3));   // selector
         st.bytes[so.handSize] = 3;
-        // The original burns extra RNG draws based on strength magnitude; we
-        // mirror the draw count so the stream stays aligned.
-        if (strength > static_cast<double>(kF_61A1B0) || strength > static_cast<double>(kF_61A1B4))
-            guild::util::RandomModulo(0x10);
-        else if (strength <= static_cast<double>(kF_61A1B8))
-            guild::util::RandomModulo(8);
-        else
-            guild::util::RandomModulo(4);
+        int v21; // boost count / gate
+        if (strength > static_cast<double>(kF_61A1B0)) {
+            v21 = (guild::util::RandomModulo(0x10) == 0 ? 1 : 0) + 2;
+        } else if (strength > static_cast<double>(kF_61A1B4)) {
+            v21 = (guild::util::RandomModulo(0x10) == 0 ? 1 : 0) + 1;
+        } else if (strength <= static_cast<double>(kF_61A1B8)) {
+            v21 = (guild::util::RandomModulo(8) == 0 ? 1 : 0);
+        } else {
+            v21 = (guild::util::RandomModulo(4) == 0 ? 1 : 0);
+        }
 
         int c0 = RollCard(tier, guild::util::RandomFloatScaled()) + 1; // v44
-        int c1 = RollCard(tier, guild::util::RandomFloatScaled()) + 1; // v43 (1-based loop)
-        // NOTE: c1 uses the `++v19` pre-increment form in the binary; both forms
-        // resolve to "index of first threshold >= roll, 1-based".
+        int c1 = RollCard(tier, guild::util::RandomFloatScaled()) + 1; // v43
         int c2 = RollCard(tier, guild::util::RandomFloatScaled()) + 1; // v42
         st.bytes[so.hand + 0] = static_cast<u8>(c0);
         st.bytes[so.hand + 1] = static_cast<u8>(c1);
         st.bytes[so.hand + 2] = static_cast<u8>(c2);
 
-        // "Boost toward redeals": if the three cards aren't all equal, apply the
-        // redeal adjustment (v21 = redeals; v37 = a fairness flag).
+        // Boost gate (0x466af9): apply only if the cards aren't all equal AND
+        // the boost count v21 != 0. Then dispatch on the selector v37.
         bool allEqual = (c1 == c0) && (c0 == c2);
-        if (!allEqual && redeals) {
-            if (redeals) { // v21 != 0
-                // v37 path: 0 -> +1 each (up to redeals), 1 -> raise the min card,
-                // else -> raise a random card.
-                int v37 = static_cast<int>(guild::util::RandomModulo(3)); // re-roll fairness
-                if (v37 == 0) {
-                    int idx = 0, r = redeals;
-                    while (idx < 3 && r) {
-                        int nv = st.bytes[so.hand + idx] + 1;
-                        st.bytes[so.hand + idx] = static_cast<u8>(nv > 6 ? 6 : nv);
-                        ++idx; --r;
-                    }
-                } else if (v37 == 1) {
-                    int minIdx = -1, minVal = 6;
-                    for (int i = 0; i < 3; ++i) {
-                        if (minVal > st.bytes[so.hand + i]) {
-                            minIdx = i; minVal = st.bytes[so.hand + i];
-                        }
-                    }
-                    if (minIdx > -1) {
-                        int nv = redeals + st.bytes[so.hand + minIdx];
-                        st.bytes[so.hand + minIdx] = static_cast<u8>(nv > 6 ? 6 : nv);
-                    }
-                } else {
-                    int idx = static_cast<int>(guild::util::RandomModulo(3));
-                    int nv = st.bytes[so.hand + idx] + redeals;
+        if (!allEqual && v21 != 0) {
+            if (v37 == 0) {
+                // 0x466b19: +1 each card, up to v21 cards (clamp 6).
+                int idx = 0, r = v21;
+                while (idx < 3 && r) {
+                    int nv = st.bytes[so.hand + idx] + 1;
                     st.bytes[so.hand + idx] = static_cast<u8>(nv > 6 ? 6 : nv);
+                    ++idx; --r;
                 }
+            } else if (v37 == 1) {
+                // 0x466c01: raise the (first) minimum card by v21 (clamp 6).
+                int minIdx = -1, minVal = 6;
+                for (int i = 0; i < 3; ++i) {
+                    if (minVal > st.bytes[so.hand + i]) {
+                        minIdx = i; minVal = st.bytes[so.hand + i];
+                    }
+                }
+                if (minIdx > -1) {
+                    int nv = v21 + st.bytes[so.hand + minIdx];
+                    st.bytes[so.hand + minIdx] = static_cast<u8>(nv > 6 ? 6 : nv);
+                }
+            } else {
+                // 0x466c4c: raise a RandomModulo(3)-chosen card by v21 (clamp 6).
+                int idx = static_cast<int>(guild::util::RandomModulo(3));
+                int nv = st.bytes[so.hand + idx] + v21;
+                st.bytes[so.hand + idx] = static_cast<u8>(nv > 6 ? 6 : nv);
             }
         }
         return 0;

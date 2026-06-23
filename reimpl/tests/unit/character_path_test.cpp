@@ -107,6 +107,90 @@ TEST(CharPathSlot, AllocSlotAtIndexHonoursOccupancy) {
     g_env = nullptr;
 }
 
+// --- HARDENING: AllocSlotAtIndex at the top of the 512-entry live table ------
+// The live table g_live has exactly kLiveCapacity (512) slots; index 511 is the
+// last valid one. Pin that allocating there writes inside the table (no OOB) and
+// the slot-index round-trips. (Indices outside [0,512) are an upstream/save-file
+// concern the original did not bound — see progress doc, BEHAVIORAL/needs-MCP.)
+TEST(CharPathSlot, AllocSlotAtIndexTopOfTableInBounds) {
+    ResetCharacterQuery();
+    SlotEnv env; g_env = &env;
+    CharacterPathHooks h = SlotHooks();
+    CharacterPathHooks prev = CharacterPathSetHooks(&h);
+
+    const int last = kLiveCapacity - 1;   // 511
+    LiveActor* a = AllocSlotAtIndex(last);
+    CHECK(a != nullptr);
+    if (a) {
+        CHECK_EQ(a->slotIndex, last);
+        CHECK_EQ((void*)g_live[last], (void*)a);
+    }
+    CharacterPathSetHooks(&prev);
+    g_env = nullptr;
+}
+
+// --- HARDENING: WaitSlotCallback queue boundaries ---------------------------
+// The 960-byte template is scanned in 64-byte steps (15 entries). With an all-zero
+// template no entry is selectable, so the function walks to the end and returns
+// (queueCount < 32) WITHOUT appending (no write past the queue). With a selectable
+// entry it appends actorId at slotRec[count] and bumps the count.
+namespace {
+int WaitSelectAll(int /*entry*/, const unsigned char* /*rec*/) { return 1; }
+} // namespace
+
+TEST(CharPathWait, AllZeroTemplateNoAppendNoOverrun) {
+    unsigned char tmpl[960];
+    std::memset(tmpl, 0, sizeof(tmpl));   // every entry byte0 == 0 -> never selected
+    int slotRec[33];
+    std::memset(slotRec, 0, sizeof(slotRec));
+    slotRec[32] = 5;                       // queue count
+    bool room = WaitSlotCallback(/*actorId*/ 77, slotRec, tmpl, WaitSelectAll);
+    CHECK(room);                           // 5 < 32
+    CHECK_EQ(slotRec[32], 5);              // count unchanged (nothing appended)
+    CHECK_EQ(slotRec[5], 0);              // no actor written into the queue
+}
+
+TEST(CharPathWait, AppendsAtCountAndBumps) {
+    unsigned char tmpl[960];
+    std::memset(tmpl, 0, sizeof(tmpl));
+    tmpl[0] = 1;                            // first entry non-zero -> selectable
+    int slotRec[33];
+    std::memset(slotRec, 0, sizeof(slotRec));
+    slotRec[32] = 3;                       // append at index 3
+    // callback selects (returns 1) the first non-zero entry -> append actorId there.
+    bool room = WaitSlotCallback(/*actorId*/ 99, slotRec, tmpl, WaitSelectAll);
+    CHECK(room);                           // 4 < 32 after the append
+    CHECK_EQ(slotRec[32], 4);              // count bumped 3 -> 4
+    CHECK_EQ(slotRec[3], 99);              // actorId written at the old count, in-bounds
+}
+
+// --- HARDENING: PickWaitAnimation index stays in the 32-int buffer ----------
+// The collector fills a 32-int buffer; the engine indexes it by (u16)rand % count.
+// At the max safe count (32) the index is in [0,31]. count==0 returns 0; a count
+// whose low word is 0 returns buf[0].
+namespace {
+int g_collectCount = 0;
+int CollectFixed(int* out, int /*cap*/) {
+    for (int i = 0; i < g_collectCount && i < 32; ++i) out[i] = 100 + i;
+    return g_collectCount;
+}
+unsigned RandZero() { return 0; }
+unsigned RandBig()  { return 33; }   // 33 % 32 == 1
+} // namespace
+
+TEST(CharPathPick, EmptyCollectionReturnsZero) {
+    g_collectCount = 0;
+    CHECK_EQ(PickWaitAnimation(CollectFixed, RandZero), 0);
+}
+
+TEST(CharPathPick, MaxCountIndexInBounds) {
+    g_collectCount = 32;                   // fills the whole buffer
+    // RandBig() % 32 == 1 -> buf[1] == 101 ; index 1 is inside the 32-int buffer.
+    CHECK_EQ(PickWaitAnimation(CollectFixed, RandBig), 101);
+    // rand 0 -> buf[0] == 100.
+    CHECK_EQ(PickWaitAnimation(CollectFixed, RandZero), 100);
+}
+
 // --------------------------------------------------------------------------
 // FindNearbyWide
 // --------------------------------------------------------------------------

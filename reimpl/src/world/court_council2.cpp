@@ -68,12 +68,20 @@ static inline int Trunc(double x) {
 static int g_categoryCounts[256];  // dword_B59820 (only [0..36] used; sized for u8 idx)
 
 // ===========================================================================
-// gilde.exe 0x47fdfc — VIBE_Office_TallyCategoryCounts.
-//   VIBE_Light_SetGrayColorThunk(0,40,out) zeroes 40 dwords of the histogram;
-//   we zero the whole working region. Walks word_12CE910 (768 * 536 bytes).
+// gilde.exe 0x47fdfc — VIBE_Office_TallyCategoryCounts  (__thiscall, ecx = out).
 // ===========================================================================
+// WAVE-16 (MCP) — resolves the wave-12 "++out[bucket] could overrun a 40-int
+// caller buffer" flag. The decompile shows the tally ALWAYS increments the fixed
+// module global dword_B59820 (g_categoryCounts), NOT the caller pointer: the loop
+// body is `++dword_B59820[(u8)BYTE2(*v5)]`. The `this`/eax argument is only used
+// by `VIBE_Light_SetGrayColorThunk(0, 40, this)`, which zeroes 40 dwords AT THE
+// CALLER BUFFER (it is a separate scratch region from the tally global). The
+// function then returns dword_B59820. The bucket index is a full u8 (0..255), so
+// the histogram global must hold 256 entries (g_categoryCounts[256] — correct).
+// This function has NO xrefs in the binary (dead/indirect), so it is not on the
+// live call tree; reconstructed verbatim for completeness.
 int* OfficeTallyCategoryCounts(int* out) {
-    std::memset(out, 0, 40 * sizeof(int));      // SetGrayColorThunk(0,40)
+    std::memset(out, 0, 40 * sizeof(int));      // SetGrayColorThunk(0,40,this) -> caller buf
     for (int i = 0; i < kPersonCapacity; ++i) {
         const Person* rec = &g_persons[i];
         u8 kind = PByte(rec, 2);                 // v1[2]
@@ -83,13 +91,13 @@ int* OfficeTallyCategoryCounts(int* out) {
                 u8 bucket = (office < 0x25)
                               ? OfficeDefBookCat(office)   // BYTE2(dword_62EC8E[3*office])
                               : OfficeDefBookCat(0);       // dword_62EC8E + 2
-                ++out[bucket];
+                ++g_categoryCounts[bucket];      // ++dword_B59820[(u8)bucket]  (the GLOBAL)
             } else {
-                ++out[0];
+                ++g_categoryCounts[0];           // ++dword_B59820[0]
             }
         }
     }
-    return out;
+    return g_categoryCounts;                      // return dword_B59820
 }
 
 int* OfficeTallyCategoryCounts() { return OfficeTallyCategoryCounts(g_categoryCounts); }

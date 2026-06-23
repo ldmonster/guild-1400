@@ -68,7 +68,9 @@ void InterpolateBoneFrame(const AnimFrame* frames, const float* bone,
     // Phase 1: leading partial segment (original: v30 = 1 - phaseNum/dur(from)).
     if (toFrame > fromFrame) {
         double durFrom = (double)frames[fromFrame].duration;
-        double lead = 1.0 - (double)phaseNum / durFrom;  // v30
+        // v30 is computed in x87 (80-bit) then `fstp [var_24]` rounds it to 32-bit
+        // float before the segment-delta multiply (0x5cbd0a). Model that round.
+        float lead = (float)(1.0 - (double)phaseNum / durFrom);  // v30 (32-bit)
         ax = (float)((frames[fromFrame + 1].tx - frames[fromFrame].tx) * lead);
         ay = (float)((frames[fromFrame + 1].ty - frames[fromFrame].ty) * lead);
         az = (float)((frames[fromFrame + 1].tz - frames[fromFrame].tz) * lead);
@@ -86,7 +88,9 @@ void InterpolateBoneFrame(const AnimFrame* frames, const float* bone,
         double durTo = (double)frames[toFrame].duration;
         double num = (fromFrame == toFrame) ? (double)(phaseEnd - phaseNum)
                                             : (double)phaseEnd;
-        double trail = num / durTo;  // v32
+        // v32 = num/dur(to) is computed in x87 then `fstp [var_1C]` rounds it to a
+        // 32-bit float before the trailing-delta multiply (0x5cbe2e). Model that round.
+        float trail = (float)(num / durTo);  // v32 (32-bit)
         ax += (float)((frames[toFrame + 1].tx - frames[toFrame].tx) * trail);
         ay += (float)((frames[toFrame + 1].ty - frames[toFrame].ty) * trail);
         az += (float)((frames[toFrame + 1].tz - frames[toFrame].tz) * trail);
@@ -95,12 +99,17 @@ void InterpolateBoneFrame(const AnimFrame* frames, const float* bone,
     // Rotate the accumulated delta by the bone's local 3x3 (column-major read at
     // float indices 99/103/107 | 100/104/108 | 101/105/109), then add the bone's
     // base translation (indices 19/20/21). Matches v18/v19 + v33[19..21].
-    double rx = (double)ax * bone[99]  + (double)ay * bone[103] + (double)az * bone[107];
-    double ry = (double)ax * bone[100] + (double)ay * bone[104] + (double)az * bone[108];
-    double rz = (double)ax * bone[101] + (double)ay * bone[105] + (double)az * bone[109];
-    out[0] = (float)(rx + bone[19]);
-    out[1] = (float)(ry + bone[20]);
-    out[2] = (float)(rz + bone[21]);
+    //
+    // The dot products run entirely in x87 (80-bit) via the faddp chains at
+    // 0x5cbf19..0x5cbf37 and are each rounded to a 32-bit float by `fstp [edx..]`
+    // (0x5cbf3b) BEFORE the base translation is added (the reload+fadd at
+    // 0x5cbf47..0x5cbf65). Model that double-round: round the dot to float, then add.
+    float rx = (float)((double)ax * bone[99]  + (double)ay * bone[103] + (double)az * bone[107]);
+    float ry = (float)((double)ax * bone[100] + (double)ay * bone[104] + (double)az * bone[108]);
+    float rz = (float)((double)ax * bone[101] + (double)ay * bone[105] + (double)az * bone[109]);
+    out[0] = rx + bone[19];
+    out[1] = ry + bone[20];
+    out[2] = rz + bone[21];
 }
 
 // gilde.exe 0x5c8eb4 — VIBE_Transform_AccumulateBoneMatrices

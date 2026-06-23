@@ -23,6 +23,8 @@
 #include "app/real_boot.h"
 #include "app/wiring.h"
 
+#include "config/ini.h"
+
 #include "io/vfs.h"
 
 #include "shim_impl/disk_filesystem.h"
@@ -89,7 +91,15 @@ TEST(AppRealWiring, HooksConsumeRealLoaders) {
     // configReadGfxAndSound -> the REAL Gilde.INI values (not reconstructed defaults).
     sub.configReadGfxAndSound();
     CHECK(sub.firedReal("configReadGfxAndSound"));
-    CHECK(sub.sound().masterVol == 127);   // [Sound] master_vol from the real file
+    // [Sound] master_vol from the real file (user-mutable — the in-game options
+    // screen persists into it — so compare against an independent parse, not a
+    // literal) and [Game] difficulty (=2 in the shipped file, not the default 1).
+    {
+        config::IniFile ini;
+        CHECK(ini.loadFile(dir + "/Gilde.INI"));
+        CHECK((int)sub.sound().masterVol == ini.getInt("Sound", "master_vol", -1));
+        CHECK(ini.getInt("Sound", "master_vol", -1) >= 0);
+    }
     CHECK(sub.game().difficulty == 2);     // [Game] difficulty (not the default 1)
 
     // vfsInit -> binds the disk VFS (so the gfx/.cty loose-file opens resolve).

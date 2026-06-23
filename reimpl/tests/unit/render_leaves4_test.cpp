@@ -235,15 +235,21 @@ TEST(RenderLeaves4_Surface, SetGet16bppRoundtrip) {
     Put<std::int32_t>(surf.data(), 48, 64);           // clip y1
 
     // 565: r/g lose low bits; choose channel values that survive the round trip.
+    // 0x423ec6 — the original packs VIBE_Result_Handler_Final(a4, a3, a5) where
+    // a3==r, a4==g, a5==b: i.e. PackColor(g, r, b) (the r/g PACK args are swapped
+    // vs the 24bpp byte order). Set(r=248,g=124,b=16) -> PackColor(124, 248, 16).
     CHECK_EQ(render::SetPixelRgb(fmt, 3, 5, 248, 124, 16, surf.data()), 1);
-    CHECK_EQ(pixels[3 + 64 * 5], (std::uint16_t)render::PackColor(fmt, 248, 124, 16));
+    CHECK_EQ(pixels[3 + 64 * 5], (std::uint16_t)render::PackColor(fmt, 124, 248, 16));
 
     unsigned char out[3] = {0, 0, 0};
     render::GetPixelRgb(fmt, 3, 5, out, surf.data());
-    // 15/16 path stores out[0]=r, out[1]=b, out[2]=g
-    CHECK_EQ(out[0], (unsigned char)248);
+    // The pixel's r-channel holds 124, g-channel 248, b-channel 16. The 565 red
+    // channel is only 5 bits, so 124 read back becomes 120; green keeps 248, blue
+    // keeps 16. UnpackColor -> r=120, g=248, b=16; the 15/16 GetPixel path stores
+    // out[0]=r, out[1]=b, out[2]=g -> (120, 16, 248).
+    CHECK_EQ(out[0], (unsigned char)120);
     CHECK_EQ(out[1], (unsigned char)16);
-    CHECK_EQ(out[2], (unsigned char)124);
+    CHECK_EQ(out[2], (unsigned char)248);
 }
 
 TEST(RenderLeaves4_Surface, SetPixelClipRejects) {
@@ -308,7 +314,8 @@ TEST(RenderLeaves4_Surface, SetGet24And32Bpp) {
     CHECK_EQ(render::SetPixelRgb(fmt, 1, 1, 248, 124, 16, surf32.data()), 1);
     std::uint32_t dw;
     std::memcpy(&dw, buf32.data() + 4 * (1 + 8 * 1), 4);
-    CHECK_EQ(dw, (std::uint32_t)render::PackColor(fmt, 248, 124, 16));
+    // Same r/g PACK swap as the 16bpp path: PackColor(g, r, b).
+    CHECK_EQ(dw, (std::uint32_t)render::PackColor(fmt, 124, 248, 16));
 }
 
 TEST(RenderLeaves4_Surface, BlitRgbBlock) {

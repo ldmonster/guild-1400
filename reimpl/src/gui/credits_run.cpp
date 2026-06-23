@@ -77,8 +77,12 @@ void Menu_RunCreditsScroll(CreditsRunState& st, CreditsRunRecord* rec, int maxFr
     h->RenderEntityList(kCreditsBackgroundList);     // _CREDITS_BACKGROUND
     Trace(rec, "RenderBackground");
 
-    // 0x56e5ae  win = Window_Create(100, 0, screenW, 600, 16).
-    int win = h->WindowCreate(kCreditsScrollX, kCreditsScrollY, st.screenW,
+    // 0x56e5a2  win = Window_Create(100, 0, screenH, 600, 16).
+    //   Disasm (reference of record): a1@eax=100 (x), a2@dx=0 (y),
+    //   a3@cx = dword_69FFB8>>16 (screenH), a4@bx = 0x258=600, a5(stack)=16 (kind).
+    //   The Hex-Rays pseudocode mislabels a3 as dword_69FFBC (screenW); the disasm
+    //   loads ecx from dword_69FFB8+2 (screenH) at 0x56e594/0x56e59f.
+    int win = h->WindowCreate(kCreditsScrollX, kCreditsScrollY, st.screenH,
                               kCreditsScrollW, kCreditsScrollKind);
     // 0x56e5b0  Window_PositionAtCoord(win, 1).
     h->WindowPositionAtCoord(win, kCreditsScrollPositionAt);
@@ -97,7 +101,7 @@ void Menu_RunCreditsScroll(CreditsRunState& st, CreditsRunRecord* rec, int maxFr
     if (rec) {
         rec->windowId      = win;
         rec->windowX = kCreditsScrollX; rec->windowY = kCreditsScrollY;
-        rec->windowW = st.screenW;      rec->windowH = kCreditsScrollW;
+        rec->windowW = st.screenH;      rec->windowH = kCreditsScrollW;
         rec->windowKind = kCreditsScrollKind;
         rec->positionCoord = kCreditsScrollPositionAt;
         rec->richTextId    = kCreditsCrawlText;

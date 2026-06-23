@@ -163,7 +163,13 @@ int DriverManager::releaseAllDigitalDrivers() {
 int DriverManager::reacquireDigitalDriver(std::int32_t handle, void* hwnd, unsigned msg) {
     int result = static_cast<int>(handle);  // mirrors result = a1 entry value
     if (driverInstalled_ && msg >= 0x400) {
-        result = 0;
+        // The original uses eax as a byte offset (0,4,...) into dword_62EA1C while
+        // searching; when the handle is NOT found the loop breaks at eax==64 and
+        // that value (0x40) is returned. When found at index i it holds eax==4*i
+        // only transiently, then v6 (=i) is checked (>= 0 always) and eax is
+        // overwritten with the reacquire result / PostMessageA return. So: found
+        // -> reacquire path; not found -> return 64. (Disasm @0x449cf8 jge ->
+        // loc_449D06 retn with eax==0x40.)
         int idx = findOutputByHandle(handle);
         if (idx >= 0) {
             DriverOutput& o = outputs_[static_cast<std::size_t>(idx)];
@@ -172,34 +178,40 @@ int DriverManager::reacquireDigitalDriver(std::int32_t handle, void* hwnd, unsig
                 return hooks_.postMessage(hwnd, msg,
                                           static_cast<std::uintptr_t>(
                                               static_cast<std::uint32_t>(handle)));
+        } else {
+            result = 64;                       // eax == 0x40 at the not-found break
         }
     }
     return result;
 }
 
 // gilde.exe 0x449d2c — VIBE_Audio_ReacquireAllDigitalDrivers
-//   if (dword_62EADC) {
-//     for v3 in 0..15:
-//       v4 = dword_62EA1C[v3]; if (!v4) continue;
-//       if (!dword_62EADC || a2 (msg) < 0x400) continue;
-//       find idx of v4; if (idx < 0) continue;
-//       result = AIL_digital_handle_reacquire(*v4);
-//       if (result == 0) result = PostMessageA(hwnd, msg, v4, 0);
-//   }
-//   return result;
+// Disasm (reference of record). The return value is eax, carried across the
+// 16-slot loop; whichever code path the LAST processed slot took leaves its
+// value in eax. Per-slot (ebx = 4*index walking dword_62EA1C):
+//   * empty slot (ecx == 0): eax untouched, advance.        (449d49/449d4d)
+//   * used slot: eax = hwnd; eax = dword_62EADC (== -1 when installed); if
+//     msg < 0x400 -> eax = -1, advance.                     (449d66..449d79)
+//   * used + msg >= 0x400: search the table for the slot's handle (it is its own
+//     table entry, so always found at its index -> the result>=64 not-found
+//     path is unreachable here); eax = reacquire(handle); if eax == 0 ->
+//     eax = PostMessageA(hwnd, msg, handle, 0).             (449d9c..449db6)
+// Initial eax (no used slot processed / driver down) is the entry value = hwnd.
+// dword_62EADC is -1 when the driver is up (StartupMilesDriver sets it to -1).
 int DriverManager::reacquireAllDigitalDrivers(void* hwnd, unsigned msg) {
-    int result = 0;
+    // Seed = entry eax = the hwnd argument (returned if no used slot is touched).
+    int result = static_cast<int>(reinterpret_cast<std::uintptr_t>(hwnd));
     if (!driverInstalled_)
-        return result;
+        return result;                       // jz loc_449D55 -> retn eax(hwnd)
     for (int v3 = 0; v3 < kDrv2MaxOutputs; ++v3) {
         DriverOutput& o = outputs_[static_cast<std::size_t>(v3)];
         if (!o.used)
-            continue;                       // v4 == 0 -> LABEL_4
-        if (!driverInstalled_ || msg < 0x400)
-            continue;                       // -> LABEL_4
-        int idx = findOutputByHandle(o.handle);
-        if (idx < 0)
-            continue;                       // ran off the table (result>=64) -> LABEL_4
+            continue;                        // ecx == 0 -> 449d4d (eax untouched)
+        result = -1;                         // eax = dword_62EADC (== -1, installed)
+        if (msg < 0x400)
+            continue;                        // jb loc_449D4D (eax stays -1)
+        // The slot's handle is its own table entry: search always succeeds, so
+        // the not-found (eax>=64) path never triggers for ReacquireAll.
         result = hooks_.digitalHandleReacquire(o.handle);
         if (result == 0) {
             result = hooks_.postMessage(hwnd, msg,
@@ -360,7 +372,10 @@ int DriverManager::releaseAllSampleHandles() {
 }
 
 // Internal mirror of VIBE_Audio_ReleaseSampleHandle @0x44a028's bookkeeping:
-// clear the matching sample slot, decrement the owning output's +0x14 count.
+//   LookupSampleDriverIndex; LookupSampleHandleIndex; AIL_release_sample_handle;
+//   dword_62EA5C[idx][slot] = 0;        // clear sample slot   (44a06f)
+//   --*(dword_62EA1C[idx] + 20);        // allocatedSampleCount (44a079)
+// The decrement is UNCONDITIONAL in the binary (no `> 0` guard); model it 1:1.
 // Returns 0 on success, -1 if the handle is not currently allocated.
 int DriverManager::releaseSampleHandleSlot(std::int32_t handle) {
     for (int i = 0; i < kDrv2MaxOutputs; ++i) {
@@ -370,8 +385,7 @@ int DriverManager::releaseSampleHandleSlot(std::int32_t handle) {
         for (std::size_t s = 0; s < o.sampleSlots.size(); ++s) {
             if (o.sampleSlots[s] == handle) {
                 o.sampleSlots[s] = 0;
-                if (o.allocatedSampleCount > 0)
-                    --o.allocatedSampleCount;
+                --o.allocatedSampleCount;   // unconditional, matches 44a079
                 return 0;
             }
         }

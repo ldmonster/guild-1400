@@ -69,6 +69,20 @@ i32 SeedMarketWorld(i16 ware, u32 baseValue, u16 divisor) {
 
 } // namespace
 
+// --- golden: pin the QueueRequest17 (@0x49465c) opcode-17 packet-staging byte
+// offsets + the credited-money field offset. Recovered constants traced to
+// slice_market.h's recovered-value comments. ---
+TEST(PlaySliceMarketUnit, QueueRequest17OffsetsGolden) {
+    CHECK_EQ((int)kTradeCmdOpcode, 17);    // VIBE_Command_QueueRequest17
+    CHECK_EQ((int)kTradeSellerOff, 0x10);  // v8  = seller building id (a1)
+    CHECK_EQ((int)kTradeBuyerOff,  0x14);  // v9  = buyer / -1 (a2)
+    CHECK_EQ((int)kTradeProtoOff,  0x18);  // v10 = proto (word) (a4)
+    CHECK_EQ((int)kTradePlayerOff, 0x1E);  // v11 = player (byte) (a5)
+    CHECK_EQ((int)kTradeQtyOff,    0x1F);  // v12 = qty (dword) (a3)
+    CHECK_EQ((int)kTradePriceOff,  0x23);  // v13 = unit price (dword) (a6)
+    CHECK_EQ((int)kTreasuryFieldOff, 77);  // object+77 (credited money)
+}
+
 // --- classifier golden: a SELL on a contor (kind 2) -> opcode-17 command. -------
 TEST(PlaySliceMarketUnit, ClassifySellCommandGolden) {
     i32 id = SeedMarketWorld(/*ware=*/5, /*base=*/80, /*divisor=*/2);
@@ -194,4 +208,66 @@ TEST(PlaySliceMarketUnit, SliceDeterministicAndDayRepricesWare) {
     CHECK_EQ(a.treasuryAfter, b.treasuryAfter);
     CHECK_EQ(a.stockAfter, b.stockAfter);
     CHECK_EQ(a.priceAfter, b.priceAfter);
+}
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-12): out-of-range good (ware) + out-of-range building id.
+// SceneTypeDefAt / Building_ComputeMarketPrice clamp the ware (return 0/nullptr
+// for an out-of-range index), and BuildingFindById returns nullptr for an
+// unknown building, so the apply is an inert no-op. ApplyDayPriceDrift maps the
+// ware into the good-category table with a modulo, never indexing g_goods out of
+// bounds. Drive both far-out-of-range and assert no OOB (ASAN) + a clean result.
+// ---------------------------------------------------------------------------
+TEST(PlaySliceMarketUnit, OutOfRangeWareNoOOB) {
+    SeedMarketWorld(/*ware*/1, /*base*/1000, /*divisor*/1);
+    sim::CommandQueue q; q.Init(); q.set_standalone(true);
+
+    MarketInteraction mi;
+    mi.side = MarketSide::kSell;
+    mi.ware = (i16)30000;          // far past kSceneTypeCapacity
+    mi.qty  = 10;
+    mi.buildingId = 7001;
+    mi.buildingKind = 2;
+    mi.player = 0;
+
+    MarketSliceResult r = RunMarketSlice(mi, 0xABCD, q);
+    // ComputeMarketPrice(out-of-range) == 0 -> unit price 0 -> still issued (qty>0),
+    // but the price drift maps the ware via modulo into the good table (no OOB).
+    CHECK(r.command.issued);
+}
+
+TEST(PlaySliceMarketUnit, NegativeWareNoOOB) {
+    SeedMarketWorld(/*ware*/1, /*base*/1000, /*divisor*/1);
+    sim::CommandQueue q; q.Init(); q.set_standalone(true);
+
+    MarketInteraction mi;
+    mi.side = MarketSide::kSell;
+    mi.ware = (i16)-3;             // negative -> SceneTypeDefAt returns nullptr
+    mi.qty  = 5;
+    mi.buildingId = 7001;
+    mi.buildingKind = 2;
+    mi.player = 0;
+
+    MarketSliceResult r = RunMarketSlice(mi, 0x1234, q);
+    CHECK(r.command.issued);       // negative ware -> price 0, still classified
+}
+
+TEST(PlaySliceMarketUnit, UnknownBuildingIdInertNoOOB) {
+    SeedMarketWorld(/*ware*/1, /*base*/1000, /*divisor*/1);
+    sim::CommandQueue q; q.Init(); q.set_standalone(true);
+
+    MarketInteraction mi;
+    mi.side = MarketSide::kSell;
+    mi.ware = 1;
+    mi.qty  = 10;
+    mi.buildingId = 999999;        // no such building -> BuildingFindById == nullptr
+    mi.buildingKind = 2;
+    mi.player = 0;
+
+    MarketSliceResult r = RunMarketSlice(mi, 0x9999, q);
+    // The apply targets a non-existent record -> treasury/stock unchanged (0).
+    CHECK_EQ((long long)r.treasuryBefore, 0LL);
+    CHECK_EQ((long long)r.treasuryAfter, 0LL);
+    CHECK_EQ(r.stockBefore, 0);
+    CHECK_EQ(r.stockAfter, 0);
 }

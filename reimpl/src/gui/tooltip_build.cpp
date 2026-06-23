@@ -65,37 +65,51 @@ ContactTooltip Tooltip_ResolveContact(const char* name,
     return r;
 }
 
-// gilde.exe 0x4f78e4 — building tooltip layout values.
-//   v9    = &v10[record[+583]]            -> kBuildingColors[record[583]]  (id 39)
-//   id 39 subject : VIBE_Text_RenderRichString(39, 14*code + 1078, color)
-//   icon          : VIBE_Object_AddToWindow(..., code + 1010)
-//   id 42         : color again
-//   id 40         : VIBE_Building_ComputeSalePrice(code)   (deferred -> salePrice arg)
-//   id 41         : *(record + 579)
+// gilde.exe 0x4f78e4 — building tooltip layout values. Disasm-verified (DISASM > Hex-Rays):
+//   4f78fb movsx esi, al            -> code is a SIGNED 8-bit (al); record/text use (i8)code
+//   4f793e mov al,[ebp+247h]        -> selector = *(u8*)(record + 583)
+//   4f7944 add eax,esp / 4f794b push -> v10[sel] read UNCONDITIONALLY (no bounds check)
+//   4f794c..4f795f 14*esi + 0x436   -> nameTextId = 14*(i8)code + 1078       (id 0x27)
+//   4f7986 VIBE_Object_AddToWindow(dword_62D230,0) -> icon uses a GLOBAL handle, NOT code+1010
+//   4f798b var_1C(=14*code) + 0x437 -> descTextId = 14*(i8)code + 1079       (RichString)
+//   4f79ab mov dl,[ebp+247h]        -> colour again                          (id 0x2A)
+//   4f79e2 VIBE_Building_ComputeSalePrice                                    (id 0x28, deferred)
+//   4f79f2 mov edx,[ebp+243h]       -> *(record + 579)                       (id 0x29)
 BuildingTooltipLayout Tooltip_BuildingLayout(const u8* record, int code, int salePrice) {
     BuildingTooltipLayout l{};
+    // 14 * (signed char)code — the binary receives `al` and sign-extends it (movsx).
+    int sc = static_cast<int>(static_cast<signed char>(code));
     u32 color = 0;
     if (record) {
         unsigned sel = record[583];          // *(unsigned __int8 *)(v2 + 583)
+        // The binary indexes v10[sel] with no bounds check (4f7944 add eax,esp). Real
+        // records always carry sel in [0,7); we clamp the out-of-palette case (which the
+        // original leaves as an adjacent-stack over-read / C++ UB) to 0 rather than read
+        // out of bounds. Identical for every valid input.
         if (sel < static_cast<unsigned>(kBuildingColorCount))
             color = kBuildingColors[sel];
-        else
-            color = 0;                        // out of palette -> default (faithful guard)
     }
     l.titleColor   = color;
-    l.nameTextId   = 14 * code + 1078;        // 14 * v1 + 1078
-    l.iconObjectId = code + 1010;             // v1 + 1010
+    l.nameTextId   = 14 * sc + 1078;          // 14*(i8)code + 1078   (4f795a add eax,436h)
+    l.descTextId   = 14 * sc + 1079;          // 14*(i8)code + 1079   (4f798f add eax,437h)
     l.descColor    = static_cast<int>(color);
     l.salePrice    = salePrice;
-    l.extraField   = record ? *reinterpret_cast<const std::int32_t*>(record + 579) : 0;
+    // id 0x29: *(record + 579) — an unaligned dword (offset % 4 == 3). The original does
+    // an unaligned x86 load; read via memcpy (byte-identical) to avoid the alignment UB.
+    std::int32_t extra = 0;
+    if (record) std::memcpy(&extra, record + 579, sizeof(extra));
+    l.extraField   = extra;
     return l;
 }
 
-// gilde.exe 0x4f8154 — VIBE_Tooltip_BuildUpgrade early-out: class byte == 29 -> skip.
+// gilde.exe 0x4f8154 — VIBE_Tooltip_BuildUpgrade early-out: class byte == 29 -> return -1.
+// Disasm: 4f815c movsx edx,ax / shl eax,6 / add edx,eax -> index = 65*(i16)code; the
+// argument arrives in `ax`, so it is sign-extended from 16 bits (not 8, not 32).
 bool Tooltip_UpgradeApplies(const u8* objectBase, int objectCode) {
     if (!objectBase)
         return false;
-    u8 cls = objectBase[kObjectStride * objectCode]; // *(_BYTE*)(65*a1 + dword_13CE27C)
+    int idx = kObjectStride * static_cast<i16>(objectCode); // 65*(i16)code, dword_13CE27C base
+    u8 cls = objectBase[idx];                               // *(_BYTE*)(65*(i16)code + base)
     return cls != kUpgradeSkipClass;
 }
 

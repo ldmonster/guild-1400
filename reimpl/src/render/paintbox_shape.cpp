@@ -56,12 +56,13 @@ void Surface_CopyRegionRgb(const u16* srcFb, int fbWidth, u8* dstRgb,
             u16 pix = srcFb[(size_t)y * fbWidth + x];     // a3 + 2*(x + fbWidth*y)
             u8 r, g, b;
             UnpackColor(fmt, pix, r, g, b);
-            // Faithful byte order from the original call: UnpackColor writes
-            //   r -> dst+0 (edx), g -> dst+2 (ecx=v8), b -> dst+1 (ebx=v7).
-            // i.e. the dest triple is stored R, B, G (an intentional quirk).
+            // Faithful byte order from the original call (disasm @0x4230d6-da):
+            //   edx = dst+0, ecx = dst+2, ebx = dst+1; and UnpackColor
+            //   (@0x434f7c) writes R->*a2(edx), B->*a3(ecx), G->*a4(ebx). So
+            //   dst+0=R (edx), dst+1=G (ebx), dst+2=B (ecx) — normal R,G,B order.
             dstRow[3 * x + 0] = r;
-            dstRow[3 * x + 1] = b;
-            dstRow[3 * x + 2] = g;
+            dstRow[3 * x + 1] = g;
+            dstRow[3 * x + 2] = b;
         }
     }
 }

@@ -64,4 +64,52 @@ int SelectCloudLayerIndex(WeatherCategory category, int current);
 // Variant counts per category (4 / 3 / 2).
 int CloudVariantCount(WeatherCategory category);
 
+// ---------------------------------------------------------------------------
+// gilde.exe 0x4c0040 VIBE_Weather_UpdateSky — the per-frame weather STATE
+// driver that gates rain/snow. Pure decision core, reconstructed 1:1 from the
+// disassembly; the subsystem dispatch (Snow/Rain GrowList, Sky layer texture/
+// fade/scroll) is left to the caller (it owns those subsystem handles).
+//
+// The current hour is HIWORD(qword_13CE852) (game-time clock); the engine stores
+// it to dword_11BC1C4 then indexes three 24-entry arrays by it:
+//   arc[h]   = dword_11BC038[h]   weather code (bit0 = "is rain", rest intensity)
+//   windX[h] = dword_11BC100[h]
+//   windY[h] = dword_11BC160[h]
+//
+// WeatherFrame captures exactly what 0x4c0040 computes before it dispatches:
+//   hour        : HIWORD(clock)
+//   rainActive  : (arc[hour] & 1) != 0   (the rain gate @0x4c0085)
+//   rainSpawn   : rainActive ? arc[hour]/5 : 0   (signed idiv @0x4c009f-a2)
+//                 — the per-frame "spawn" count handed to VIBE_Rain_GrowDropList
+//                   (op==1) when a rain system + snow system both exist;
+//                   when no snow system exists the original passes arc[hour]
+//                   directly (rainSpawnNoSnow).
+//   intensity   : peak-of-3 = max(arc[(h+23)%24], arc[h], arc[(h+1)%24])
+//   snowGrow    : trunc(2.0 * -windX * intensity)   (op==2 GrowList arg)
+//   rainGrow    : trunc(0.5 * -windX * intensity)
+//   scrollMag   : sqrt(windX^2+windY^2) * (intensity+150) * 0.125
+//   category    : CategoryFor(intensity)
+// ---------------------------------------------------------------------------
+struct WeatherFrame {
+    int   hour;            // dword_11BC1C4
+    bool  rainActive;      // arc[hour] & 1
+    int   rainSpawn;       // arc[hour] / 5   (when snow system present)
+    int   rainSpawnNoSnow; // arc[hour]       (when no snow system)
+    int   intensity;       // peak-of-3
+    int   snowGrow;        // trunc(2.0 * -windX * intensity)
+    int   rainGrow;        // trunc(0.5 * -windX * intensity)
+    float scrollMag;       // base cloud scroll speed
+    float scrollFast;      // scrollMag * 0.75  (front layer, dword_11BC1D0)
+    float scrollBack;      // scrollMag * 1.5   (back  layer, dword_11BC1D8)
+    WeatherCategory category;
+};
+
+// Compute the weather frame for `hour` (0..23) from the three 24-entry arrays.
+// `hour` is HIWORD of the game clock (the engine reads it raw; callers pass it
+// already reduced mod 24 by the clock, but intensity wraps the neighbours mod 24
+// regardless). This is the gating decision 0x4c0040 makes each frame; the caller
+// then drives the rain/snow grow lists and sky layers from these fields.
+WeatherFrame WeatherUpdate(const i32 arc[24], const float windX[24],
+                           const float windY[24], int hour);
+
 } // namespace guild::render

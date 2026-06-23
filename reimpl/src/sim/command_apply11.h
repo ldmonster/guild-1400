@@ -76,7 +76,7 @@ struct DebugCmdCtx {
 // ---------------------------------------------------------------------------
 // Cross-module hooks. All defaults are inert (parse 0 / find nothing / no-op).
 // ---------------------------------------------------------------------------
-struct DebugCmdHooks {
+struct Apply11CmdHooks {
     // VIBE_Util_ParseInt @0x5dc070 — parse a leading signed decimal. Default 0.
     i32 (*parseInt)(const char* s) = nullptr;
 
@@ -97,8 +97,8 @@ struct DebugCmdHooks {
 };
 
 // Install spies (returns the previously-installed set). Pass null to reset to inert.
-DebugCmdHooks  SetDebugCmdHooks(const DebugCmdHooks& h);
-DebugCmdHooks& GetDebugCmdHooks();
+Apply11CmdHooks  SetApply11CmdHooks(const Apply11CmdHooks& h);
+Apply11CmdHooks& GetApply11CmdHooks();
 
 // ---------------------------------------------------------------------------
 // (A) Opcode-28 slot-reset emitters. `pending` carries the StagePendingBlock

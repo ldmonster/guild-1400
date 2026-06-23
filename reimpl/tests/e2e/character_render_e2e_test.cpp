@@ -101,7 +101,9 @@ TEST(CharRenderE2E, SpawnAttachVisibilityFlow) {
     CHECK(seat.offset[1] == 50.0f);     // 65 - 15 + root Y(0)
 
     // --- pause then resume the actor's animation ----------------------------
+    // gate is +296 (action) && +112 (handle112); the +52 mesh is body-only.
     actor.action = (void*)1;
+    actor.handle112 = (void*)1;
     ToggleAniPlayback(&actor, true);
     CHECK((actor.flagsA & kRaAnimPaused) != 0);
     CHECK_EQ(R.clearLoop, 1);

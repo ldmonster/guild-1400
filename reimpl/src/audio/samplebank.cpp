@@ -51,12 +51,20 @@ int SampleBank::computeVariationSize(const std::string& variation, int variation
 }
 
 int SampleBank::computeTotalSize(int subSampleCount, int baseSize) const {
-    // VIBE_SampleBank_ComputeTotalSize @0x447614.
+    // VIBE_SampleBank_ComputeTotalSize @0x447614.  Disasm-exact formula
+    // (S=topSamples, V=variations, C=subSampleCount=CountSamples(0)):
+    //   12*(S+C) + 12*V + (S+V)<<6 + 324 + bankSize
+    // Decomposed in the binary as:
+    //   lea/sub/shl  -> 12*(S+C)   (0x447665..0x447671)
+    //   shl ebx,6    -> (S+V)<<6   (0x44766e)
+    //   lea/sub/shl  -> 12*V       (0x44767c..0x447685)
+    // The earlier reconstruction dropped the `12*V` term; restored here.
     int sampleCount = static_cast<int>(samples_.size());
-    int totalNodes = sampleCount + static_cast<int>(variations_.size());
-    return kSubSampleStride * subSampleCount
-           + kSubSampleStride * sampleCount
-           + (totalNodes << 6)
+    int variationCount = static_cast<int>(variations_.size());
+    int totalNodes = sampleCount + variationCount;
+    return kSubSampleStride * (subSampleCount + sampleCount) // 12*(S+C)
+           + kSubSampleStride * variationCount               // 12*V
+           + (totalNodes << 6)                               // (S+V)<<6
            + 324
            + baseSize;
 }

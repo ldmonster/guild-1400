@@ -101,7 +101,8 @@ const unsigned char* ParseSpec(const unsigned char* p, Stream& s) {
     if (IsDigit(*p)) {                  // field width
         int w = 0;
         do {
-            w = *p - '0' + 10 * w;
+            // 2's-complement wrap on the 32-bit accumulate (matches x86).
+            w = static_cast<int>(static_cast<u32>(*p - '0') + 10u * static_cast<u32>(w));
             ++p;
         } while (IsDigit(*p));
         s.width = w;
@@ -205,7 +206,9 @@ int ReadInteger(Stream& s, int base) {
         for (;;) {
             int dv = HexDigitValue(c);
             if (dv >= base) break;
-            acc32 = dv + base * acc32;
+            // 2's-complement wrap (matches x86), computed in u32 to avoid UB.
+            acc32 = static_cast<int>(static_cast<u32>(dv)
+                                     + static_cast<u32>(base) * static_cast<u32>(acc32));
             ++v4;
             c = s.Next();
             if (c == -1) goto done;
@@ -216,7 +219,7 @@ int ReadInteger(Stream& s, int base) {
 done:
     if (is64) {
         if (sign == '-')
-            acc64 = static_cast<u64>(-static_cast<i64>(acc64));
+            acc64 = 0ull - acc64; // 2's-complement negate (no signed UB)
         if (v4 > 0) {
             StoreInt(s, acc64);
             return v4 + leading;
@@ -224,7 +227,7 @@ done:
         return v4 + leading;        // 0 if no digits (v4==0)
     } else {
         if (sign == '-')
-            acc32 = -acc32;
+            acc32 = static_cast<int>(0u - static_cast<u32>(acc32)); // 2's-comp negate
         if (v4 > 0) {
             StoreInt(s, static_cast<u32>(acc32));
             return v4 + leading;
@@ -238,6 +241,12 @@ done:
 int ReadFloat(Stream& s) {
     char buf[128];
     char* w = buf;
+    // Reserve the last slot for the NUL strtod terminator. A numeric token longer
+    // than the buffer (e.g. an unbounded "%f" of a 200-digit run) keeps being
+    // consumed/counted but stops being stored — no stack overflow. Every realistic
+    // float token fits, so valid-input output is unchanged.
+    char* const wend = buf + sizeof(buf) - 1;
+#define PUTW(ch) do { if (w < wend) *w++ = static_cast<char>(ch); } while (0)
     int v3 = 0;             // significant chars collected
     int leading = 0;
 
@@ -253,7 +262,7 @@ int ReadFloat(Stream& s) {
     { int wd = s.width--; if (wd == 0) { s.Unget(); goto finish; } }
 
     if (c == '+' || c == '-') {
-        *w++ = static_cast<char>(c);
+        PUTW(static_cast<char>(c));
         ++leading;
         c = s.Next();
         if (c == -1) goto finish;
@@ -263,7 +272,7 @@ int ReadFloat(Stream& s) {
     // Integer digits.
     if (IsDigit(c)) {
         while (true) {
-            *w++ = static_cast<char>(c);
+            PUTW(static_cast<char>(c));
             ++v3;
             c = s.Next();
             if (c == -1) goto finish;
@@ -272,12 +281,12 @@ int ReadFloat(Stream& s) {
     }
     // Fraction.
     if (c == '.') {
-        *w++ = '.';
+        PUTW('.');
         c = s.Next();
         if (c == -1) goto finish;
         ++v3;
         while (IsDigit(c)) {
-            *w++ = static_cast<char>(c);
+            PUTW(static_cast<char>(c));
             ++v3;
             c = s.Next();
             if (c == -1) goto finish;
@@ -285,19 +294,19 @@ int ReadFloat(Stream& s) {
     }
     // Exponent.
     if (c == 'e' || c == 'E') {
-        *w++ = static_cast<char>(c);
+        PUTW(static_cast<char>(c));
         ++v3;
         c = s.Next();
         if (c == -1) goto finish;
         if (c == '+' || c == '-') {
-            *w++ = static_cast<char>(c);
+            PUTW(static_cast<char>(c));
             ++v3;
             c = s.Next();
             if (c == -1) goto finish;
         }
         if (IsDigit(c)) {
             while (true) {
-                *w++ = static_cast<char>(c);
+                PUTW(static_cast<char>(c));
                 ++v3;
                 c = s.Next();
                 if (c == -1) goto finish;
@@ -323,6 +332,7 @@ finish:
         }
     }
     return v3;
+#undef PUTW
 }
 
 // gilde.exe 0x5fd550 — VIBE_Crt_ScanReadString.  %s (whitespace-delimited).

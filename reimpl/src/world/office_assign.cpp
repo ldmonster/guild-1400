@@ -296,75 +296,94 @@ int OfficeAddEntryIfValid(const OfficePersonRec* rec, u8 officeType, u8 state) {
 // gilde.exe 0x47e870 — VIBE_Office_TransferHoldership.
 // ===========================================================================
 int OfficeTransferHoldership(const TransferRequest& req, OfficePersonStore& ps) {
-    // v17 = the seated person at +7 (office fields updated; stored as secondary).
-    OfficePersonRec* v17 = nullptr;
+    // Register map recovered from disasm @0x47e870 (the Hex-Rays var7/var17 split
+    // collapses two distinct records — verified against the disasm):
+    //   ebx/var_24 = v17 = FindRecordById(a1+7)  -> the SEATED person (notify only).
+    //   edx        = v7  = FindRecordById(a1+1)  -> the PRIMARY person whose office
+    //                                               fields (+358/+359/+360/+361) the
+    //                                               whole mutation block updates.
+    //   var_1C     = v18 = primary->ownerId (the id installed into the slot's city).
+    //   a1+7 (seatedId) is what gets stored into the slot SECONDARY (+20).
+    // The seated lookup is the first gate; the primary lookup the second.
+
+    // var_24 / v17 = seated person at +7 (notify path). 0x47e880..0x47eb15.
+    OfficePersonRec* v17 = nullptr;        // SEATED (a1+7)
     if (req.seatedId != -1) {
         v17 = ps.Find(req.seatedId);
         if (!v17)
-            return 0;
+            return 0;                      // 0x47eb15 jnz -> else falls through to ret result(0)
     }
-    // v18 = the +1 person's id (the new slot owner). -1 when +1 is -1.
+    // edx / v7 = primary person at +1. v18 = primary->ownerId. 0x47e894..0x47eb35.
+    OfficePersonRec* v7 = nullptr;         // PRIMARY (a1+1)
     i32 v18 = -1;
     if (req.primaryId != -1) {
-        OfficePersonRec* primaryRec = ps.Find(req.primaryId);
-        if (!primaryRec)
-            return 0;
-        v18 = primaryRec->ownerId;
+        v7 = ps.Find(req.primaryId);
+        if (!v7)
+            return 0;                      // 0x47eb30
+        v18 = v7->ownerId;                 // 0x47eb32 *(result+4)
     }
 
-    int slot = FindSlotByHolder888(req.holderKey); // v3
+    int slot = FindSlotByHolder888(req.holderKey); // v3, bound 888/37 (0x47e8bb)
     if (slot >= 37)
-        return 0;
+        return 0;                          // 0x47e8ca
 
     OfficeHolder& s = g_officeHolders[slot];
 
-    // The current occupant (the slot's city/owner) loses the seat if it differs
-    // from the new primary (a1+1) id.
+    // The current slot occupant loses the seat if its id differs from the new
+    // primary (a1+1) id. 0x47e8e6..0x47e919.
     OfficePersonRec* occupant = ps.Find(s.city);
     if (occupant && occupant->ownerId != req.primaryId) {
         u8 v9 = s.type;                   // byte_B59850[v5]
         if (occupant->office358 == v9)
-            occupant->office358 = 0;
+            occupant->office358 = 0;       // 0x47e912
         else if (occupant->office361 == v9)
-            occupant->office361 = 0;
+            occupant->office361 = 0;       // 0x47eb59
     }
 
-    // Update the seated person v17 (the original keys on edx != 0).
-    if (v17) {
+    // The office-field mutation block keys on edx (PRIMARY), not the seated person.
+    // 0x47e919 `test edx,edx`.
+    if (v7) {
         u8 slotType = s.type;             // byte_B59850[24*v8]
-        if (slotType > 0x1B) {
-            // High office: drives the +361 secondary field, clearing stale slots.
-            if (v17->office361) {
-                for (int k = 0; k < kOfficeDefCount; ++k) {
-                    if (g_officeHolders[k].type == v17->office361 &&
-                        g_officeHolders[k].city == v17->ownerId)
-                        g_officeHolders[k].city = -1;
+        if (slotType > 0x1B) {            // 0x47e932 `ja` (unsigned > 0x1B)
+            // High office: drives the PRIMARY +361 field, clearing stale slots.
+            // 0x47eb78: loop records 30..34 only (eax 0x2D0..0x348 step 0x18),
+            // clearing EVERY match (no break). Fields compared: primary->office361
+            // and primary->ownerId.
+            if (v7->office361) {
+                for (int k = 30; k < 35; ++k) {   // byte 720..(840-24): records 30..34
+                    if (g_officeHolders[k].type == v7->office361 &&
+                        g_officeHolders[k].city == v7->ownerId)
+                        g_officeHolders[k].city = -1;   // 0x47eba4
                 }
             }
-            v17->office361 = slotType;
+            v7->office361 = slotType;      // 0x47ebc8 [edx+169h]
         } else {
-            // Normal office: clear the seated person's prior primary seat (the slot
-            // whose owner == v18) if it currently holds an office (+358 set).
-            if (v17->office358) {
-                for (int k = 0; k < kOfficeDefCount; ++k) {
+            // Normal office: clear the primary's prior seat (first slot in records
+            // 0..29 whose owner == v18) when the primary currently holds an office.
+            // 0x47e938 (+358) gate; LABEL_17 loop bound 0x2D0 (720 -> 30 records).
+            if (v7->office358) {
+                for (int k = 0; k < kOfficeHolderCount; ++k) {   // 30 records
                     if (g_officeHolders[k].city == v18) {
                         g_officeHolders[k].city      = -1;
                         g_officeHolders[k].secondary = -1;
                         g_officeHolders[k].state     = 4;
                         g_officeHolders[k].rank      = 0;
-                        break; // LABEL_17 then stops
+                        break; // LABEL_17 vacates the first match then stops
                     }
                 }
             }
             // Rank bookkeeping via the def book-cat compare (byte_62EC92).
-            if (OfficeDefBookCat(slotType) >= OfficeDefBookCat(v17->office358))
-                v17->office359 = slotType; // +359
-            v17->office358 = slotType;     // +358
-            if (v17->office360 == v17->office358)
-                v17->office360 = 0;        // +360 candidacy cleared
-            // If the office def flag is set, decrement a partner slot's rank.
+            // 0x47e9c8 `jb` (unsigned >=) -> write +359. Then +358, then +360 clear.
+            if (OfficeDefBookCat(slotType) >= OfficeDefBookCat(v7->office358))
+                v7->office359 = slotType;  // +359 [edx+167h]
+            v7->office358 = slotType;      // +358 [edx+166h]
+            if (v7->office360 == v7->office358)
+                v7->office360 = 0;         // +360 candidacy cleared [edx+168h]
+            // If the office def flag is set, decrement a partner slot's rank. The
+            // partner scan covers records 0..29 (0x47ea4a, bound 0x2D0/180-dword),
+            // skipping self (v11 == 6*v8). 0x47ea2e dword_62EC94[3*slotType] != 0.
             if (OfficeDefFlag(slotType)) {
-                for (int k = 0; k < kOfficeDefCount; ++k) {
+                for (int k = 0; k < kOfficeHolderCount; ++k) {   // 30 records
                     if (g_officeHolders[k].type == slotType && k != slot) {
                         if (g_officeHolders[k].state == 3) {
                             int v12 = g_officeHolders[k].rank;
@@ -374,23 +393,30 @@ int OfficeTransferHoldership(const TransferRequest& req, OfficePersonStore& ps) 
                                     g_officeHolders[k].state = 4;
                             }
                         }
-                        break;
+                        break;  // LABEL_30 once the first non-self same-type slot found
                     }
                 }
             }
         }
     }
 
-    // LABEL_30: install into the slot.
+    // LABEL_30: install into the slot. 0x47ea92..0x47eac1.
     s.city      = v18;                     // dword_B5984C[v13] = v18 (the +1 owner)
     s.secondary = req.seatedId;            // dword_B5985C[v13] = *(a1+7)
     s.state     = req.state;               // byte_B59858 = v14
     if (req.state == 3)
-        s.rank = 0;
+        s.rank = 0;                        // 0x47eac1
 
-    // Notify on the master-visible path (v17 && occupant).
-    if (v17 && occupant) {
-        OfficeNotify n{OfficeNotify::Transfer, v17->ownerId, occupant->ownerId, 0};
+    // Notify on the master-visible path. 0x47eac7: requires v17 (seated) && v7
+    // (primary) && primary->ownerId == dword_12CE914[134*word_63CC5C] (the LOCAL
+    // HUMAN PLAYER's person id). NotifyOfficeTransfer is called with eax=v17(seated),
+    // edx=v7(primary). The live-player id table (dword_12CE914 / word_63CC5C) is the
+    // global sim player roster, not in this module's data scope (rule 8 BOUNDARY):
+    // we surface the notify whenever both records exist and let the caller's hook
+    // decide; the human-player gate cannot be modeled without the player roster.
+    if (v17 && v7) {
+        // a = seated (v17, the eax arg), b = primary (v7) for the notify payload.
+        OfficeNotify n{OfficeNotify::Transfer, v17->ownerId, v7->ownerId, 0};
         EmitNotify(n);
     }
     return 1;

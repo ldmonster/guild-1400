@@ -227,15 +227,18 @@ TEST(PathfindMapRaster, EdgeStepCountGolden) {
     CHECK_EQ(MapRasterEdgeStepCount(9999.0f), 200);
 }
 
-TEST(PathfindMapRaster, RasterizeCountsSamples) {
-    // A 10x10 square quad: outer edge len 10 -> ~20 steps; inner edges similar.
-    // quad: edge0 (0,0)->(10,0); edge1 (0,10)->(10,10) reversed indices.
+TEST(PathfindMapRaster, RasterizeReturnsLastInnerStepCount) {
+    // gilde.exe 0x577927 returns `result`, the inner-loop iteration count of the
+    // LAST outer step, UNCONDITIONALLY (the fill==-1 / cell==255 gates only skip
+    // the grid writes, not the count). A 10x10 square quad: outer edge len 10 ->
+    // outerSteps = 2*(int)(sqrt(100)+0.9) = 20. The cross segment is constant
+    // length 10 => innerSteps = 20 on every outer step, so result == 20.
     float quad[8] = {0, 0, 10, 0, 10, 10, 0, 10};
-    int samples = MapRasterizeBauplatzEdge(quad, /*fillTerrain=*/3, /*fillCell=*/0);
-    CHECK(samples > 0);
-    // fill==-1 and cell==255 => no writes
-    int none = MapRasterizeBauplatzEdge(quad, -1, 255);
-    CHECK_EQ(none, 0);
+    int withFill = MapRasterizeBauplatzEdge(quad, /*fillTerrain=*/3, /*fillCell=*/0);
+    CHECK_EQ(withFill, 20);
+    // fill==-1 and cell==255 => writes skipped but the return value is unchanged.
+    int noFill = MapRasterizeBauplatzEdge(quad, -1, 255);
+    CHECK_EQ(noFill, 20);
 }
 
 // ---------------------------------------------------------------------------

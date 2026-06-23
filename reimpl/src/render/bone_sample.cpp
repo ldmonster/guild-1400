@@ -1,15 +1,23 @@
 #include "render/bone_sample.h"
 
 #include <cstdint>
+#include <cstring>
 
 namespace guild::render {
 namespace {
 
-// Byte-offset accessors mirroring the original *(type*)(base + off) loads.
+// Byte-offset accessors mirroring the original *(type*)(base + off) loads. The
+// pointer fields the original reads (bone+104, anim+348) are 32-bit pointer slots
+// at offsets that are NOT 8-byte aligned on a 64-bit host (348 % 8 == 4). Reading
+// them via `*(const void* const*)` is a misaligned, strict-aliasing-violating load
+// (UBSAN: "load of misaligned address ... requires 8 byte alignment"). memcpy the
+// stored pointer instead — same value, no UB. [W11-ANIM UBSAN fix]
 inline const u8* CBytePtr(const void* p) { return reinterpret_cast<const u8*>(p); }
 inline const void* CPtrAt(const void* p, std::size_t off)
 {
-    return *reinterpret_cast<const void* const*>(CBytePtr(p) + off);
+    const void* v;
+    std::memcpy(&v, CBytePtr(p) + off, sizeof(v));
+    return v;
 }
 // keyframe base = *(*(bone+104) + 348); each record is 192 bytes.
 inline const float* KeyframeRec(const void* bone, int frameIdx)

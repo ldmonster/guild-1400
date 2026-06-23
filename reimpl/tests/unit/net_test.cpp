@@ -1,5 +1,6 @@
 #include "net/transport.h"
 #include "shim/INetSocket.h"
+#include "sim/command.h"   // kPacketStride (153) — the valid-frame buffer capacity
 #include "test.h"
 
 #include <cstring>
@@ -8,6 +9,7 @@
 
 using namespace guild;
 using namespace guild::net;
+using guild::sim::kPacketStride;   // 153 — the largest valid on-wire frame
 
 // ---------------------------------------------------------------------------
 // Mock INetSocket backed by an in-memory byte pipe. send() appends to `out`,
@@ -252,6 +254,156 @@ TEST(NetTransport, SequenceGapDetection) {
     t.set_last_sync_count(777u);
     deliver(0x05, 100u, 777u);
     CHECK(t.last_event() == SeqEvent::DupSync);
+}
+
+// ===========================================================================
+// Malformed / hostile inbound frames (wave-11 hardening, ASAN-exercised).
+// The peer's bytes are untrusted; a corrupt on-wire length must never make the
+// transport write past the reassembly buffer. The recv buffers below are sized
+// exactly to the largest valid frame so ASAN flags any overrun.
+// ===========================================================================
+
+// A frame whose declared length is SMALLER than its own 3-byte header. Without a
+// guard, stage-2 computes recv(buf+3, total-3) where (total-3) underflows to a
+// ~64K length and writes far past rx. The transport must fail safe (Closed),
+// touching no memory beyond the buffer.
+TEST(NetTransport, RecvDeclaredLengthBelowHeaderUnderflowGuard) {
+    PipeSocket s;
+    NetTransport t(&s);
+    CHECK(t.ConnectToServer("loopback", 1234));
+
+    // Header declaring total length == 1 (< kHeaderBytes==3), then a flood of body
+    // bytes a buggy parser would slurp.
+    s.in.push_back(0x05);            // type
+    s.in.push_back(0x01);            // len lo == 1
+    s.in.push_back(0x00);            // len hi
+    for (int i = 0; i < 4096; ++i) s.in.push_back(0xCC);
+
+    u8 rx[kPacketStride];            // exactly the 153-byte valid-frame capacity
+    std::memset(rx, 0, sizeof(rx));
+    t.SetRecvBuffer(rx, sizeof(rx));
+    PumpResult r = t.ReceivePacket();
+    CHECK(r == PumpResult::Closed);  // malformed -> teardown, no OOB
+    CHECK(!t.CompletedThisCall());
+    CHECK(t.disconnected());
+}
+
+// total == 0 (the 0-length declared frame): same underflow class, must fail safe.
+TEST(NetTransport, RecvZeroDeclaredLengthGuard) {
+    PipeSocket s;
+    NetTransport t(&s);
+    CHECK(t.ConnectToServer("loopback", 1234));
+    s.in.push_back(0x05);
+    s.in.push_back(0x00);            // len == 0
+    s.in.push_back(0x00);
+    for (int i = 0; i < 512; ++i) s.in.push_back(0xEE);
+
+    u8 rx[kPacketStride];
+    std::memset(rx, 0, sizeof(rx));
+    t.SetRecvBuffer(rx, sizeof(rx));
+    CHECK(t.ReceivePacket() == PumpResult::Closed);
+    CHECK(t.disconnected());
+}
+
+// A frame whose declared length EXCEEDS the reassembly buffer capacity. Stage-2
+// would recv(buf+3, total-3) writing past the 153-byte buffer. With the capacity
+// passed to SetRecvBuffer the transport refuses the frame.
+TEST(NetTransport, RecvDeclaredLengthExceedsBufferGuard) {
+    PipeSocket s;
+    NetTransport t(&s);
+    CHECK(t.ConnectToServer("loopback", 1234));
+
+    const u16 huge = 0xFFFF;         // 65535, far beyond the 153-byte buffer
+    s.in.push_back(0x05);
+    s.in.push_back(static_cast<u8>(huge & 0xFF));
+    s.in.push_back(static_cast<u8>(huge >> 8));
+    for (int i = 0; i < 8192; ++i) s.in.push_back(0xAB);  // would-be body flood
+
+    u8 rx[kPacketStride];
+    std::memset(rx, 0, sizeof(rx));
+    t.SetRecvBuffer(rx, sizeof(rx));
+    CHECK(t.ReceivePacket() == PumpResult::Closed);
+    CHECK(t.disconnected());
+}
+
+// The maximum valid frame (total == buffer capacity) must still pass intact — the
+// guard rejects only frames strictly larger than the buffer, never a boundary fit.
+TEST(NetTransport, RecvMaxValidFrameAtCapacityStillCompletes) {
+    PipeSocket s;
+    NetTransport t(&s);
+    CHECK(t.ConnectToServer("loopback", 1234));
+
+    u8 pkt[kPacketStride];
+    std::memset(pkt, 0, sizeof(pkt));
+    // A frame exactly kPacketStride (153) bytes long, a non-command (cmdId == -1)
+    // so no sequence side effects.
+    EncodeHeader(pkt, 0x05, kPacketStride, kNoCmdId, 0u);
+    for (u16 i = kOffSync; i < kPacketStride; ++i) pkt[i] = static_cast<u8>(i);
+    for (u16 i = 0; i < kPacketStride; ++i) s.in.push_back(pkt[i]);
+
+    u8 rx[kPacketStride];
+    std::memset(rx, 0, sizeof(rx));
+    CHECK(RecvOnePacket(t, rx));     // re-arms with cap==0 each call (legacy path)
+    for (u16 i = 0; i < kPacketStride; ++i) CHECK_EQ(rx[i], pkt[i]);
+    CHECK(!t.disconnected());
+}
+
+// A 0-length read (recv returns would-block with no data) must make no progress
+// and never advance the cursor or complete a packet.
+TEST(NetTransport, RecvZeroLengthReadIsWouldBlock) {
+    PipeSocket s;                    // empty in -> recv returns 0 (would-block)
+    NetTransport t(&s);
+    CHECK(t.ConnectToServer("loopback", 1234));
+    u8 rx[kPacketStride];
+    std::memset(rx, 0, sizeof(rx));
+    t.SetRecvBuffer(rx, sizeof(rx));
+    CHECK(t.ReceivePacket() == PumpResult::Progress);
+    CHECK(!t.CompletedThisCall());
+    CHECK_EQ(t.recv_cursor(), (u16)0);
+    CHECK(!t.disconnected());
+}
+
+// A truncated frame: the header declares a valid length but only part of the body
+// ever arrives. The transport must keep assembling (Progress), never complete, and
+// never read past what it was given.
+TEST(NetTransport, RecvTruncatedBodyNeverCompletes) {
+    PipeSocket s;
+    NetTransport t(&s);
+    CHECK(t.ConnectToServer("loopback", 1234));
+
+    u8 pkt[64];
+    u16 total = MakePacket(pkt, 0x05, 20, kNoCmdId, 0u);  // a >40-byte frame
+    // Deliver header + only half the body, then stop (the rest never comes).
+    u16 delivered = static_cast<u16>(kHeaderBytes + (total - kHeaderBytes) / 2);
+    for (u16 i = 0; i < delivered; ++i) s.in.push_back(pkt[i]);
+
+    u8 rx[kPacketStride];
+    std::memset(rx, 0, sizeof(rx));
+    for (int i = 0; i < 50; ++i) {
+        t.SetRecvBuffer(rx, sizeof(rx));
+        CHECK(t.ReceivePacket() == PumpResult::Progress);
+        CHECK(!t.CompletedThisCall());   // never completes on a truncated frame
+    }
+    CHECK_EQ(t.recv_cursor(), delivered); // assembled exactly what arrived, no more
+}
+
+// A header-only stream (exactly 3 bytes of a frame that declares a longer body):
+// completes the header stage, then waits for the body without overrunning.
+TEST(NetTransport, RecvHeaderOnlyWaitsForBody) {
+    PipeSocket s;
+    NetTransport t(&s);
+    CHECK(t.ConnectToServer("loopback", 1234));
+    // Declare a 32-byte frame but deliver only the 3 header bytes.
+    s.in.push_back(0x05);
+    s.in.push_back(0x20);   // len == 32
+    s.in.push_back(0x00);
+
+    u8 rx[kPacketStride];
+    std::memset(rx, 0, sizeof(rx));
+    t.SetRecvBuffer(rx, sizeof(rx));
+    CHECK(t.ReceivePacket() == PumpResult::Progress);
+    CHECK(!t.CompletedThisCall());
+    CHECK_EQ(t.recv_cursor(), (u16)3);    // header read, body pending
 }
 
 // --- Disconnect marks the transport closed ----------------------------------

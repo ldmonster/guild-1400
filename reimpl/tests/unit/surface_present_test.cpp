@@ -143,13 +143,15 @@ TEST(SurfacePresent, AcquireBackBufferWaitLock) {
 }
 
 // UnlockBackBuffer — Lock-copy / GDI modes just clear the held lock, no Unlock.
+// The return is the MODE byte (`al = byte_762721; and eax,0FFh`), NOT the passed
+// status (verified disasm 0x43468a..0x4346a8). DDrawLockBlt == 2.
 TEST(SurfacePresent, UnlockBackBufferLockModesClearOnly) {
     MockDDrawSurface s; s.setup(16, 16, 16);
     PresentGlobals g;
     g.mode = PresentBackend::DDrawLockBlt;
     g.primary = &s; g.targetBase = std::uintptr_t(0x1234);
     i32 r = UnlockBackBuffer(g, 7);
-    CHECK_EQ(r, 7);                  // passthrough
+    CHECK_EQ(r, 2);                  // (u8)mode, not the passthrough status
     CHECK_EQ(g.targetBase, std::uintptr_t(0));
     CHECK_EQ(s.unlockCalls, 0);
 }

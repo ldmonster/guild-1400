@@ -332,3 +332,54 @@ TEST(SimBuildLifecycle, FindNearestSameType) {
 
     SetLifecycleHooks(nullptr);
 }
+
+// ---------------------------------------------------------------------------
+// Wave-12 hardening: roomList walks at the 64-entry boundary, bad type, and
+// out-of-range person-slot indices. ASAN+UBSAN must stay clean.
+// ---------------------------------------------------------------------------
+TEST(SimBuildLifecycleHarden, RoomWorthFullUnterminatedList) {
+    ResetProductionTables();
+    ResetBuildings();
+    g_sceneTypesLoaded = true;
+    g_buildingTypes[6] = BuildingTypeDef{};
+    g_buildingTypes[6].roomWorthMul = 1;
+    // Fill ALL 64 room entries with a non-storage prot (no terminating 0). The
+    // walk must stop at index 63 and never read roomList[64] (OOB).
+    for (int i = 0; i < 64; ++i) g_buildingTypes[6].roomList[i] = 50; // kind 0
+    g_buildingTypesLoaded = true;
+    g_sceneTypes[50] = SceneTypeDef{};
+    g_sceneTypes[50].kind = 0;     // not storage -> no item walk
+
+    MockStorage hooks;             // empty
+    SetStorageHooks(&hooks);
+    BuildingRec b{}; b.typeIndex = 6;
+    // No storage rooms -> v19 stays 3840*1; result = mul*0.01*3840.
+    int v19 = 3840 * 1;
+    int expected = (int)((double)5 * 0.009999999776482582 * (double)v19);
+    CHECK_EQ(BuildingValue_ComputeRoomWorth(&b, 5), expected);
+    SetStorageHooks(nullptr);
+}
+
+TEST(SimBuildLifecycleHarden, RoomWorthUnloadedType) {
+    ResetProductionTables();
+    ResetBuildings();
+    g_buildingTypesLoaded = false;     // table unloaded -> td null
+    BuildingRec b{}; b.typeIndex = 200;
+    CHECK_EQ(BuildingValue_ComputeRoomWorth(&b, 10), 0);   // no OOB on bad type
+}
+
+TEST(SimBuildLifecycleHarden, PersonSlotIndexBounds) {
+    ResetBuildingPersons();
+    // out-of-range slot indices -> nullptr, no OOB access.
+    CHECK(BuildingPersonAt(-1) == nullptr);
+    CHECK(BuildingPersonAt(kBuildingSlots) == nullptr);
+    CHECK(BuildingPersonAt(kBuildingSlots + 1000) == nullptr);
+    CHECK(BuildingPersonAt(0) != nullptr);
+    CHECK(BuildingPersonAt(kBuildingSlots - 1) != nullptr);
+
+    // Remove/cleanup on an out-of-range slot is a safe no-op.
+    Building_RemoveAndCleanup(-5, true);
+    Building_RemoveAndCleanup(kBuildingSlots + 1, true);
+    // FindNearestSameType on an out-of-range self slot -> 0 (self null).
+    CHECK_EQ(Building_FindNearestSameType(kBuildingSlots, 4), 0);
+}

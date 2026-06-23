@@ -226,8 +226,12 @@ int ExCreatePersonA(CommandPacket& pkt, AckEntry* ack);
 
 // gilde.exe 0x496714 — opcode 0x0C. CreateAndSpawn(kind=(ack==null)+6,
 // parentA=+0x14, owner=word+0x1C, parentB=+0x18, none, a6=HIBYTE(+0x1B), a7=0,
-// a8=HIBYTE(+0x20)); copy a 16-byte name from +0x25 into record+48; family fields;
-// set g_lastObjectId = new id. ack +0=1,+1=1,+6=record. Returns 1 on fail.
+// a8=HIBYTE(+0x20)); copy a 16-byte name from +0x25 into record+48; the wappen
+// dword +0x1F into record+0x54 and the faith byte +0x24 into record+12; the
+// GetFamilyRecord-gated family-name block (family table word_13C3110) is a
+// NAMED deferral (the gate is record byte +81 < 0, which the default spawn
+// backend never sets — see the .cpp); set g_lastObjectId = new id.
+// ack +0=1,+1=1,+6=record. Returns 1 on fail.
 int ExCreatePersonB(CommandPacket& pkt, AckEntry* ack);
 
 // gilde.exe 0x49790C — opcode 0x13. Resolve three entity ids (+0x14 dst owner,

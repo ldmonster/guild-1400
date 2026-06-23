@@ -75,11 +75,11 @@ TEST(CmdApply11IT, RevealAllPersonsEmitsRealOp17) {
     c.selectionActive = [](int i) -> int { return active[i]; };
     c.selectedId      = [](int i) -> i32 { return ids[i]; };
 
-    DebugCmdHooks h{};
+    Apply11CmdHooks h{};
     h.parseInt = RealParseInt;
     h.toLower  = [](char* s) { (void)s; };
     h.countActiveObjects = []() -> i16 { return 3; };
-    SetDebugCmdHooks(h);
+    SetApply11CmdHooks(h);
 
     char arg[] = "-ABCDEFG";   // len(tail) >= 4
     i32 r = QueueRevealAllPersons(q, c, arg);
@@ -93,7 +93,7 @@ TEST(CmdApply11IT, RevealAllPersonsEmitsRealOp17) {
     CHECK_EQ(p.get32(0x14), 0xFFFFFFFFu);               // a2 = -1
     CHECK_EQ(p.get16(0x18), 3);                         // a4 word = active count
     CHECK_EQ(q.ring_slot(2).get32(0x10), 0x222u);
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 // SetSelectedFlag -> opcode-22 State22 delta packet through the REAL DeltaWriter +
@@ -103,7 +103,7 @@ TEST(CmdApply11IT, SetSelectedFlagState22RoundTrip) {
     q.set_standalone(false);
     DeltaWriter dw;
 
-    DebugCmdHooks h{}; h.parseInt = RealParseInt; SetDebugCmdHooks(h);
+    Apply11CmdHooks h{}; h.parseInt = RealParseInt; SetApply11CmdHooks(h);
 
     DebugCmdCtx c;
     i32 r = QueueSetSelectedFlag(q, dw, c, /*selBase*/0x55, /*a2*/0, "-7");
@@ -128,7 +128,7 @@ TEST(CmdApply11IT, SetSelectedFlagState22RoundTrip) {
         DeltaWriter::ApplyDelta(block + 1, fieldCount, rec);
         CHECK_EQ(rec[433], 7);   // AppendRawField wrote the parsed value at +433
     }
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 // Cross-module wiring proof: forward the sign-name comparison into the REAL
@@ -143,9 +143,9 @@ TEST(CmdApply11IT, SignNameMatchesRealStrCmpNoCaseN) {
 
     CommandQueue q; q.Init();
     DebugCmdCtx c;
-    DebugCmdHooks h{}; h.parseInt = RealParseInt; SetDebugCmdHooks(h);
+    Apply11CmdHooks h{}; h.parseInt = RealParseInt; SetApply11CmdHooks(h);
     // A token the real comparator says differs from both signs is rejected.
     CHECK_EQ(QueueAdjustSelectedStat(q, c, 0x77, 0, "-NOPE_5"), 0);
     CHECK_EQ(q.send_count(), 0u);
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }

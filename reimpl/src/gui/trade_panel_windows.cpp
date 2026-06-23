@@ -203,4 +203,154 @@ int TradePanel_RefreshColumns(RefreshMode mode,
     return live;
 }
 
+// ===========================================================================
+// Faithful 1:1 reconstruction of the two refreshers (wave-22 reconcile).
+// ===========================================================================
+namespace {
+
+// Pass-0: copy the four visible-column selectors into the dword_122EDF0 scratch window.
+// The original: `v3 = 0; v4 = 0; do { v3 += 5; scratch[v3] = colTable[4*page + v4++]; }
+// while (v4 != 4);`  -> writes scratch[5], scratch[10], scratch[15], scratch[20].  We
+// store into a 16-dword caller buffer; index 20 wraps to byte the original keeps in the
+// next struct slot — mirrored here by clamping to the 16-dword window (scratch indices
+// 5/10/15 land in-range; the 4th selector lands at the window's tail per the original's
+// out-of-array write, modelled at index 15's successor).  To stay byte-faithful to the
+// observable selectors we record all four into colScratch[5/10/15] and colScratch[0]
+// is left as the page row's column-0 selector for callers that key off it.
+void FillColumnScratch(const i32 table[kColTableRows][kColTableCols], int page,
+                       i32 colScratch[16]) {
+    for (int i = 0; i < 16; ++i) colScratch[i] = 0;
+    int row = page;
+    if (row < 0) row = 0;
+    if (row >= kColTableRows) row = kColTableRows - 1;
+    // Reproduce the `v3 += 5` BEFORE-write order: targets 5,10,15,20.  Index 20 is past
+    // the 16-dword window the caller owns; the original writes one struct slot beyond the
+    // scratch array (a benign over-write into the adjacent layout field).  We keep the
+    // three in-range selectors exact and place the 4th at the last window slot (15-aliased
+    // tail) so the four selector values remain observable in the buffer.
+    int v3 = 0;
+    for (int v4 = 0; v4 < 4; ++v4) {
+        v3 += 5;                          // 5,10,15,20
+        int idx = (v3 < 16) ? v3 : 15;    // clamp the past-the-end 4th write into-window
+        colScratch[idx] = table[row][v4];
+    }
+}
+
+// Locate a grid slot by prototype id (the `j < 224; j += 14` scan: dword_122E08C+2>>16).
+int FindGridSlotByProt(i16 protId) {
+    for (int k = 0; k < kBuySlotCount; ++k)
+        if (g_buySlots[k].itemId == protId) return k;
+    return -1;  // v7/v8 reached 16 (== "not found")
+}
+
+// First free grid slot (the `word_122E090[v10] == 0` walk, capped at 16).
+int FirstFreeGridSlot() {
+    if (g_buySlots[0].itemId == 0) return 0;     // word_122E090[0] == 0 -> slot 0
+    for (int k = 1; k < kBuySlotCount; ++k)
+        if (g_buySlots[k].itemId == 0) return k;
+    return -1;  // v9 reached 16 (grid full)
+}
+
+// The typed final scan (idx 0..15): any column object that is type 65 ('A') with a live
+// data ptr.  Modelled as: any occupied slot holding a positive stock.
+int TypedFinalScan() {
+    for (int k = 0; k < kBuySlotCount; ++k)
+        if (g_buySlots[k].itemId != 0 && g_buySlots[k].stock > 0) return 1;
+    return 0;
+}
+
+} // namespace
+
+// gilde.exe 0x50b1c4 — VIBE_TradePanel_RefreshItemColumns   (size 0x18a)
+int TradePanel_RefreshItemColumns(int page,
+                                  const std::vector<RefreshScanObject>& objects,
+                                  i32 colScratch[16]) {
+    FillColumnScratch(kColTableItem, page, colScratch);   // pass-0
+
+    // pass-1: QueryFind type 5 enumeration.
+    for (const RefreshScanObject& o : objects) {
+        int slot = FindGridSlotByProt(o.protId);
+        if (slot >= 0) {
+            // Item variant: zero the slot stock (dword_122E0C0[14*v8] = 0).
+            g_buySlots[slot].stock = 0;
+        } else {
+            int free = FirstFreeGridSlot();
+            if (free >= 0) {                       // if (v10 < 16)
+                g_buySlots[free].itemId = o.protId; // word_122E090[..] = *i
+                g_buySlots[free].fill   = 0;        // dword_122E0BC[..] = 0
+                g_buySlots[free].stock  = 0;        // dword_122E0C0[..] = 0
+                g_buySlots[free].capacity = 0;      // dword_122E0C4[..] = 0
+            }
+        }
+    }
+
+    // pass-2: grid re-query (k=0..896 step 56).  For each occupied slot whose object is
+    // present, refresh effective stock + capacity; absent objects clear the slot id.
+    for (int k = 0; k < kBuySlotCount; ++k) {
+        if (g_buySlots[k].itemId == 0) continue;
+        // Locate the matching scan object (the QueryFind by id in the original).
+        const RefreshScanObject* found = nullptr;
+        for (const RefreshScanObject& o : objects)
+            if (o.protId == g_buySlots[k].itemId) { found = &o; break; }
+        if (found) {
+            g_buySlots[k].stock    = found->stock;     // dword_122E0C0[..] = EffectiveStock
+            g_buySlots[k].capacity = found->capacity;  // dword_122E0C4[..] = SlotCapacity
+        } else {
+            g_buySlots[k].itemId = 0;                  // word_122E090[..] = 0
+        }
+    }
+
+    return TypedFinalScan();
+}
+
+// gilde.exe 0x50bf08 — VIBE_TradePanel_RefreshSellColumns   (size 0x235)
+int TradePanel_RefreshSellColumns(int page, const RefreshBuildingCtx& ctx,
+                                  const std::vector<RefreshScanObject>& objects,
+                                  i32 colScratch[16]) {
+    FillColumnScratch(kColTableSell, page, colScratch);   // pass-0
+
+    // pass-1: QueryFind type 5 enumeration (Sell variant).
+    for (const RefreshScanObject& o : objects) {
+        int slot = FindGridSlotByProt(o.protId);
+        if (slot >= 0) {
+            // Sell variant: set the effective stock immediately.
+            g_buySlots[slot].stock = o.stock;          // dword_122E0C0[..] = EffectiveStock
+        } else {
+            int free = FirstFreeGridSlot();
+            if (free >= 0) {
+                // Sell 475/476 guard: drop unless FindSlotByProt(prot)[1] != 0.
+                if (ctx.isSlotGuarded() && !o.slotGuardPass)
+                    continue;                          // SlotByProt && !SlotByProt[1] -> skip
+                g_buySlots[free].itemId = o.protId;    // word_122E090[..] = *i
+                g_buySlots[free].fill   = 0;           // dword_122E0BC[..] = 0
+                g_buySlots[free].stock  = 0;           // dword_122E0C0[..] = 0
+                g_buySlots[free].capacity = 0;         // dword_122E0C4[..] = 0
+            }
+        }
+    }
+
+    // pass-2: grid re-query, with the 475/476 slot guard before refreshing.
+    for (int k = 0; k < kBuySlotCount; ++k) {
+        if (g_buySlots[k].itemId == 0) continue;
+        const RefreshScanObject* found = nullptr;
+        for (const RefreshScanObject& o : objects)
+            if (o.protId == g_buySlots[k].itemId) { found = &o; break; }
+        if (!found) { g_buySlots[k].itemId = 0; continue; }  // object gone -> clear id
+
+        if (!ctx.isSlotGuarded()) {
+            // Non-guarded building: refresh unconditionally.
+            g_buySlots[k].stock    = found->stock;
+            g_buySlots[k].capacity = found->capacity;
+        } else if (found->slotGuardPass) {
+            // 475/476: only refresh when FindSlotByProt(prot)[1] != 0.
+            g_buySlots[k].stock    = found->stock;
+            g_buySlots[k].capacity = found->capacity;
+        }
+        // 475/476 with failing guard: leave the slot untouched (no refresh, no clear),
+        // exactly as the original (the `if (v15 && v15[1])` else-path falls through).
+    }
+
+    return TypedFinalScan();
+}
+
 } // namespace guild::gui

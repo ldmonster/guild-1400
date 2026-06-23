@@ -164,3 +164,57 @@ TEST(WorldEventBindings, WriteEventNamesContent) {
     CHECK(r.ReadString() == "SCENE_EXIT");    // slot index 5 -> name
     CHECK(r.ReadString() == "onExit");
 }
+
+// --- Wave-12 hardening: boundary / malformed inputs -------------------------
+
+// An event id at or past the 7-slot table is rejected by the guard rather than
+// indexing past EventBindingTable::slots (kEventSlotCount == 7).
+TEST(WorldEventBindings, RegisterIdPastTableRangeIsNoOp) {
+    EventBindingTable t;
+    CHECK_EQ(RegisterEvent(&t, (u8)kEventSlotCount, "x", kFn1), 1);     // == 7
+    CHECK_EQ(RegisterEvent(&t, (u8)(kEventSlotCount + 1), "x", kFn1), 1);
+    CHECK_EQ(RegisterEvent(&t, (u8)200, "x", kFn1), 1);                 // far past
+    CHECK(t.Empty());                                                   // nothing stored
+    CHECK(!t.allocated);
+}
+
+// ReadDword / ReadString off the end of the buffer return zero / empty without
+// reading past `size` (ASAN-checked: the reader clamps on `pos < size`).
+TEST(WorldEventBindings, ByteReaderPastEndIsSafe) {
+    const u8 bytes[2] = {0x41, 0x42};   // 2 bytes, no NUL
+    ByteReader r{bytes, sizeof(bytes), 0};
+    CHECK_EQ(r.ReadDword(), (u32)0x00004241);   // last 2 bytes zero-filled
+    CHECK(r.pos == 4);                            // advanced past size, but no OOB
+    CHECK(r.ReadString().empty());                // already at end -> empty
+    // Empty buffer.
+    ByteReader e{nullptr, 0, 0};
+    CHECK_EQ(e.ReadDword(), (u32)0);
+    CHECK(e.ReadString().empty());
+}
+
+// A truncated binding blob: a non-zero count but no payload. LoadEventBindings
+// loops `count` times; each ReadString returns empty at EOF and resolves to id 0
+// (NONE -> no-op), so it never reads past the buffer and registers nothing.
+TEST(WorldEventBindings, LoadTruncatedAfterCountRegistersNothing) {
+    ByteWriter w;
+    w.WriteDword(3);                    // claims 3 pairs, but no strings follow
+    EventBindingTable t;
+    ByteReader r{w.bytes.data(), w.bytes.size(), 0};
+    int read = LoadEventBindings(r, &t, nullptr);
+    CHECK_EQ(read, 3);                  // it "reads" 3 empty pairs (faithful loop)
+    CHECK(t.Empty());                   // all id 0 (NONE) -> nothing installed
+}
+
+// A count larger than the available pairs: the second/third names are empty at
+// EOF and map to NONE, so only the first valid pair installs.
+TEST(WorldEventBindings, LoadCountLargerThanPairs) {
+    ByteWriter w;
+    w.WriteDword(3);
+    w.WriteString("SCENE_ENTER");       // one real pair
+    w.WriteString("handlerA");
+    EventBindingTable t;
+    ByteReader r{w.bytes.data(), w.bytes.size(), 0};
+    int read = LoadEventBindings(r, &t, nullptr);
+    CHECK_EQ(read, 3);
+    CHECK_EQ(t.CountPopulated(), 1);    // only the SCENE_ENTER pair installed
+}

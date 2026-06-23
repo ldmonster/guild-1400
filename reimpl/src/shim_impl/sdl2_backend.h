@@ -87,6 +87,7 @@ private:
     std::uint32_t start_ = 0;
     bool started_ = false;
     bool quit_ = false;
+    int wheelAccum_ = 0;   // SDL_MOUSEWHEEL notches since the last getMouse()
 };
 
 } // namespace guild::shim

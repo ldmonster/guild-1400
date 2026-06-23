@@ -54,7 +54,7 @@ TEST(WorldMissionSaveE2E, FullLifecycle) {
     MissionRewardInfo info{};
     CHECK(MissionResolveReward(g_missionSlots[owned].type, &info));
     CHECK_EQ(info.descriptorIndex, 1);          // value 19 -> table idx 1
-    CHECK_EQ(info.voiceIndex, g_eventTable[1].paramB);
+    CHECK_EQ(info.specialVoiceIndex, g_eventTable[1].paramB);  // rec+0x0C
 
     // --- 5. Route + decode the give dialog. ------------------------------------
     CHECK(MissionDispatchDialog(/*giveFlag*/ -1, 0, 0, 0) == MissionDialogKind::kGive);

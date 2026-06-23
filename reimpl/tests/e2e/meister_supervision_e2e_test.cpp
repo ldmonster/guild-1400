@@ -75,8 +75,8 @@ void RunBuilding(int idx, Tally& t) {
     guild::ai::BuildingFlag bf;
     std::vector<guild::ai::StaffSlot> slots(6);
     for (int s = 0; s < 3; ++s) {
-        slots[s].live = true; slots[s].employed = true;
-        slots[s].gaugeA = 40; slots[s].gaugeB = 40;  // idle
+        slots[s].live = true; slots[s].ownerBuildId = master; slots[s].employed = true;
+        slots[s].gaugeA = 40; slots[s].gaugeB = 40;  // idle (owner-gated to master)
     }
     int flagged = guild::ai::FlagIdleStaff(&bf, master, slots.data(), 5, MakeHooks());
     if (flagged == 1) ++t.idleFlagged;
@@ -142,14 +142,14 @@ TEST(MeisterSupervisionE2E, RngAbortAndSkipPaths) {
     guild::ai::SetSupervisionHooks(h);
     guild::ai::BuildingFlag bf;
     std::vector<guild::ai::StaffSlot> slots(3);
-    slots[0].live = true; slots[0].employed = true; slots[0].gaugeA = 30; slots[0].gaugeB = 30;
+    slots[0].live = true; slots[0].ownerBuildId = 1; slots[0].employed = true; slots[0].gaugeA = 30; slots[0].gaugeB = 30;
     int r = guild::ai::FlagIdleStaff(&bf, 1, slots.data(), 2, h);
     CHECK_EQ(r, 0);                              // aborted
     CHECK_EQ((int)(slots[0].flags & 0x10), 0);   // nothing flagged
     CHECK_EQ((int)(bf.supervisedBit & 4), 4);    // bit4 still set
 
-    // Already-supervised building returns -1.
+    // Already-supervised building returns 0 (0x45e07a), not -1.
     guild::ai::BuildingFlag bf2; bf2.supervisedBit = 4;
-    CHECK_EQ(guild::ai::FlagIdleStaff(&bf2, 1, slots.data(), 1, h), -1);
+    CHECK_EQ(guild::ai::FlagIdleStaff(&bf2, 1, slots.data(), 1, h), 0);
     g_t = nullptr;
 }

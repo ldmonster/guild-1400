@@ -35,9 +35,13 @@ TEST(CmdApply7, FlagBlob32Layout) {
 
 TEST(CmdApply7, FlagBlob32SyncMarkerShortLen) {
     CommandQueue q;
-    i32 blob = 0;
+    // QueueRequestFlagBlob32 faithfully copies 124 bytes from `blob` (the
+    // original's qmemcpy(v4, a2, 124)), so the source MUST be at least 124 bytes.
+    // (Previously this passed a 4-byte i32, reading 120 bytes off the stack — a
+    // test bug ASAN flags; the function's contract is a >=124-byte blob.)
+    u8 blob[124] = {0};
     // flag == 14 makes byte[+16]==14 -> short sync variant (length 17).
-    i32 idx = QueueRequestFlagBlob32(q, 14, &blob);
+    i32 idx = QueueRequestFlagBlob32(q, 14, blob);
     CHECK(idx >= 0);
     CHECK_EQ(slot(q, idx).len(), 17u);
 }

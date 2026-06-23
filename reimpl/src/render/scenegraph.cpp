@@ -105,22 +105,44 @@ float* TransformNodeBoxCorners(const float* box, const float* origin,
 // gilde.exe 0x5f09f0 — VIBE_SceneGraph_CullOctreeAgainstFrustum
 //   if (node): classify; if (0x40 fully-out fast path) stamp the leaf mesh list
 //   with the visible tag; else if any low bit set recurse into octant children.
-char CullOctreeAgainstFrustum(void* node, void* ctx, int visibleTag,
-                              const CullCallbacks& cb) {
+namespace {
+// HARDENING (wave-11): bound the octree recursion. The original recurses without
+// a limit; a corrupt/cyclic octree (e.g. a child pointer that re-enters an
+// ancestor) would otherwise overflow the native stack. Valid octrees are shallow
+// (the engine caps subdivision depth), so this never trips on real data and the
+// in-bounds path is byte-identical. 256 frames is far beyond any real octree.
+constexpr int kCullMaxDepth = 256;
+
+char CullOctreeAgainstFrustumDepth(void* node, void* ctx, int visibleTag,
+                                   const CullCallbacks& cb, int depth) {
     if (!node)
+        return 0;
+    if (depth >= kCullMaxDepth)
         return 0;
 
     u8 code = cb.classify(node, ctx, *cb.frustum);
     if ((code & 0x40) != 0) {
         cb.stampLeaf(node, visibleTag);
+        // 0x5f0a23: the original's leaf-stamp loop `for(i=head; i; i=i->next)`
+        // drains the iterator to null, so eax == 0 at `return (char)i`. The 0x40
+        // fast path returns 0, NOT the classification byte. (Recursive callers
+        // propagate this; the top-level caller discards it.)
+        return 0;
     } else if ((code & 0x3F) != 0) {
         for (int i = 0; i < 4; ++i) {
             void* ch = cb.child(node, i);
             if (ch)
-                code = (u8)CullOctreeAgainstFrustum(ch, ctx, visibleTag, cb);
+                code = (u8)CullOctreeAgainstFrustumDepth(ch, ctx, visibleTag, cb,
+                                                         depth + 1);
         }
     }
     return (char)code;
+}
+} // namespace
+
+char CullOctreeAgainstFrustum(void* node, void* ctx, int visibleTag,
+                              const CullCallbacks& cb) {
+    return CullOctreeAgainstFrustumDepth(node, ctx, visibleTag, cb, 0);
 }
 
 } // namespace guild::render

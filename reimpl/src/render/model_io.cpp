@@ -45,6 +45,17 @@ bool LoadSyntheticModel(const u8* data, size_t size, Model& out) {
     if (!r.ok)
         return false;
 
+    // Hardening (W11): bound the declared counts by the bytes that remain before
+    // allocating. A vertex record is 21 bytes (5 floats + 1 light byte) and a
+    // polygon record is 26 bytes (3 indices + 3 floats + 2 flag bytes); a count
+    // larger than the buffer can back is malformed and would otherwise drive a
+    // huge std::vector::assign (bad_alloc). A well-formed file always fits.
+    const size_t remain = static_cast<size_t>(r.end - r.p);
+    if (vcount > remain / 21u)
+        return false;
+    if (pcount > remain / 26u)
+        return false;
+
     out.vertices.assign(vcount, Vertex{});
     for (u32 i = 0; i < vcount; ++i) {
         Vertex& vx = out.vertices[i];

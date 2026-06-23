@@ -192,6 +192,82 @@ TEST(SimEntity, SceneTreeChildWalk) {
     CHECK_EQ(n->id, 300);
 }
 
+// ===========================================================================
+// WAVE-11 HARDENING — array-boundary indexing + bad-record / sparse-scan edges.
+// ASAN exercises the bounds. The valid-input behavior is unchanged.
+// ===========================================================================
+
+// Person lookup at the LAST slot (index 767) — the 411648-byte cursor bound.
+// The scan must read slot 767 and miss cleanly past it (no OOB at 768).
+TEST(SimEntityHarden, PersonFindAtLastSlot) {
+    ResetEntityArrays();
+    PutPerson(kPersonCapacity - 1, 4242);     // slot 767
+    CHECK(PersonFindRecordById(4242) == &g_persons[kPersonCapacity - 1]);
+    // A miss must scan all 768 slots and return null without overrunning.
+    CHECK(PersonFindRecordById(0x7FFFFFFF) == nullptr);
+}
+
+// Object lookup at the LAST slot (index 255) — the 43264-byte cursor bound.
+TEST(SimEntityHarden, BuildingFindAtLastSlot) {
+    ResetEntityArrays();
+    PutObject(kObjectCapacity - 1, 909);      // slot 255
+    CHECK(BuildingFindById(909) == &g_objects[kObjectCapacity - 1]);
+    CHECK(BuildingFindById(0x7FFFFFFF) == nullptr);
+}
+
+// Sparse scene array: sceneCount counts OCCUPIED nodes, but the occupied node
+// sits far past sceneCount empty slots. Pre-fix, the scene scan advanced its raw
+// index past kSceneNodeCapacity (empty slots bump idx but not the examined-count)
+// -> OOB read. The bound now fails safe (miss) at capacity.
+TEST(SimEntityHarden, ResolveSceneSparseNoOverrun) {
+    ResetEntityArrays();
+    g_sceneArrayLoaded = true;
+    // One occupied node near the end; everything before it is empty (type==0).
+    g_sceneNodes[kSceneNodeCapacity - 1].type = 9;
+    g_sceneNodes[kSceneNodeCapacity - 1].id   = 77;
+    // sceneCount = 1 occupied node, but it's 511 empty slots away.
+    g_sceneNodeCount = 1;
+    Person* p = nullptr; ObjectRec* o = nullptr; SceneNode* s = nullptr;
+    // id not present -> the scan walks empty slots; must stop at capacity, not OOB.
+    int kind = GameObjectResolveEntityById(nullptr, &s, 1234, &p);
+    CHECK_EQ(kind, 0);
+    CHECK(s == nullptr);
+}
+
+// sceneCount larger than capacity must not drive the scan past the flat array.
+TEST(SimEntityHarden, ResolveSceneCountOverCapacityNoOverrun) {
+    ResetEntityArrays();
+    g_sceneArrayLoaded = true;
+    g_sceneNodeCount = kSceneNodeCapacity + 1000;   // declared-count too large
+    Person* p = nullptr; SceneNode* s = nullptr;
+    int kind = GameObjectResolveEntityById(nullptr, &s, 5, &p);  // all empty -> miss
+    CHECK_EQ(kind, 0);
+    CHECK(s == nullptr);
+}
+
+// Person query with an out-of-range owner value: no object matches; the iterator
+// must scan all 256 object slots and terminate cleanly (no OOB at 256).
+TEST(SimEntityHarden, PersonQueryOwnerNoMatchFullScan) {
+    ResetEntityArrays();
+    PutObject(0, 1);
+    PutObject(kObjectCapacity - 1, 2);        // alive object in the LAST slot
+    PersonFilter f[] = {{4, 0x4242}};         // owner == 0x4242 (none match)
+    CHECK(PersonQueryBegin(f, 1) == nullptr);
+    CHECK(PersonIterNext() == nullptr);       // exhausted, no overrun
+}
+
+// Person query "count too large" guard: q_count > kObjectCapacity short-circuits
+// (the original's `if (loaded && q_count <= 256)` bound). Drive IterNext directly
+// after a begin so the count-guard path is exercised without OOB.
+TEST(SimEntityHarden, PersonQueryAtLastObjectSlot) {
+    ResetEntityArrays();
+    PutObject(kObjectCapacity - 1, 555);      // only the last slot is alive
+    PersonFilter f[] = {{1, 555}};            // id == 555
+    ObjectRec* r = PersonQueryBegin(f, 1);
+    CHECK(r == &g_objects[kObjectCapacity - 1]);
+    CHECK(PersonIterNext() == nullptr);
+}
+
 // ============================ Game time ============================
 
 // Golden vectors computed by /tmp/gt.py (the original arithmetic model).

@@ -436,8 +436,9 @@ TEST(NpcAction3_JailCell, Resolve_State2_escape_transfers_and_frees) {
 
     HeRecord* h = NewHe();
     He_State(h) = 2;
-    He_FilterA(h) = 21;   // arrestee
-    He_FilterB(h) = 300;  // cell
+    He_FilterA(h) = 21;     // arrestee
+    He_FilterB(h) = 300;    // cell building (+176)
+    He_ViolationPk(h) = 300; // 0x4ea45d: state-2 cell query keys off +180
     He_MemberId8(h, 0) = 22;
     rec.add(21, 5, true);
     rec.add(300, 0, true);
@@ -463,6 +464,7 @@ TEST(NpcAction3_JailCell, Resolve_State2_noEscape_fines_and_frees) {
     He_State(h) = 2;
     He_FilterA(h) = 21;
     He_FilterB(h) = 300;
+    He_ViolationPk(h) = 300; // 0x4ea45d: state-2 cell query keys off +180
     rec.add(21, 5, true);
     rec.add(300, 0, true);
 

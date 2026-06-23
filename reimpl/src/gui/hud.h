@@ -194,12 +194,17 @@ void ResetDamageLabels();
 int DamageLabel_Register(int source, int amount, int now);
 
 // ===========================================================================
-// On-screen clock — gilde.exe 0x527778, VIBE_Clock_ComputeGameTimeOfDay.
-// The HUD clock derives the in-game time of day from a tick accumulator
-// (dword_1233558) scaled by the day-length:
-//     seconds = (int)((tickAccum * 0.00625 + 0.5) * dayLength)
-//     h = seconds / 3600 ; m = (seconds % 3600) / 60 ; s = (seconds % 3600) % 60
-// dayLength is dword_63CC60 (= 100 seconds/day at the recovered value).
+// On-screen clock — DISPLAY DERIVATIVE of gilde.exe 0x527778.
+//
+// NOTE (corrected provenance): the real VIBE_Clock_ComputeGameTimeOfDay
+// @0x527778 is a TimeBase proc that ADVANCES the master GameTime record
+// qword_122F840 by   round-to-nearest((dword_1233558 * 0.00625 + 0.5) *
+// dword_63CC60)   game seconds per fire, where dword_1233558 is the GAME
+// SPEED setting (40 * level) — not a tick accumulator. The authoritative
+// reconstruction lives in sim::ClockComputeGameTimeOfDay
+// (src/sim/game_clock_tick.h); the HUD time-of-day caption should read the
+// world clock qword_13CE852 (sim::g_tickClock). This helper keeps the same
+// seconds expression as an hh:mm:ss splitter for existing HUD callers.
 // ===========================================================================
 inline constexpr float  kClockTickScale = 0.00625f; // flt_622958 (= 1/160)
 inline constexpr double kClockTickBias  = 0.5;       // dbl_622960

@@ -63,7 +63,12 @@ CityStats* CityAggregateDistrictStats(const CityCensusInputs& in, CityStats* out
                 if (r.hasScene) {
                     bool eligible =
                         (r.typeByte < 0xB || r.typeByte > 0xD) && r.typeByte != 0x10;
-                    if (eligible && r.onMap) {
+                    // RECONSTRUCTION GUARD: valid (onMap) tiles are the 0..7
+                    // district indices WorldToCityTile yields; bound them to the
+                    // 8x8 grid so a malformed tile cannot index g_cityGrid OOB.
+                    bool inGrid = static_cast<unsigned>(r.tileX) < 8u &&
+                                  static_cast<unsigned>(r.tileY) < 8u;
+                    if (eligible && r.onMap && inGrid) {
                         // flt_12349B4[48*tx + 6*ty] (== byte 192*tx + 24*ty + 44).
                         GridSatCount(r.tileX, r.tileY) += 1.0f;
                     }
@@ -76,7 +81,9 @@ CityStats* CityAggregateDistrictStats(const CityCensusInputs& in, CityStats* out
                 if (r.hasScene) {
                     bool eligible =
                         (r.typeByte < 0xB || r.typeByte > 0xD) && r.typeByte != 0x10;
-                    if (eligible && r.onMap) {
+                    bool inGrid = static_cast<unsigned>(r.tileX) < 8u &&
+                                  static_cast<unsigned>(r.tileY) < 8u;
+                    if (eligible && r.onMap && inGrid) {
                         GridSatCount(r.tileX, r.tileY) += 1.0f;
                     }
                 }
@@ -232,6 +239,14 @@ int CityComputeWealthGrid(const std::vector<WealthResident>& residents, i32 out[
         if (!r.hasScene || !r.onMap)
             continue;
         int x = r.tileX, y = r.tileY;
+        // RECONSTRUCTION GUARD: WorldToCityTile yields a 0..7 district tile, so a
+        // placed (hasScene && onMap) resident's tile is in range in normal
+        // operation; the original then indexes the BSS grid with slack. Here the
+        // worth/count accumulators are tightly-sized 8x8 stack arrays, so a
+        // malformed/out-of-range tile would corrupt the stack. Bound to the 8x8
+        // grid (valid 0..7 tiles are unaffected — byte-identical).
+        if (static_cast<unsigned>(x) >= 8u || static_cast<unsigned>(y) >= 8u)
+            continue;
         // *(float*)&v16[8*tx + 1 + ty] = worth ; ++byte_12349A4[192*tx + 24*ty].
         // The "8*tx + 1 + ty" dword index == byte 32*tx + 4 + 4*ty; the original
         // base aliasing folds to a per-(x,y) cell. We store directly.

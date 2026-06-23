@@ -132,10 +132,14 @@ int FindTwoPeopleInRange(const AiActionActor& a, AiActionResult& out) {
     ScanHit hit = E.FindMatchingColors(a.recordPtr, 2, flags, 33.0f, radius);
     if (!hit.found)
         return hit.found;
-    double favAB = E.Favorability(hit.slotA, hit.slotB);
-    double favBA = E.Favorability(hit.slotB, hit.slotA);
-    if (favAB <= static_cast<double>(kFavorabilityCeil) ||
-        favBA <= static_cast<double>(kFavorabilityCeil)) {
+    // The original stores each favorability into a 4-byte float slot (fstp
+    // [var_10]/[var_C] @0x47bdbc/0x47bdc5) before fld+fcomp against flt_61AC3C.
+    // The comparison therefore runs on float-truncated values, not the raw
+    // x87 result — model that with an explicit float round-trip.
+    float favAB = static_cast<float>(E.Favorability(hit.slotA, hit.slotB));
+    float favBA = static_cast<float>(E.Favorability(hit.slotB, hit.slotA));
+    if (static_cast<double>(favAB) <= static_cast<double>(kFavorabilityCeil) ||
+        static_cast<double>(favBA) <= static_cast<double>(kFavorabilityCeil)) {
         out.kind = 7;
         out.targetA = E.PersonId(hit.slotA);
         out.targetB = E.PersonId(hit.slotB);
@@ -186,16 +190,20 @@ int FindNearbyEntityByLevel(const AiActionActor& a, AiActionResult& out) {
 }
 
 // ===========================================================================
-// gilde.exe 0x47bcd8 — VIBE_AiAction_CheckObjectState.
-//   return (BuildingGroup(target)==7 && RandomModulo(n)) || !RandomModulo(n);
-//   The original calls RandomModulo twice with the same operands; the first is
-//   guarded by the && short-circuit (only drawn when group==7).
+// gilde.exe 0x47bcd8 — VIBE_AiAction_CheckObjectState  (__thiscall, this=record).
+//   Disasm (0x47bcd8): mov eax,[edx+0x161]; sar eax,0x18; call GroupFromCode;
+//   cmp al,7; if ==7 { RandomModulo(3); if !=0 -> return 1 }; RandomModulo(4);
+//   return (result==0).  The two RandomModulo calls use DISTINCT hard-coded
+//   moduli (3 then 4) — the Hex-Rays collapsed them into one phantom `v3`.
+//   The group code is `(*(i32*)(record+0x161)) >> 24` (signed sar), low byte,
+//   fed to VIBE_BuildingType_GroupFromCode (which the env wraps as BuildingGroup).
+//   net: (group==7 && RandomModulo(3)!=0) || RandomModulo(4)==0.
 // ===========================================================================
-bool CheckObjectState(i32 targetBuildingPtr, u16 n) {
+bool CheckObjectState(i32 buildingTypeCode) {
     AiActionFinderEnv& E = *g_env;
-    if (E.BuildingGroup(targetBuildingPtr) == 7 && RandU16(n) != 0)
+    if (E.BuildingGroup(buildingTypeCode) == 7 && RandU16(3) != 0)
         return true;
-    return RandU16(n) == 0;
+    return RandU16(4) == 0;
 }
 
 // ===========================================================================
@@ -264,9 +272,13 @@ int FindNearbyWealthyTarget(const AiActionActor& a, AiActionResult& out) {
         return hit.found;
     if ((E.PersonTurnBits(hit.slotA) & 0x400u) != 0)
         return 0;
-    double roll = util::RandomFloatScaled();
+    // Order (disasm 0x47c3bf..0x47c3fa): RandomFloatScaled() is drawn FIRST and
+    // its result is stored to a 4-byte float slot (fstp [var_10] @0x47c3e6);
+    // then BuildingRatingCurve is called and `fadd [var_10]` adds the truncated
+    // float roll to the 80-bit curve on st0 before `fld1; fcompp` (>= 1.0).
+    float roll = static_cast<float>(util::RandomFloatScaled());
     double curve = E.BuildingRatingCurve(a.recordPtr, hit.slotA);
-    if (curve + roll >= 1.0) {
+    if (curve + static_cast<double>(roll) >= 1.0) {
         out.kind = 7;
         out.targetA = E.PersonId(hit.slotA);
         return 1;

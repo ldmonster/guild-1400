@@ -198,6 +198,12 @@ struct GateHooks : Building5Hooks {
     std::int32_t UniverseRestoreObjectStates(const std::uint8_t*, std::uint8_t f) override {
         restoreFlag = f; return 0;
     }
+    int freeCalls = 0;
+    void HeFreeHandlerEntry(std::int32_t, std::int32_t, std::int32_t) override {
+        ++freeCalls;
+    }
+    std::int32_t guardWord = 0;
+    std::int32_t GateSyncGuardWord() override { return guardWord; }
 };
 }  // namespace
 
@@ -245,9 +251,26 @@ TEST(Building5, RequestGateFlagSync_NoMatchSchedules30) {
     std::uint8_t rec[256];
     std::memset(rec, 0, sizeof rec);
     Building_RequestGateFlagSync(rec);
-    // Inert flag table -> no match (index 128) -> +30 min, single advance.
+    // Guard word 0 (>>24 == 0, not <= -1) -> proceed. Inert flag table -> no
+    // match (index 128) -> +30 min, single advance, no handler free.
     CHECK_EQ(h.advanceCalls, 1);
     CHECK_EQ(h.lastMin, 30);
+    CHECK_EQ(h.freeCalls, 0);
+    SetBuilding5Hooks(nullptr);
+}
+
+TEST(Building5, RequestGateFlagSync_GuardBailsEarly) {
+    // gilde.exe 0x4f70b6: *(int*)((char*)&dword_63C8F0+1) >> 24 <= -1 -> free+bail.
+    // 0xFE000000 >> 24 (sar) == -2 <= -1, matching the binary's loaded state.
+    GateHooks h;
+    h.guardWord = static_cast<std::int32_t>(0xFE000000);
+    SetBuilding5Hooks(&h);
+    std::uint8_t rec[256];
+    std::memset(rec, 0, sizeof rec);
+    Building_RequestGateFlagSync(rec);
+    // Guard taken: free the handler entry, no time advance.
+    CHECK_EQ(h.freeCalls, 1);
+    CHECK_EQ(h.advanceCalls, 0);
     SetBuilding5Hooks(nullptr);
 }
 
@@ -261,21 +284,37 @@ TEST(Building5, GateStubs_AreNoOps) {
 }
 
 TEST(Building5, ForEachBauplatzReserve_RestoresFlag) {
+    // gilde.exe 0x50cac4: v9 = reserve && (idx < (u8)byte_1233514 || byte_1233514==2).
+    // The cap byte is genuine runtime difficulty state, routed via DifficultyReserveCap.
     GateHooks h;
     // Reuse GateHooks but supply scene nodes via a small adapter.
     struct RH : GateHooks {
         const std::uint8_t* node = nullptr;
+        std::uint8_t cap = 0;
         const std::uint8_t* SceneNode(int i) override { return i == 0 ? node : nullptr; }
+        std::uint8_t DifficultyReserveCap() override { return cap; }
     } rh;
     std::uint8_t node[8] = {0};
     rh.node = node;
     SetBuilding5Hooks(&rh);
-    // reserve != 0 -> flag 1.
+
+    // cap==0 (fresh BSS state, as in the binary): for idx 0, 0<0 is false and
+    // 0==2 is false, so flag is 0 even with reserve!=0.
+    rh.cap = 0;
     std::int32_t r = Building_ForEachBauplatzReserve(1, 0);
     CHECK_EQ(r, 0);
-    CHECK_EQ((int)rh.restoreFlag, 1);
-    // reserve == 0 -> flag 0.
-    Building_ForEachBauplatzReserve(0, 0);
     CHECK_EQ((int)rh.restoreFlag, 0);
+
+    // cap>=1: idx 0 < cap -> reserve gates the flag.
+    rh.cap = 1;
+    Building_ForEachBauplatzReserve(1, 0);   // reserve!=0, 0<1 -> flag 1
+    CHECK_EQ((int)rh.restoreFlag, 1);
+    Building_ForEachBauplatzReserve(0, 0);   // reserve==0 -> flag 0
+    CHECK_EQ((int)rh.restoreFlag, 0);
+
+    // cap==2: the special "|| cap==2" arm makes every idx pass the cap test.
+    rh.cap = 2;
+    Building_ForEachBauplatzReserve(1, 0);   // reserve!=0, cap==2 -> flag 1
+    CHECK_EQ((int)rh.restoreFlag, 1);
     SetBuilding5Hooks(nullptr);
 }

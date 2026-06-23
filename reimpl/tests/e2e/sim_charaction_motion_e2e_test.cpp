@@ -233,3 +233,56 @@ TEST(SimMotionE2E, AvatarHeightSnapsToTerrainWhileWalking) {
     CHECK(av.posY < 60.0f);                  // (lerped, lifted; never overshoots wildly)
     SetMotionHooks(nullptr);
 }
+
+// --- HARDENING: waypoint advance at the LAST capacity slot --------------------
+// Regression for the gap-skip gate reading one (col,row) pair PAST the 512-byte
+// waypoint buffer when waypointIdx is at the final slot (waypointIdx == cap-1, so
+// next == cap == 256, buffer offset 512). The bound (next < waypointCap) is now
+// tested BEFORE dereferencing waypoints[2*next], so no read past the buffer
+// happens. Under ASAN the pre-fix code tripped a heap/global-buffer overflow here.
+TEST(SimMotionE2E, WaypointAdvanceAtCapacityNoOverread) {
+    SetMotionHooks(&kRec);
+    g_attachCount = g_detachCount = g_footsteps = 0;
+    g_tickStart = 0; g_tickEnd = 1;
+    g_motionFootstepEnabled = 0; g_motionFootstepCount = 0;
+    g_motionActiveUniverse = 1; g_motionSceneChanged = 0;
+
+    FlatMap map(16, /*h=*/0, /*type=*/3);
+
+    MotionAnim anim{};
+    anim.flags110 = 8u;                       // "stop" bit set -> executor advances
+
+    MotionAvatar av{};
+    av.universeId = 1; av.baseSpeed = 1.0f; av.ramp = 1.0f;
+    av.posX = 6.0f; av.posY = 0.0f; av.posZ = 2.0f;
+    av.transX = 6.0f; av.transYaw = 0.0f; av.transZ = 2.0f;
+    av.anim = &anim;
+
+    MotionCharacter ch{};
+    ch.avatar = &av; ch.mesh = &map.hm;
+    ch.universe = reinterpret_cast<void*>(1);
+    ch.universeIndoorFloor = 0;
+    ch.startMesh = 0;
+    ch.activePath = 1;                        // path is live (skip BUILD phase)
+    ch.morphStamp = -1;                       // no morph cooldown
+    ch.morphInit = 1;                         // skip morph-init phase
+    ch.abort = 0;
+    ch.turnAngle = 0.0f;
+    ch.waypointCap = 256;
+    ch.waypoints = ch.waypointBuf;
+    std::memset(ch.waypointBuf, 0, kWaypointAlloc);
+    // Put a real waypoint in the LAST slot (index 255 == bytes 510,511); leave the
+    // rest zero so the gap-skip gate's "(0,0) next?" probe is what would read OOB.
+    ch.waypointBuf[2*255]     = 6;
+    ch.waypointBuf[2*255 + 1] = 2;
+    ch.waypointIdx = 255;                     // at the final capacity slot
+
+    // Single tick: with waypointIdx==255, next==256==cap. The gap-skip probe must
+    // NOT read waypoints[512]/[513]; the bound short-circuits first. Then the plain
+    // advance sets idx=256 and the (idx<cap) sample is skipped too. No OOB either way.
+    WalkOnPathStep(&ch);
+
+    // The index advanced to capacity (256); no further waypoint was sampled.
+    CHECK_EQ(ch.waypointIdx, 256);
+    SetMotionHooks(nullptr);
+}

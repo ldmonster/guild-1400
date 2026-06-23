@@ -21,7 +21,8 @@ namespace guild::world {
 struct LoanAccount {
     i32  ownerAccount = -1; // building/office account id
     i32  heldCurrency = 0;  // VIBE_Person_SumCurrencyHeld (negative == in debt)
-    bool hasLender = false; // a private lender already covers this debt
+    bool hasLender = false; // a private lender already covers this debt (dword_12CEA7C)
+    bool noCreditor = true; // dword_12CE96C[i]==-1 — no creditor on record (foreclosure gate)
     u8   currency = 0;      // currency context for the rate lookup
 };
 

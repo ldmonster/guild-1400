@@ -28,8 +28,10 @@ std::uintptr_t LockSurface(IDDrawSurface& surf, PresentGlobals& g) {
             g.pitchBytes   = static_cast<i32>(desc.pitch);
             g.lockBitDepth = static_cast<i32>(desc.bitDepth);
             g.pitchExtra   = static_cast<i32>(desc.bitDepth) >> 3;
-            i32 div = g.bytesPerPx ? g.bytesPerPx : 1;   // dword_7626E8
-            g.strideWords  = static_cast<i32>(desc.pitch) / div;
+            // `div ebx`: UNSIGNED divide of lPitch by dword_7626E8 (bytesPerPx). The
+            // original has no zero-guard; we keep the guard only to avoid a UB trap.
+            u32 div = g.bytesPerPx ? static_cast<u32>(g.bytesPerPx) : 1u;   // dword_7626E8
+            g.strideWords  = static_cast<i32>(desc.pitch / div);
             return reinterpret_cast<std::uintptr_t>(desc.pixels);
         }
         if (hr != kDDErrSurfaceLost)
@@ -53,8 +55,8 @@ std::uintptr_t LockSurfaceWait(IDDrawSurface& surf, u32 flags, PresentGlobals& g
             g.pitchBytes   = static_cast<i32>(desc.pitch);
             g.lockBitDepth = static_cast<i32>(desc.bitDepth);
             g.pitchExtra   = static_cast<i32>(desc.bitDepth) >> 3;
-            i32 div = g.bytesPerPx ? g.bytesPerPx : 1;
-            g.strideWords  = static_cast<i32>(desc.pitch) / div;
+            u32 div = g.bytesPerPx ? static_cast<u32>(g.bytesPerPx) : 1u; // dword_7626E8 (unsigned div)
+            g.strideWords  = static_cast<i32>(desc.pitch / div);
             return reinterpret_cast<std::uintptr_t>(desc.pixels);
         }
         if (hr != kDDErrSurfaceLost)
@@ -132,16 +134,25 @@ bool AcquireBackBuffer(PresentGlobals& g) {
     return false;
 }
 
-// gilde.exe 0x434680 — VIBE_Render_UnlockBackBuffer
-// if (dword_7626F0) switch(byte_762721):
-//   case 0,2,4: dword_7626F0 = 0;
-//   case 1,3:   result = primary->Unlock(0); dword_7626F0 = 0;   // vtbl+128
-//   default:    result = passthrough;
-// returns the status byte.
+// gilde.exe 0x434680 — VIBE_Render_UnlockBackBuffer  (eax = passthrough `result`)
+//
+// Disasm (0x434680):
+//   if (!dword_7626F0) return result;                 // jz default -> eax unchanged
+//   mov al, byte_762721;  cmp al,4;  ja default;      // >4: eax = (result&~0xFF)|mode
+//   and eax, 0xFF;                                    // valid mode: eax = (u8)mode
+//   switch(mode):
+//     case 0,2,4: dword_7626F0 = 0;  return eax;      // == (u8)mode
+//     case 1,3:   eax = primary->Unlock(0); dword_7626F0 = 0; return eax;
+// NOTE: the original does NOT return the passthrough `status` for the GDI/Lock-copy
+// modes — it returns the MODE byte (`al = byte_762721; and eax,0FFh`). Only the
+// no-lock-held early-out and the >4 default return (a form of) the incoming value.
 i32 UnlockBackBuffer(PresentGlobals& g, i32 status) {
     if (g.targetBase == 0)
-        return status;
-    i32 result = status;
+        return status;                                // jz default: eax = incoming
+    const u32 mode = static_cast<u32>(g.mode);
+    if (mode > 4)                                     // ja default (out of switch range)
+        return (status & ~0xFF) | static_cast<i32>(mode & 0xFF);  // al patched, hi bits kept
+    i32 result = static_cast<i32>(mode & 0xFF);       // and eax, 0FFh
     switch (g.mode) {
         case PresentBackend::GdiBitBlt:               // case 0
         case PresentBackend::DDrawLockBlt:            // case 2
@@ -150,7 +161,7 @@ i32 UnlockBackBuffer(PresentGlobals& g, i32 status) {
             break;
         case PresentBackend::DDrawBlt:                // case 1
         case PresentBackend::DDrawFlip:               // case 3
-            result = g.primary ? g.primary->Unlock() : 0;
+            result = g.primary ? g.primary->Unlock() : 0;  // vtbl+128
             g.targetBase = 0;
             break;
     }

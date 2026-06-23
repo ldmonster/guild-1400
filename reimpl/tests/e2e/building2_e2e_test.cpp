@@ -138,11 +138,18 @@ TEST(Building2_E2E, TypeRecordAndStateMapping) {
     // panel would: a type whose +0 state byte selects a UI state, with its
     // +356 type byte and +358/+361 profession bytes matched against code lists.
     std::vector<std::uint8_t> tt(589 * 30, 0);
+    // gilde.exe 0x589906 / 0x589998: Building_MatchProfessionCode and
+    // Building_MatchTypeCode read word_12CE910[268*a1] — the person/family array
+    // (byte stride 536, personFamilyBase) — NOT the 589-stride building-type
+    // table. Bind a separate person/family table for those two matchers.
+    std::vector<std::uint8_t> pf(536 * 30, 0);
     BuildingArrayBindings b;
     b.buildingTypeBase = tt.data();
+    b.personFamilyBase = pf.data();
     SetBuildingArrayBindings(b);
 
-    // type 24 -> state 3 (ret 1); type 7 -> state 6 (ret 0).
+    // type 24 -> state 3 (ret 1); type 7 -> state 6 (ret 0). MapTypeToState
+    // reads buildingTypeBase (589*typeCode + 0), gilde.exe 0x592a5c.
     tt[589 * 24 + 0] = 24;
     tt[589 * 7 + 0] = 7;
     std::uint8_t st = 0;
@@ -151,10 +158,11 @@ TEST(Building2_E2E, TypeRecordAndStateMapping) {
     CHECK_EQ(Building_MapTypeToState(7, &st), 0);
     CHECK_EQ(static_cast<int>(st), 6);
 
-    // type 24 profession bytes; match against a candidate list.
-    tt[589 * 24 + 358] = 0x0A;
-    tt[589 * 24 + 361] = 0x0B;
-    tt[589 * 24 + 356] = 0x2A;
+    // type 24 profession bytes; match against a candidate list. These live in the
+    // person/family record (stride 536): +358 / +361 profession, +356 type byte.
+    pf[536 * 24 + 358] = 0x0A;
+    pf[536 * 24 + 361] = 0x0B;
+    pf[536 * 24 + 356] = 0x2A;
     std::uint8_t profCodes[] = {0x01, 0x0B};
     CHECK_EQ(Building_MatchProfessionCode(24, 2, profCodes), 1);
     std::uint8_t typeCodes[] = {0x2A};

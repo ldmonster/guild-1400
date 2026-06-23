@@ -228,10 +228,12 @@ TEST(WorldContentChronicle, AddScanFormat) {
 namespace {
 void BuildMissionTable() {
     EventTableReset();
-    // Three descriptors with distinct +4 value bytes and +0x0C params.
-    g_eventTable[0].value = 14; g_eventTable[0].paramB = 1000;
-    g_eventTable[1].value = 17; g_eventTable[1].paramB = 2000;
-    g_eventTable[2].value = 20; g_eventTable[2].paramB = 3000;
+    // Three descriptors with distinct +4 value bytes. paramA (+8) is the text id
+    // base; paramB (+0x0C) the special-dialog voice; paramC (+0x10) the reward
+    // voice — the exact fields VIBE_Mission_RunSpecialDialog / RunRewardSummary read.
+    g_eventTable[0].value = 14; g_eventTable[0].paramA = 5000; g_eventTable[0].paramB = 1000; g_eventTable[0].paramC = 60;
+    g_eventTable[1].value = 17; g_eventTable[1].paramA = 6000; g_eventTable[1].paramB = 2000; g_eventTable[1].paramC = 70;
+    g_eventTable[2].value = 20; g_eventTable[2].paramA = 7000; g_eventTable[2].paramB = 3000; g_eventTable[2].paramC = 80;
     g_eventTableCount = 3;
 }
 } // namespace
@@ -246,9 +248,10 @@ TEST(WorldContentMission, DescriptorLookupByValue) {
     MissionRewardInfo info;
     CHECK(MissionResolveReward(17, &info));
     CHECK_EQ(info.descriptorIndex, 1);
-    CHECK_EQ(info.nameTextId, 18);     // value(17) + 1
-    CHECK_EQ(info.bodyTextId, 19);     // value(17) + 2
-    CHECK_EQ(info.voiceIndex, 2000);   // paramB (+0x0C)
+    CHECK_EQ(info.nameTextId, 6001);          // paramA(6000) + 1  (rec+8)
+    CHECK_EQ(info.bodyTextId, 6002);          // paramA(6000) + 2  (rec+8)
+    CHECK_EQ(info.specialVoiceIndex, 2000);   // paramB (+0x0C)
+    CHECK_EQ(info.rewardVoiceIndex, 70);      // paramC (+0x10)
     CHECK(!MissionResolveReward(99, &info));
 }
 

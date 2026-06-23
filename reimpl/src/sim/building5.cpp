@@ -107,6 +107,11 @@ std::int32_t Building_CollectFreeBauplatzCandidate(const std::uint8_t* node,
         }
     }
     if (!occupied) {
+        // Original (0x50c84f): *(_DWORD*)(4*dword_63C708 + dword_122EE48) = a1;
+        //   dword_63C708 = dword_63C708 + 1;  — UNCONDITIONAL store + bump (the
+        // caller sizes the result buffer to 256). We keep the same count bump but
+        // bounds-guard the store to avoid OOB in the headless build; the returned
+        // count is identical to the original.
         if (g_bauplatzResult && g_bauplatzCount < g_bauplatzCap)
             g_bauplatzResult[g_bauplatzCount] = node;
         ++g_bauplatzCount;
@@ -210,13 +215,16 @@ std::int32_t Building_ForEachBauplatzReserve(std::int32_t reserve,
     }
     (void)walkCtx;
 
+    // byte_1233514 — difficulty/reserve cap (runtime global, routed via hook).
+    const std::uint8_t cap = g_hooks->DifficultyReserveCap();
+
     std::int32_t result = 0;
     int v7 = 0;
     for (int v8 = 0; v7 < count; ++v8) {
-        // v9 = reserve && (v7 < cap || cap == 2). With no recovered cap table the
-        // original's byte_1233514 difficulty cap is modelled as "always within
-        // cap" -> flag = (reserve != 0).
-        std::uint8_t v9 = static_cast<std::uint8_t>(reserve != 0);
+        // Exact original: v9 = a1 && (v7 < (unsigned __int8)byte_1233514
+        //                            || byte_1233514 == 2).
+        std::uint8_t v9 = static_cast<std::uint8_t>(
+            reserve && (v7 < static_cast<int>(cap) || cap == 2));
         result = g_hooks->UniverseRestoreObjectStates(frame[v8], v9);
         ++v7;
     }
@@ -240,9 +248,13 @@ const std::uint8_t* Building_FindNearestPlotByDistance(const float* p,
         float dx = out[0] - p[0];
         float dy = out[1] - p[1];
         float dz = out[2] - p[2];
+        // Original: v7 = sqrt(...) is an x87 80-bit long double; v13 = (float)v7.
+        // First compare uses the wide value (v7 < v12), the SECOND compares the
+        // float-truncated v13 against the *double* cutoff (v13 < dbl_621450).
+        //   if ( v7 < v12 && v13 < dbl_621450 ) { v3 = *v4; v12 = v13; }
         double d = std::sqrt(static_cast<double>(dx * dx + dy * dy + dz * dz));
         float df = static_cast<float>(d);
-        if (df < bestDist && df < static_cast<float>(kNearestPlotCutoff)) {
+        if (d < bestDist && static_cast<double>(df) < kNearestPlotCutoff) {
             best = node;
             bestDist = df;
         }
@@ -304,6 +316,19 @@ std::int32_t Building_HandlerStub() {
 // inert hooks the scan finds no match (index 128) and schedules +30 min.
 void Building_RequestGateFlagSync(std::uint8_t* rec) {
     if (!rec) return;
+
+    // Top-level guard (gilde.exe 0x4f70b6):
+    //   if ( *(int*)((char*)&dword_63C8F0 + 1) >> 24 <= -1 ) {
+    //       VIBE_He_FreeHandlerEntry(a1, a1, a3);
+    //       VIBE_Building_GateCallbackStub();
+    //       return;
+    //   }
+    // The >>24 is arithmetic (sar) on a signed int.
+    if ((g_hooks->GateSyncGuardWord() >> 24) <= -1) {
+        g_hooks->HeFreeHandlerEntry(0, 0, 0);
+        Building_GateCallbackStub();
+        return;
+    }
 
     std::uint8_t* timeRec = rec + 82;
     std::uint32_t state;

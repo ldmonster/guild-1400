@@ -146,13 +146,15 @@ LobbyRunResult RunNetworkLobby(const LobbyAdvert& advert, sim::CommandQueue& q,
         r.savedSent  = true;
         r.chunksSent = chunks;
 
-        // v9[0] = byte_63CC1D; Command_QueueRequestFlagBlob32(6, v9) — the ready
-        // count (opcode 6, group-end) carrying the live player count in the blob.
-        // QueueRequestFlagBlob32 stages a type-0x20 packet with the flag at +16 and
-        // the blob at +17; here we stamp opcode 6 with the count and enqueue it.
+        // v45[0] = byte_63CC1D; Command_QueueRequestFlagBlob32(6, v45) — the ready
+        // count (flag 6) carrying the live player count in the blob (0x503f78 @
+        // 0x50422e..0x50423a). QueueRequestFlagBlob32 @0x494ab4 stages a type-0x20
+        // packet: v3[0]=0x20 (type), v3[16]=flag(6), then the 124-byte blob copied
+        // at v3[17] — so the count dword lands at byte offset 17, NOT at +0 or +16.
         sim::CommandPacket ready{};
-        ready.bytes[sim::kFOpcode] = 6;                  // opcode 6 (group-end/ready)
-        ready.bytes[sim::kFPayload] = advert.playerCount; // v9[0] = byte_63CC1D
+        ready.bytes[sim::kFOpcode] = sim::kSyncType;       // v3[0]  = 0x20 (type)
+        ready.bytes[sim::kFSync]   = 6;                    // v3[16] = flag 6 (ready)
+        ready.put32(sim::kFSync + 1, advert.playerCount);  // v4[0] = v45[0] = byte_63CC1D
         r.readyCmdId = q.EnqueuePacket(ready);
         r.readyCount = advert.playerCount;
     }

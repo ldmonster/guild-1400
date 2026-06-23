@@ -30,8 +30,8 @@ i32 FillSpanTexturedBlend(RasterState& rs, u16* dst, i32 u, i32 v,
         // dst = ((src>>1) & mask) + ((dst>>1) & mask)  (no inter-channel carry)
         u16 cur  = dst[i];
         dst[i] = (u16)((u16)((src >> 1) & p.blendMask) + (u16)((cur >> 1) & p.blendMask));
-        u += p.uStepFrac;
-        v += p.vStep;
+        u = WrapAddI32(u, p.uStepFrac);
+        v = WrapAddI32(v, p.vStep);
     }
     return u;
 }
@@ -50,8 +50,8 @@ i32 FillSpanTexturedBlendMasked(RasterState& rs, u16* dst, i32 u, i32 v,
             u16 cur = dst[i];
             dst[i] = (u16)((u16)((src >> 1) & p.blendMask) + (u16)((cur >> 1) & p.blendMask));
         }
-        u += p.uStepFrac;
-        v += p.vStep;
+        u = WrapAddI32(u, p.uStepFrac);
+        v = WrapAddI32(v, p.vStep);
     }
     return u;
 }
@@ -66,8 +66,8 @@ i32 FillSpanTexturedOr(RasterState& rs, u16* dst, i32 u, i32 v,
         u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
         u8  idx  = p.texBase[addr];
         dst[i] |= p.palBase[idx];                        // *(_WORD*)... |= v9
-        u += p.uStepFrac;
-        v += p.vStep;
+        u = WrapAddI32(u, p.uStepFrac);
+        v = WrapAddI32(v, p.vStep);
     }
     return u;
 }
@@ -83,8 +83,8 @@ i32 FillSpanTexturedOrMasked(RasterState& rs, u16* dst, i32 u, i32 v,
         u8  idx  = p.texBase[addr];
         if (idx != 0)                                    // colour key
             dst[i] |= p.palBase[idx];
-        u += p.uStepFrac;
-        v += p.vStep;
+        u = WrapAddI32(u, p.uStepFrac);
+        v = WrapAddI32(v, p.vStep);
     }
     return u;
 }

@@ -27,4 +27,14 @@ int GameTimeCompare(const GameTime* a, const GameTime* b);
 //   + (minuteB - minuteA). (The original ignores the seconds field.)
 int GameTimeDiffMinutes(const GameTime* a, const GameTime* b);
 
+// gilde.exe 0x5831f0 — VIBE_GameTime_Set
+//   (__usercall: eax=record@a1, dl=hour@a2, cl=second@a3, bl=minute@a4)
+// Sets the time-of-day fields of the record, leaving the day untouched:
+//   *(rec+10) = second (dword from cl), *(WORD*)(rec+4) = hour (the original
+//   composes the word as (second & 0xFF00) | hour, which is just `hour` since
+//   second is a byte), *(rec+6) = minute (dword from bl). Returns minute.
+// Day-rollover call site: VIBE_GameLogic_InitOrLoadSession 0x534659 —
+//   GameTime_Set(&local, 6, 0, 0) == "set 06:00:00" for the next-day start.
+int GameTimeSet(GameTime* rec, u8 hour, u8 second, u8 minute);
+
 } // namespace guild::sim

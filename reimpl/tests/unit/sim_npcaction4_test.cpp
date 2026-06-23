@@ -442,7 +442,7 @@ TEST(NpcAction4_Raid, State2_wait_allArrived_armsEntity29_3) {
     delete h;
 }
 
-TEST(NpcAction4_Raid, State3_combatResolve_detected_to_state5) {
+TEST(NpcAction4_Raid, State3_combatResolve_detected_to_stateMinus1) {
     Recorder rec; g_rec = &rec;
     NpcAction4Hooks H = MakeHooks(); SetNpcAction4Hooks(&H);
     rec.combatDetect = true;
@@ -455,7 +455,8 @@ TEST(NpcAction4_Raid, State3_combatResolve_detected_to_state5) {
     rec.add(100, 0, true, 5);
     NpcAction4_RaidStep(h);
     CHECK(LogHas("combatroll(raid)"));
-    CHECK_EQ(He_State(h), 5);
+    // 0x4cf456 / 0x4cf46f: Raid "caught" branch sets state -1 (Attack sets 5).
+    CHECK_EQ(He_State(h), -1);
     CHECK(LogHas("msg(1004,3502)"));
     delete h;
 }

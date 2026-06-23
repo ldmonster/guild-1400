@@ -127,11 +127,20 @@ DuelOutcome CutsceneDuel(DuelCombatant a, DuelCombatant b, CutsceneRng& rng,
         if (chooser) chooser(round, a, b, rng, chooserCtx);
         if (hooks.onRound) hooks.onRound(round, a.choice, b.choice, hooks.ctx);
 
-        // The original runs A then B (ProcessIntroChoice twice). The first call's
-        // operand order depends on the choice byte (v56 == 2/3 swaps), but the
-        // net effect is: each combatant performs its own chosen action. We run A
-        // against B, then B against A, honouring the not-over gate between them.
-        if (!state.over) {
+        // gilde.exe 0x4a5996..0x4a5a35: the ORDER of the two ProcessIntroChoice
+        // calls depends on B's choice byte (v51 = participant[B]+148):
+        //   if (v51 == 2 || v51 == 3)  -> ProcessIntroChoice(B,...) first, then A
+        //   else                       -> ProcessIntroChoice(A,...) first, then B
+        // This is RNG-order-significant: each Resolve* draws from `rng`, so the
+        // first actor's taunt/aim/shot draws must precede the second's. (Both
+        // calls happen unconditionally in the binary, but ProcessIntroChoice is
+        // itself a no-op when dword_6315C4 is already set @0x4a4ec5 — so gating
+        // the second call on !state.over is behaviour-identical.)
+        const bool bGoesFirst = (b.choice == DuelIntroChoice::kTaunt ||
+                                 b.choice == DuelIntroChoice::kAim);
+
+        auto actA = [&]() {
+            if (state.over) return;
             DuelShotResult ra = DuelProcessIntroChoice(state, /*isA*/true,
                                                        a.choice, a, b, b, rng);
             if (ra.hit) {
@@ -141,8 +150,9 @@ DuelOutcome CutsceneDuel(DuelCombatant a, DuelCombatant b, CutsceneRng& rng,
                     out.over = true;
                 }
             }
-        }
-        if (!state.over) {
+        };
+        auto actB = [&]() {
+            if (state.over) return;
             DuelShotResult rb = DuelProcessIntroChoice(state, /*isA*/false,
                                                        b.choice, b, a, a, rng);
             if (rb.hit) {
@@ -151,7 +161,10 @@ DuelOutcome CutsceneDuel(DuelCombatant a, DuelCombatant b, CutsceneRng& rng,
                     out.over = true;
                 }
             }
-        }
+        };
+
+        if (bGoesFirst) { actB(); actA(); }
+        else            { actA(); actB(); }
 
         ++round;
     } while (round < kDuelMaxRounds && !state.over);

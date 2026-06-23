@@ -1,5 +1,6 @@
 #include "world/city.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -29,46 +30,109 @@ i32 UtilParseInt(const char* s) {
     char sign = *s;
     if (*s == '+' || *s == '-')
         ++s;
-    i32 v = 0;
+    // Accumulate in u32: the original's `lea`/`imul`-based  v = (u8)*s + 10*v - 48
+    // wraps in 2's complement on overflow (e.g. an over-long digit run). Doing the
+    // arithmetic unsigned reproduces that bit-pattern EXACTLY while avoiding C++
+    // signed-overflow UB; the final reinterpretation back to i32 is identical to
+    // the binary's register value.
+    std::uint32_t v = 0;
     while (*s >= '0' && *s <= '9') {
         // v3 = (u8)*s + 10*v;  v = v3 - 48;  (exact wrapping arithmetic)
-        v = static_cast<unsigned char>(*s) + 10 * v;
-        v -= 48;
+        v = static_cast<unsigned char>(*s) + 10u * v;
+        v -= 48u;
         ++s;
     }
-    return (sign == '-') ? -v : v;
+    if (sign == '-')
+        v = static_cast<std::uint32_t>(0) - v;   // x86 `neg`, wraps for INT_MIN
+    return static_cast<i32>(v);
 }
 
 // gilde.exe 0x50704c — VIBE_City_ParseCsvFieldList.
-// Faithful behaviour: split on commas, ParseInt each token, write `maxFields`
-// dwords. If fewer commas than fields exist the loop still terminates after the
-// final NUL-terminated token (matching the v16/"last field" flag in the orig).
+// Faithful behaviour (verified 1:1 against the disasm, wave-16): the original
+// scans the input by tokens. It runs a comma-scan BEFORE each parse:
+//   * the pre-loop finds the end (a ',' or, on end-of-string, sets esi=0) of the
+//     FIRST token;
+//   * each iteration copies [start, end) into a 256-byte scratch (StrNCopyPad,
+//     which stops at the source NUL and zero-pads), ParseInt's it, stores the
+//     dword, then — if the "last field" flag v16 is already set — STOPS;
+//   * otherwise it advances past the ',' and scans the NEXT token. If THAT scan
+//     hits end-of-string, it restores `end` to the real end of that token and
+//     sets v16=1, so the NEXT iteration parses that final NUL-terminated token
+//     and then breaks.
+// Net effect: the final token (terminated by NUL rather than ',') is parsed
+// exactly once and the loop stops — there is NO extra trailing empty token. With
+// fewer commas than `maxFields`, the returned count == (#commas + 1) at most, and
+// the loop also stops when the written byte-offset reaches 4*maxFields.
+//
+// (Wave-16 fix: the previous reconstruction parsed one extra empty token, e.g.
+// "10,20"/maxFields=4 -> count 3 with out[2]==0; the binary returns count 2.)
 int CityParseCsvFieldList(const char* text, i32* out, int maxFields) {
     if (maxFields <= 0)
         return 0;
-    int count = 0;
-    const char* p = text;
-    bool last = false;
-    while (count < maxFields) {
-        const char* start = p;
-        while (*p && *p != ',')
+
+    // Scan a token starting at `p`: advance to the next ',' or the end. Mirrors
+    // the binary's scan loops (the `sub esi,esi` end sentinel == returning null).
+    // Returns the ',' position, or nullptr if end-of-string was reached.
+    auto scan = [](const char* p) -> const char* {
+        while (*p != ',') {
+            if (*p == '\0')
+                return nullptr;            // sub esi,esi  (end sentinel)
+            char c = *++p;
+            if (*p == ',')
+                break;
             ++p;
-        // copy [start,p) into a scratch buffer and ParseInt it
+            if (c == '\0')
+                return nullptr;            // sub esi,esi
+        }
+        return p;
+    };
+
+    const char* start = text;              // ecx — token start (never lost)
+    const char* end   = scan(text);        // esi — token end (',' or null)
+    int count = 0;                         // ebp
+    int byteOff = 0;                        // edi
+    const int limit = 4 * maxFields;        // var_18
+    // If the FIRST token has no comma the original's pre-scan yields esi==0 and
+    // the iteration parses that single token, then `lea ecx,[esi+1]` walks into a
+    // near-null pointer (only reachable with malformed comma-less input that the
+    // city loader never passes). We treat a comma-less first token as the final
+    // (and only) field — parse it once and stop — staying in-bounds. Real .ini
+    // data and every default string here is comma-delimited, so this never
+    // affects observable output.
+    bool lastField = (end == nullptr);     // v16
+
+    while (true) {
+        // Copy [start, end) — StrNCopyPad stops at the source NUL, so an `end`
+        // of nullptr (end-of-string) simply copies to the NUL and pads. We cap
+        // at the 256-byte scratch exactly like the original's fixed buffer.
         char scratch[256];
-        size_t n = static_cast<size_t>(p - start);
+        std::size_t n;
+        if (end == nullptr) {
+            n = std::strlen(start);
+        } else {
+            n = static_cast<std::size_t>(end - start);
+        }
         if (n >= sizeof(scratch))
             n = sizeof(scratch) - 1;
         std::memcpy(scratch, start, n);
         scratch[n] = '\0';
         out[count++] = UtilParseInt(scratch);
-        if (last)
+        byteOff += 4;
+
+        if (lastField)                      // if (v16) break;
             break;
-        if (*p == ',') {
-            ++p;
-        } else {
-            // ran out of input before maxFields: this was the final token.
-            last = true;
+
+        // Advance past the comma and scan the next token.
+        start = end + 1;                    // lea ecx,[esi+1]
+        end = scan(start);
+        if (end == nullptr) {
+            // End-of-string while scanning the next token: this token is the
+            // final one. Restore `end` to its real end and flag last-field.
+            end = start + std::strlen(start);
+            lastField = true;
         }
+        if (byteOff >= limit)               // wrote maxFields dwords
+            return count;
     }
     return count;
 }

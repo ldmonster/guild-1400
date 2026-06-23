@@ -88,13 +88,18 @@ struct BuildingTypeDef {
     u8  pad1[34];          // +0x001..+0x022
     u16 roomList[64];      // +0x023 (+35) room/object type ids, 0-terminated
     u8  pad163[384];       // +0x0A3 (+163)..+0x222 (gap to +547)
-    u8  outputProf;        // +0x223 (+547) output-product profession code
-    u8  pad548[5];         // +0x224 (+548)..+0x228
-    u8  inputFactor[2];    // +0x229 (+553) input-good factor [0..1]
-    u8  pad555[4];         // +0x22B (+555)..+0x22E
-    u8  inputProf;         // +0x22F (+559) input-product profession code
-    u8  pad560[3];         // +0x230 (+560)..+0x232
-    u8  outputFactor[2];   // +0x233 (+563) output/production factor [0..1]
+    // gilde.exe 0x58fe68 worth loop: the OUTPUT (production) profession array and
+    // its factor array are each 6 wide (the inner do-loop runs index 0..5 over
+    // both v45[547+o] and inputFactor[o]). The +559/+563 arrays are 2 wide (the
+    // input do-loop runs 0..1, and ComputeProductionRate @0x58f268 sweeps +563
+    // for i in 0..1). Names kept as-is for source stability, but inputFactor is
+    // the 6-wide PRODUCTION factor at +553 (a4 path in ComputeItemBaseValue) and
+    // outputFactor is the 2-wide INPUT factor at +563 (a3 path).
+    u8  outputProf[6];     // +0x223 (+547) output-product profession codes [0..5]
+    u8  inputFactor[6];    // +0x229 (+553) production-output factor [0..5]
+    u8  inputProf[2];      // +0x22F (+559) input-product profession codes [0..1]
+    u8  pad561[2];         // +0x231 (+561)..+0x232
+    u8  outputFactor[2];   // +0x233 (+563) input-good factor [0..1]
     u8  pad565[18];        // +0x235 (+565)..+0x246
     u8  security;          // +0x247 (+583) security level (== current upgrade lvl)
     u8  maxUpgradeLevel;   // +0x248 (+584) highest upgrade level for this type

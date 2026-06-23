@@ -138,3 +138,109 @@ TEST(CrtPrintf, SnprintfTruncation) {
     // Matches C99 snprintf: cap-1 chars written then NUL ("1234567").
     CHECK_EQ(std::string(buf), std::string("1234567"));
 }
+
+// ---------------------------------------------------------------------------
+// Wave-11 hardening edge cases (ASAN/UBSAN). These drive the bounds of the
+// Sink and the format-spec parser; the guard byte after each tiny buffer must
+// survive (ASAN red-zone catches any over-write).
+// ---------------------------------------------------------------------------
+
+// snprintf into a 1-byte buffer: only the NUL fits, full length is reported.
+TEST(CrtPrintf, CapOneOnlyNul) {
+    char buf[1] = {'\x7f'};
+    int n = ::guild::crt::Snprintf(buf, 1, "%s", "abcdef");
+    CHECK_EQ(n, 6);
+    CHECK_EQ(buf[0], '\0');
+}
+
+// snprintf with cap 0 must not touch the buffer at all but still count.
+TEST(CrtPrintf, CapZeroNoWrite) {
+    char buf[1] = {'\x55'};
+    int n = ::guild::crt::Snprintf(buf, 0, "%d", 42);
+    CHECK_EQ(n, 2);
+    CHECK_EQ(buf[0], '\x55'); // untouched
+}
+
+// %s of a string whose only NUL is at the very end of a tight buffer, copied
+// out via a too-small destination — exercises the truncation bound.
+TEST(CrtPrintf, StringTruncatedExactBoundary) {
+    char buf[4];
+    int n = ::guild::crt::Snprintf(buf, sizeof(buf), "%s", "wxyz");
+    CHECK_EQ(n, 4);
+    CHECK_EQ(std::string(buf), std::string("wxy")); // cap-1 then NUL
+}
+
+// %s with precision over a NUL-less character array: precision bounds the read
+// so no over-read past the array (ASAN would flag an over-read otherwise).
+TEST(CrtPrintf, StringPrecisionNulless) {
+    char src[4] = {'A', 'B', 'C', 'D'}; // deliberately NOT NUL-terminated
+    char out[16];
+    int n = ::guild::crt::Snprintf(out, sizeof(out), "%.4s", src);
+    CHECK_EQ(n, 4);
+    CHECK_EQ(std::string(out), std::string("ABCD"));
+}
+
+// Extreme width: large but bounded by the sink. Compare against the C oracle
+// for a width that still fits in a 256-byte buffer.
+TEST(CrtPrintf, WidthExtremeBounded) {
+    char ours[256], gold[256];
+    int rn = ::guild::crt::Sprintf(ours, "%200d", 7);
+    int gn = std::snprintf(gold, sizeof(gold), "%200d", 7);
+    CHECK_EQ(std::string(ours), std::string(gold));
+    CHECK_EQ(rn, gn);
+}
+
+// Huge precision on a numeric: the zero-pad goes through the sink, not a fixed
+// body buffer. Use a 4096-byte buffer and compare to the oracle.
+TEST(CrtPrintf, PrecisionExtremeNumeric) {
+    char ours[4096], gold[4096];
+    int rn = ::guild::crt::Snprintf(ours, sizeof(ours), "%.300d", 5);
+    int gn = std::snprintf(gold, sizeof(gold), "%.300d", 5);
+    CHECK_EQ(std::string(ours), std::string(gold));
+    CHECK_EQ(rn, gn);
+}
+
+// Huge precision on %p — previously widened a fixed 80-byte stack buffer and
+// overflowed; now emitted as zero-pad. Just exercise it without over-running.
+// (Output format of %p is platform-specific, so we only assert the length is
+// at least the requested precision and that nothing crashes under ASAN.)
+TEST(CrtPrintf, PointerHugePrecisionNoOverflow) {
+    char buf[512];
+    int dummy = 0;
+    int n = ::guild::crt::Snprintf(buf, sizeof(buf), "%.200p", (void*)&dummy);
+    CHECK(n >= 200);
+}
+
+// %p via %.*p with a large runtime precision — the previous OOB trigger.
+TEST(CrtPrintf, PointerStarHugePrecision) {
+    char buf[1024];
+    int dummy = 0;
+    int n = ::guild::crt::Snprintf(buf, sizeof(buf), "%.*p", 400, (void*)&dummy);
+    CHECK(n >= 400);
+}
+
+// Many arguments interleaved — keeps the va_list walk honest.
+TEST(CrtPrintf, ManyArgs) {
+    char ours[256], gold[256];
+    int rn = ::guild::crt::Sprintf(ours, "%d/%s/%x/%c/%u/%d/%s/%o",
+                                   1, "two", 0x33u, '4', 5u, 6, "seven", 8u);
+    int gn = std::snprintf(gold, sizeof(gold), "%d/%s/%x/%c/%u/%d/%s/%o",
+                           1, "two", 0x33u, '4', 5u, 6, "seven", 8u);
+    CHECK_EQ(std::string(ours), std::string(gold));
+    CHECK_EQ(rn, gn);
+}
+
+// Trailing lone '%' at end of format: must stop cleanly (no read past NUL).
+TEST(CrtPrintf, TrailingPercent) {
+    char buf[16];
+    int n = ::guild::crt::Sprintf(buf, "ab%");
+    CHECK_EQ(std::string(buf), std::string("ab"));
+    CHECK_EQ(n, 2);
+}
+
+// INT_MIN through %d (the safe-negate path).
+TEST(CrtPrintf, IntMinDecimal) {
+    ORACLE("%d", -2147483647 - 1);
+    ORACLE("%i", -2147483647 - 1);
+    ORACLE("%+d", -2147483647 - 1);
+}

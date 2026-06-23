@@ -143,11 +143,22 @@ int DeltaWriter::AppendCopiedField(u8 width, u8 count, u16 fieldOffset, const vo
 void DeltaWriter::ApplyDelta(const u8* payload, u8 fieldCount, void* entity) {
     u8* base = static_cast<u8*>(entity);
     const u8* p = payload;
+    // HARDENING (wave-11): the payload region the encoder fills is bounded by the
+    // 119-byte cursor guard (kMaxPayload) in Append{Delta,Raw,Copied}Field; every
+    // caller passes either DeltaWriter::payload() (119 bytes) or the packet payload
+    // window (a1+0x11, also 119 bytes to the 153-byte record end). A malformed
+    // fieldCount/record can otherwise drive `p`/`vals` past that window (OOB read).
+    // Valid payloads stay within the guard, so this is byte-identical on valid input.
+    const u8* end = payload + kMaxPayload;
     for (u8 f = 0; f < fieldCount; ++f) {
+        if (p + 4 > end)
+            break;
         u8 width  = p[0];
         u8 count  = p[1];
         u16 off   = static_cast<u16>(p[2] | (p[3] << 8));
         const u8* vals = p + 4;
+        if (vals + static_cast<u32>(width) * count > end)
+            break;
         u8* dst = base + off;
         if (width == 1) {
             for (u32 i = 0; i < count; ++i)

@@ -38,12 +38,15 @@ SineTables InitSineTables(u16 n) {
     t.aux1.assign(n, 0.0f);       // dword_62D428 (zeroed)
     t.aux2.assign(n, 0.0f);       // dword_62D42C (zeroed)
 
-    // v18 = 2*pi / N; v19 = 0; for k in [0,N): table[k] = sin(v19); v19 += step.
-    float step = kTwoPi / static_cast<float>(n);
-    float phase = 0.0f;
-    for (u16 k = 0; k < n; ++k) {
-        t.sine[k] = std::sin(phase);
-        phase += step;
+    // 0x424e08: v22 = flt_611588 / (double)(u16)a1 — the division is done in DOUBLE
+    // (flt_611588 promoted, n widened to double), then the quotient is rounded to the
+    // float `v22`. v23 (phase, float) accumulates +v22 each step; sin() takes the
+    // float phase promoted to double. Match that exactly: double divide -> float step.
+    float step = static_cast<float>(static_cast<double>(kTwoPi) / static_cast<double>(n));
+    float phase = 0.0f;                                 // v23 = 0.0
+    for (u16 k = 0; k < n; ++k) {                       // while ( v15 < (u16)a1 )
+        t.sine[k] = static_cast<float>(std::sin(static_cast<double>(phase)));
+        phase = phase + step;                          // v23 = v23 + v22
     }
     return t;
 }

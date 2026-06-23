@@ -162,19 +162,22 @@ bool RunUntilConfirm(std::int32_t form) {
 } // namespace
 
 // gilde.exe 0x5126cc — VIBE_Location_RobberCampStandard.
-//   if(!a1) return 0;
-//   find existing handler(98,target); if found -> msg 5790, return 0;
-//   if FirstOccupiedSlot >= 768 -> msg(dword_8C90C8), return 0;
-//   else if(!IsAnimalTargetBusy) -> msg 5782, return 0;
+//   if(!a1) return 0;                                            (0x5126e2)
+//   find existing handler(1,0,98); if found -> msg 5790, return 0;(0x5126ff/0x512712)
+//   if FirstOccupiedSlot >= 768 -> msg(dword_8C90C8), return 0;  (0x512740)
+//   else if(!IsAnimalTargetBusy) -> msg 5782, return 0;          (0x512748)
 //   else { form loop; on confirm: build batch{code 98}, collect first active
 //          selection id, QueueRequestSlotReset28, ClearAll; } return v33;
 DialogOutcome RobberCampStandard(std::int32_t /*target*/, bool hasTarget,
+                                 bool requestExists, bool targetBusy,
                                  const SlotTableView& table,
                                  const SelectionTable& sel) {
     DialogOutcome o;
     o.action = static_cast<int>(DialogAction::RobberCampStandard);
     if (!hasTarget) return o;                        // if(!a1) return 0
-    if (SlotTableFull(table)) { H_showMessage(0); return o; }  // v5>=768 abort
+    if (requestExists) { H_showMessage(5790); return o; }       // already-issued msg
+    if (SlotTableFull(table)) { H_showMessage(0); return o; }   // v5>=768 abort (dword_8C90C8)
+    if (!targetBusy) { H_showMessage(5782); return o; }         // !IsAnimalTargetBusy
     o.opened = true;
     std::int32_t form = H_openForm("LOCATIONS\\RAEUBERLAGER\\STANDARD");
     if (RunUntilConfirm(form)) {
@@ -197,9 +200,14 @@ DialogOutcome RobberCampStandard(std::int32_t /*target*/, bool hasTarget,
 //     form loop; on confirm: collect ALL occupied ids (code 117); if any ->
 //       QueueRequestSlotReset28 + RequestBuildOp90 + favor voice;
 //     else msg(dword_8C90C8); }
-DialogOutcome RobberCampRaid(const SlotTableView& table) {
+// When the outer (a2 && city != -1) guard fails the function returns having done
+// nothing (no form opened) — modeled by `hasTarget`.
+DialogOutcome RobberCampRaid(bool hasTarget, bool targetBusy,
+                             const SlotTableView& table) {
     DialogOutcome o;
     o.action = static_cast<int>(DialogAction::RobberCampRaid);
+    if (!hasTarget) return o;                         // outer guard (0x512ec3)
+    if (!targetBusy) { H_showMessage(5791); return o; }  // !IsAnimalTargetBusy (0x512ed7)
     o.opened = true;
     std::int32_t form = H_openForm("locations\\raeuberlager\\raubzug");
     if (RunUntilConfirm(form)) {
@@ -261,8 +269,12 @@ DialogOutcome GuardArrestDialog(const SlotTableView& table) {
         std::vector<std::int32_t> ids;
         o.count = CollectOccupiedIds(table, 4, ids);   // v16<4 cap
         if (o.count) {
-            while (ids.size() < 4) ids.push_back(-1);   // pad to 4 (v26[++v18]=-1)
-            H_queueBatch(o.action, o.count, ids);
+            // gilde.exe 0x5264ac-0x5264c4: when fewer than 4 collected, the count
+            // passed to QueueRequestSlotReset28 is forced to -1 (mov ecx,0FFFFFFFFh)
+            // before padding the array out to 4 with -1. Exactly-4 keeps count 4.
+            int queueCount = (o.count < 4) ? -1 : o.count;  // v14 = -1 when v14<4
+            while (ids.size() < 4) ids.push_back(-1);        // pad to 4 (v26[++v18]=-1)
+            H_queueBatch(o.action, queueCount, ids);
             H_playFavorVoice();
             o.committed = true;
         }

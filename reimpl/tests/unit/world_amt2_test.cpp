@@ -65,7 +65,9 @@ TEST(WorldAmt2Prosperity, CommitSequenceAndDeltas) {
     // Commit order: WealthField, ProsperityDelta, AiDecayDelta.
     CHECK_EQ(log.size(), static_cast<size_t>(3));
     CHECK(log[0].which == ProsperityCommit::WealthField);
-    CHECK(feq(log[0].val, 500.0f));
+    // gilde.exe 0x57b84c: AppendDeltaField(4,1,&v15,+476) commits the ORIGINAL ownerWealth
+    // (v15=1000), not the average (v25=500). v15 is never reassigned to the average.
+    CHECK(feq(log[0].val, 1000.0f));
     CHECK_EQ(log[0].obj, 77);
     CHECK(log[1].which == ProsperityCommit::ProsperityDelta);
     CHECK(feq(log[1].val, r.prosperityDelta));

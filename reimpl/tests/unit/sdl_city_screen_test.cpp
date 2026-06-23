@@ -5,6 +5,7 @@
 #include "shim_impl/memory_graphics.h"
 #include "shim/IPlatform.h"
 #include <vector>
+#include <string>
 #include <cstdint>
 
 using namespace guild;
@@ -142,6 +143,53 @@ TEST(SdlCityScreenUnit, EmptyListHandled) {
     play::CityScreenResult r = play::RunCityScreen(dev, plat, cfg);
     CHECK(r.back);
     CHECK(!r.confirmed);
+}
+
+// ---- HARDENING (wave-12): boundary city counts + overlong names ----
+
+// A single city is the 1-element edge of the list / action-row math (n-1==0).
+TEST(SdlCityScreenUnit, SingleCityConfirms) {
+    shim::MemoryGraphicsDevice dev; CHECK(dev.init(800, 600, 32, false));
+    SeqPlatform plat;
+    const int n = 1;
+    plat.steps = { OnCityRow(0, false), OnCityRow(0, true), OnCityRow(0, false),
+                   OnConfirm(n, false), OnConfirm(n, true), OnConfirm(n, false) };
+    play::CityScreenConfig cfg; cfg.fbW = 800; cfg.fbH = 600; cfg.maxFrames = 30;
+    cfg.cities = { {"AUGSBURG", "Cities/AUGSBURG.cty"} };
+    play::CityScreenResult r = play::RunCityScreen(dev, plat, cfg);
+    CHECK(r.confirmed);
+    CHECK_EQ(r.cityIndex, 0);
+}
+
+// Many cities (far more rows than fit the panel) must render + hit-test without
+// indexing past cfg.cities; rows beyond the framebuffer are clipped by DrawGlyph.
+TEST(SdlCityScreenUnit, ManyCitiesNoOob) {
+    shim::MemoryGraphicsDevice dev; CHECK(dev.init(400, 300, 32, false));
+    SeqPlatform plat;
+    SeqPlatform::Step esc; esc.key = 0x1B;
+    plat.steps = { esc };
+    play::CityScreenConfig cfg; cfg.fbW = 400; cfg.fbH = 300; cfg.maxFrames = 4;
+    for (int i = 0; i < 64; ++i)
+        cfg.cities.push_back({ "CITY_NUMBER_" + std::to_string(i),
+                               "Cities/C" + std::to_string(i) + ".cty" });
+    play::CityScreenResult r = play::RunCityScreen(dev, plat, cfg);
+    CHECK(r.back);
+    CHECK(r.framesPresented > 0);
+}
+
+// Overlong city names on a tiny framebuffer: the row label must not write past
+// the scratch (right-edge band). ASAN guards any overrun.
+TEST(SdlCityScreenUnit, OverlongNameTinyBufferNoOob) {
+    shim::MemoryGraphicsDevice dev; CHECK(dev.init(64, 48, 32, false));
+    SeqPlatform plat;
+    SeqPlatform::Step esc; esc.key = 0x1B;
+    plat.steps = { esc };
+    play::CityScreenConfig cfg; cfg.fbW = 64; cfg.fbH = 48; cfg.maxFrames = 4;
+    cfg.cities = { { std::string(300, 'Z'), "Cities/Z.cty" },
+                   { "A REASONABLY LONG CITY NAME THAT OVERRUNS", "Cities/B.cty" } };
+    play::CityScreenResult r = play::RunCityScreen(dev, plat, cfg);
+    CHECK(r.back);
+    CHECK(r.framesPresented > 0);
 }
 
 TEST(SdlCityScreenUnit, Deterministic) {

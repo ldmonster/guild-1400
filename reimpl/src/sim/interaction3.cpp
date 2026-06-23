@@ -159,8 +159,9 @@ int ComputeMoveTargetSocialAlt(float* outX, float* outY, int record, char relFla
 }
 
 // 0x46eb10 — VIBE_Interaction_EvalRestSlotFree (action 26)
-// Two 4-slot column scans (columns 6 and 14 in the original — i[48]/+13 then
-// v9[112]/+29). Each scan walks up to 4 entries (stride 8 dwords); a scan that hits
+// Two 4-slot column scans (columns 6 and 14 in the original — i[48]/(float)i+13
+// then v9[112]/(float)v9+29 over byte_B57210[148*method], cursor i += 8 BYTES per
+// step). Each scan walks up to 4 entries (8-byte stride); a scan that hits
 // an "enabled" byte or a non-negative score before its 4th step stops the success
 // path. The action succeeds (copies both scratch vectors, returns the method result)
 // only when BOTH scans run to completion.

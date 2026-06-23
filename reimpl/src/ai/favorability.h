@@ -45,7 +45,8 @@ struct FavPersonFields {
     int  workstationBuildingPtr = 0;  // dword_12CEA80[134*id]  (0 => no building)
     u8   officeId = 0;                // byte_12CEA76[536*id]
     u8   titleId = 0;                 // byte_12CEA79[536*id]  (30..33 special)
-    int  relationByteSelf = 0;        // (dword_123D6CD[192*self]+other)>>24 — signed
+    int  relationByteSelf = 0;        // raw dword *(int*)(&dword_123D6CD[192*self]+other);
+                                      // the scorer applies (>>24)+127 itself (0x59444a)
     int  inventoryBase = 0;           // &word_12CE910[268*id] base for slot probes
     int  factionHigh = 0;             // dword_12CE919[134*id]>>24
     int  guildBitsLow = 0;            // dword_12CE93C[134*id]  (0x1C000 / 0x1800000 bits)

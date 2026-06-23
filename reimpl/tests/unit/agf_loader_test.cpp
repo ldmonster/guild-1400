@@ -171,6 +171,97 @@ TEST(AgfLoader, BoundingExtents) {
     CHECK(b.radius > 11.0f);   // sqrt(9+36+81)=~11.22
 }
 
+// ===========================================================================
+// W11 hardening: malformed / truncated / oversized AGF inputs. Each must fail
+// safe (return false or parse a clamped result) with no over-read. The token
+// parser streams every field, so a truncated record aborts via the latch; these
+// tests pin that behaviour under ASAN+UBSAN.
+// ===========================================================================
+
+// ---- 0-byte / 1-byte buffers reject cleanly --------------------------------
+TEST(AgfLoader, RejectsEmptyAndOneByte) {
+    BgfModel m;
+    const u8 z = 0;
+    CHECK(!LoadAgfModel(&z, 0, m));
+    CHECK(!LoadAgfModel(&z, 1, m));
+    CHECK(!LoadAgfModel(nullptr, 0, m));
+}
+
+// ---- header-only (magic + version, no body) parses to an empty model -------
+TEST(AgfLoader, HeaderOnlyEmptyModel) {
+    Builder w;
+    w.magic();
+    w.byte(0x2e); w.u32v(0x100u);   // version marker + dword
+    w.byte(0x2b);                   // '+' end stream immediately
+    BgfModel m;
+    // No geometry tokens -> a valid (empty) parse with zero counts, no OOB.
+    bool ok = LoadAgfModel(w.b.data(), w.b.size(), m);
+    if (ok) {
+        CHECK_EQ((int)m.vertexCount, 0);
+        CHECK_EQ((int)m.polyCount, 0);
+    }
+}
+
+// ---- truncated mid-vertex (alloc says N points, bytes stop short) ----------
+TEST(AgfLoader, TruncatedMidPointBlock) {
+    Builder w;
+    w.magic();
+    w.byte(0x2e); w.u32v(0x100u);
+    w.byte(0x14);                   // T14
+      w.byte(0x17);                 // T17
+        w.byte(0x19); w.u32v(8);    // alloc 8 points
+        w.byte(0x1b);               // read 8 points (24 bytes each = 192 needed)
+          // Provide only 1.5 points worth of float bytes, then EOF.
+          w.f32v(1.0f); w.f32v(2.0f); w.f32v(3.0f);
+          w.f32v(4.0f);
+    // (no '+'; stream just ends mid-record)
+    BgfModel m;
+    // The streaming reader latches a short read -> LoadAgfModel returns false.
+    CHECK(!LoadAgfModel(w.b.data(), w.b.size(), m));
+}
+
+// ---- oversized point-block count: declared huge but no bytes -> reject -----
+TEST(AgfLoader, OversizedPointCount) {
+    Builder w;
+    w.magic();
+    w.byte(0x2e); w.u32v(0x100u);
+    w.byte(0x14);
+      w.byte(0x17);
+        w.byte(0x19); w.u32v(1000000u);  // claim a million points
+        w.byte(0x1b);                    // read them: stream exhausts immediately
+    BgfModel m;
+    CHECK(!LoadAgfModel(w.b.data(), w.b.size(), m));  // no over-read, no OOM
+}
+
+// ---- NUL-less material name running to EOF -> reject, no over-read ----------
+TEST(AgfLoader, UnterminatedMaterialName) {
+    Builder w;
+    w.magic();
+    w.byte(0x2e); w.u32v(0x100u);
+    w.byte(0x03);                  // T3 materials
+      w.byte(0x04); w.u32v(1);    // alloc 1 material
+      w.byte(0x05);               // enter one material
+        w.byte(0x07);             // name field...
+          // raw name bytes with NO terminating NUL, then the buffer ends.
+          w.b.push_back('A'); w.b.push_back('B'); w.b.push_back('C');
+    BgfModel m;
+    CHECK(!LoadAgfModel(w.b.data(), w.b.size(), m));  // ReadString hits EOF
+}
+
+// ---- polygon vtx index past the vertex array: ComputeVertexNormals safe ----
+TEST(AgfLoader, OutOfRangePolyIndexNormalsSafe) {
+    // 3 verts but a poly references index 50: normals must skip it, not OOB.
+    auto buf = BuildMinimal(3, 1, 1);
+    BgfModel m;
+    CHECK(LoadAgfModel(buf.data(), buf.size(), m));
+    if (!m.polygons.empty()) {
+        m.polygons[0].vtx[2] = 50;          // corrupt an index post-load
+        ComputeVertexNormals(m);            // ASAN: must not read out of bounds
+        ComputeBoundingExtents(m);
+        CHECK(true);
+    }
+}
+
 TEST(AgfLoader, VertexNormalsFinite) {
     auto buf = BuildMinimal(4, 2, 1);
     BgfModel m;

@@ -75,4 +75,46 @@ i32 AppendMirroredPolys(const Polygon* polys, i32 polyCount,
                         const u32* texSortId, u32 mirrorViewTexId,
                         const bool* anyVertexNear, DrawList* out);
 
+// =============================================================================
+// THE CLEAN MIRROR-PASS ENTRY (the CityView3D / BeginUniverseFrame handoff)
+// =============================================================================
+// In the original, the reflection pass is the LAST geometry stage of
+// render::BeginUniverseFrame @0x5b3900, emitted right after the main scene walk,
+// the particle systems and the sky flares, just before the depth-bound fixups:
+//
+//   /*0x5b3af0*/ if ( (byte_14080EC[0] & 0x40) != 0   // mirror feature enabled
+//                  && dword_649D6C                     // a reflection node was prepared
+//                  && dword_1408A74 && dword_1408A78   // mirror plane params present
+//                  && (byte_1408A98 & 1) != 0 )        // mirror runtime-active bit
+//       VIBE_SceneGraph_WalkAndInvoke(off_649D64, 0,
+//           /*per-node cb=*/VIBE_Mirror_BuildMirroredGeometry, frame, &dword_1408A70);
+//
+// i.e. it re-walks the scene graph and invokes BuildMirroredGeometry @0x5F637C
+// (-> ClipPolygonToPlanes @0x5F6148 -> AppendMirroredPolys above) on every node,
+// appending each node's reflected polygons into the SAME global draw list the
+// main pass filled, so the reflection is rasterized together with the scene.
+//
+// `dword_649D6C` is set non-zero by VIBE_Mirror_PrepareReflectionNode @0x5F676C
+// (reached from the scene walk) once a reflective surface has been bound and its
+// clip planes built (VIBE_Mirror_CreateClippingPlanes @0x5F5D08 ->
+// VIBE_Mirror_CreateOutline @0x5F58FC -> BuildSilhouettePoints above).
+//
+// MirrorPassGate captures the exact 4-term enable predicate so the bind site
+// (play::CityView3D, which the orchestrator owns) can gate the pass identically.
+struct MirrorPassGate {
+    bool  featureEnabled;     // byte_14080EC[0] & 0x40
+    bool  reflectionPrepared; // dword_649D6C != 0
+    bool  planeParamA;        // dword_1408A74 != 0
+    bool  planeParamB;        // dword_1408A78 != 0
+    bool  runtimeActive;      // byte_1408A98 & 1
+};
+
+// gilde.exe 0x5b3af0 (predicate) — true when the mirror reflection pass should
+// run this frame. The caller then walks the scene graph invoking the per-node
+// AppendMirroredPolys path. Pure (no side effects) so it is trivially testable.
+inline bool ShouldRenderMirrorPass(const MirrorPassGate& g) {
+    return g.featureEnabled && g.reflectionPrepared && g.planeParamA
+        && g.planeParamB && g.runtimeActive;
+}
+
 } // namespace guild::render

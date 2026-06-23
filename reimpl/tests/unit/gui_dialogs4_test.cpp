@@ -9,9 +9,33 @@
 
 #include <cstdint>
 #include <cstring>
+#include <sys/mman.h>
 
 using namespace guild;
 using namespace guild::gui;
+
+namespace {
+// Some widget fields are 32-bit pointer slots (e.g. +44 group link, group +24
+// child-id list) that the module truncates to u32 and re-dereferences. On a 64-bit
+// host those must live in the low 4 GiB so the truncated pointer round-trips. Map a
+// page with MAP_32BIT and bump-allocate test records into it.
+void* Low32Alloc(std::size_t n) {
+    static unsigned char* base = nullptr;
+    static std::size_t used = 0;
+    static std::size_t cap = 0;
+    if (!base || used + n > cap) {
+        cap = 1u << 20;
+        base = static_cast<unsigned char*>(
+            mmap(nullptr, cap, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0));
+        used = 0;
+    }
+    void* p = base + used;
+    used += (n + 15) & ~std::size_t(15);
+    std::memset(p, 0, n);
+    return p;
+}
+} // namespace
 
 // Address a heap-backed "data record" the way the original treats the focused
 // widget data pointer (an absolute 32-bit handle). On 64-bit hosts we allocate
@@ -136,6 +160,46 @@ TEST(GuiDialogs4Unit, DrawScrollBarGlyphByState) {
     SetGuiDialogs4Hooks(nullptr);
 }
 
+// ---- Widget_DrawScrollBar track segment count (0x412361 loop) ----
+// The original loops i = 0 .. floor(trackLen/step) INCLUSIVE: the condition is
+// (double)i < (double)(trackLen/step) + 0.5, i.e. one more iteration than the
+// integer quotient.  We count the frameBase+2 (segment) animBasic calls.
+namespace {
+int g_segCount = 0;
+int CountSegAnimBasic(int, int, int, int, int frame) {
+    if (frame == 2) ++g_segCount;   // frameBase==0 here (widget +40 unset)
+    return 0;
+}
+unsigned char g_sbRec[4][16];  // one buffer per `which` (0..3) so reads don't alias
+std::uintptr_t SegCoordTransform(int, unsigned which) {
+    unsigned char* rec = g_sbRec[which & 3];
+    std::memset(rec, 0, 16);
+    // step (+6) = 10 for the track-piece record (which==2); 0 for the caps.
+    if (which == 2) *reinterpret_cast<unsigned short*>(rec + 6) = 10;
+    return reinterpret_cast<std::uintptr_t>(rec);
+}
+} // namespace
+
+TEST(GuiDialogs4Unit, DrawScrollBarTrackSegmentCountInclusive) {
+    ResetGuiDialogs4();
+    GuiDialogs4Hooks h = *GuiDialogs4Hooks_Default();
+    // animApply is the final call (glyph); animBasic does the segments.
+    static int s_animBasic = 0; (void)s_animBasic;
+    h.animBasic = &CountSegAnimBasic;
+    h.coordTransform = &SegCoordTransform;
+    SetGuiDialogs4Hooks(&h);
+
+    // widget +18 high word = track length 35; step = 10 -> 35/10 = 3, inclusive => 4.
+    g_widgets[14] = Widget{};
+    g_widgets[14].radioFlag() = 0;
+    g_widgets[14].at<i32>(18) = 35 << 16;   // *(v2+18)>>16 == 35 (caps width = 0)
+    g_segCount = 0;
+    g_focusWidget = 0;
+    Widget_DrawScrollBar(14, 0);
+    CHECK_EQ(g_segCount, 4);                 // floor(35/10)+1 == 4 (binary: 0x412361)
+    SetGuiDialogs4Hooks(nullptr);
+}
+
 // ---- Widget_DrawCheckbox composite state byte ----
 namespace {
 int g_cbState = -1;
@@ -252,6 +316,71 @@ TEST(GuiDialogs4Unit, HandleKeyInputBackspaceTrimsBuffer) {
     CHECK_EQ((int)g_pendingKey, 0);
 }
 
+// ---- Widget_HandleKeyInput: enter (0x1C) clears focus + zeroes backing slot ----
+TEST(GuiDialogs4Unit, HandleKeyInputEnterClearsFocus) {
+    ResetGuiDialogs4();
+    static unsigned char rec[400];
+    std::memset(rec, 0, sizeof(rec));
+    *reinterpret_cast<i32*>(rec + 304) = 22;  // backing slot 22
+    g_widgets[22] = Widget{};
+    g_widgets[22].at<i32>(40) = 1;            // highlighted
+    g_focusWidget = HandleOf(rec);
+    g_focusFlag = 1;
+    g_pendingKey = kKeyEnter;
+    Widget_HandleKeyInput();
+    CHECK_EQ((unsigned long long)g_focusWidget, 0ull); // focus cleared
+    CHECK_EQ(g_focusFlag, 0);
+    CHECK_EQ(g_widgets[22].at<i32>(40), 0);   // backing slot un-highlighted
+}
+
+// ---- Widget_HandleKeyInput: tab (0x0F) forward group navigation ----
+// Two type-'A' editable children in a group; tab from index 0 transfers focus to
+// the next editable child (index 1) and toggles the +40 highlight on the backing
+// slots.  Reconstructed group-walk path (0x42056e..).
+TEST(GuiDialogs4Unit, HandleKeyInputTabNavigatesGroupForward) {
+    ResetGuiDialogs4();
+    // child widget slots 30 (focused), 31 (next), each backs a data record.
+    static unsigned char recA[400], recB[400];
+    std::memset(recA, 0, sizeof(recA));
+    std::memset(recB, 0, sizeof(recB));
+    *reinterpret_cast<i32*>(recA + 304) = 30;   // recA backed by slot 30
+    *reinterpret_cast<i32*>(recB + 304) = 31;   // recB backed by slot 31
+    recA[38] = 0; recB[38] = 0;
+
+    // group child-id list: [30, 31], count 2 (word at group+28 = high word of +26 dword).
+    // group/childIds are 32-bit pointer slots in widget+44 / group+24 -> low-32 memory.
+    i32* childIds = static_cast<i32*>(Low32Alloc(2 * sizeof(i32)));
+    childIds[0] = 30; childIds[1] = 31;
+    unsigned char* group = static_cast<unsigned char*>(Low32Alloc(64));
+    *reinterpret_cast<i32*>(group + 24) = static_cast<i32>(reinterpret_cast<std::intptr_t>(childIds));
+    // Count is read as *(int*)(group+26) >> 16, i.e. the WORD at group+28 (the +24
+    // id-list pointer occupies +24..+27).  Write the count word there.
+    *reinterpret_cast<i16*>(group + 28) = 2;
+
+    // Both backing slots are type 'A', not "destroyed" (+52 == 0), and point at the
+    // owning group via +44.  recA's slot also points at the group.
+    g_widgets[30] = Widget{}; g_widgets[31] = Widget{};
+    g_widgets[30].type() = kTypeAnim; g_widgets[31].type() = kTypeAnim;
+    g_widgets[30].at<i32>(44) = static_cast<i32>(reinterpret_cast<std::intptr_t>(group));
+    g_widgets[31].at<i32>(44) = static_cast<i32>(reinterpret_cast<std::intptr_t>(group));
+    SetWidgetData(30, recA);                    // child 30 -> recA (data ptr +12)
+    SetWidgetData(31, recB);                    // child 31 -> recB
+
+    g_focusWidget = HandleOf(recA);
+    g_widgets[30].at<i32>(40) = 1;              // recA currently highlighted
+    g_focusIndex = 0;
+    g_shiftHeldL = g_shiftHeldR = 0;            // forward
+    g_pendingKey = kKeyTab;
+
+    Widget_HandleKeyInput();
+
+    CHECK_EQ(g_focusWidget, HandleOf(recB));    // focus moved to recB
+    CHECK_EQ(g_focusIndex, 1);                  // dword_75BEBC = found index (1)
+    CHECK_EQ(g_widgets[30].at<i32>(40), 0);     // old highlight cleared
+    CHECK_EQ(g_widgets[31].at<i32>(40), 1);     // new highlight set
+    CHECK_EQ((int)g_pendingKey, 0);
+}
+
 // ---- Widget_SetFocus: focus a record, set highlight, no-op when already focused ----
 TEST(GuiDialogs4Unit, SetFocusHighlightsAndIsIdempotent) {
     ResetGuiDialogs4();
@@ -273,4 +402,78 @@ TEST(GuiDialogs4Unit, SetFocusHighlightsAndIsIdempotent) {
     std::uintptr_t before = g_focusWidget;
     Widget_SetFocus(15);
     CHECK_EQ(g_focusWidget, before);
+}
+
+// ---- Widget_ProcessMouseDrag: mouse-down focus GRAB (0x420eb2 block) ----
+// Cursor is over a type-'A' widget owning a data record; the left button is held;
+// no current focus; focusFlag clear.  Focus transfers to that record, the backing
+// slot is highlighted, and the focus-value caches are seeded.
+TEST(GuiDialogs4Unit, ProcessMouseDragFocusGrab) {
+    ResetGuiDialogs4();
+    // The hit widget (slot 40) is type 'A' and owns data record `rec`; rec's owning
+    // slot (+304) is the same slot 40, so `g_hitTestSlot4 == *(rec+304)` holds.
+    static unsigned char rec[400];
+    std::memset(rec, 0, sizeof(rec));
+    *reinterpret_cast<i32*>(rec + 304) = 40;   // owning slot
+    *reinterpret_cast<i32*>(rec + 296) = 0x55; // value cached into g_focusValue
+    rec[38] = 0;                               // no edit/group special bits
+    *reinterpret_cast<i32*>(rec + 44) = 0;     // (group accessed via backing slot +44)
+
+    g_widgets[40] = Widget{};
+    g_widgets[40].type() = kTypeAnim;          // 'A'
+    g_widgets[40].at<i32>(44) = 0;             // no owning group
+    SetWidgetData(40, rec);                    // slot 40 -> rec (+12 data ptr)
+
+    g_hitTestSlot4 = 40;                        // dword_62D22C
+    g_mouseDown = 1;                            // dword_672220
+    g_focusWidget = 0;                          // no current focus
+    g_focusFlag = 0;                            // dword_62D348
+    g_d4_dragOriginX = 100;
+    g_pendingMouseX = 30 << 16;                 // v3 = 30
+
+    Widget_ProcessMouseDrag();
+
+    CHECK_EQ(g_focusWidget, HandleOf(rec));     // focus grabbed
+    CHECK_EQ(g_widgets[40].at<i32>(40), 1);     // backing slot highlighted
+    CHECK_EQ(g_focusValue, 0x55);               // dword_75BECC = *(rec+296)
+    CHECK_EQ(g_focusValueAcc, 100 - 30);        // dword_75BED4 = dword_62D0C8 - v3
+    CHECK_EQ(g_focusValuePrev, 0);              // dword_75BED0 = 0
+    // mouse still down + focus now set => focusFlag latches to 1 (0x4210bc).
+    CHECK_EQ(g_focusFlag, 1);
+}
+
+// ---- Widget_HoverUpdate: wheel-scroll forwarding via the real Window_Scroll ----
+// dword_62D294 (g_scrollWheelWin) points at a window with scroll content; with the
+// wheel-up latch set and no focus, HoverUpdate forwards to Window_Scroll which
+// advances the window's scroll offset (+592).
+TEST(GuiDialogs4Unit, HoverUpdateWheelScrollForward) {
+    ResetGuiDialogs4();
+    GuiDialogs4Hooks h = *GuiDialogs4Hooks_Default();
+    SetGuiDialogs4Hooks(&h);
+
+    // Window slot 4: scrollable.  scrollOffset(+592)=0, scrollCur(+584)=0,
+    // contentHeight(+580)=200, h(+8 word)=10.  +612 (v[153]) = step 80.
+    Window& win = g_windows[4];
+    win = Window{};
+    win.at<i32>(0) = 4;      // *(win+0) == own slot id; Window_Scroll indexes g_windows[id]
+    win.contentHeight() = 200;
+    win.scrollCur() = 0;
+    win.scrollOffset() = 0;
+    win.h() = 10;
+    win.at<i32>(612) = 80;   // wheel step (v[153])
+
+    g_scrollWheelWin = 4;    // dword_62D294
+    g_wheelUp = 0;           // dword_672254
+    g_wheelDn = 1;           // dword_672250 -> amount = +step (downward scroll)
+    g_focusWidget = 0;
+    g_stateFinalizeReq = -1; // no deferred finalize
+    g_hoverScrollWin = -1;   // skip the hovered-scroll block
+    g_mouseDown = 0;
+    g_mouseDownHover = 0;
+
+    // g_wheelUp != g_wheelDn, win[153]!=0, no focus -> Window_Scroll(0, +80, 4):
+    // else-branch advances scrollOffset from 0 to min(step, contentHeight-h) = 80.
+    Widget_HoverUpdate();
+    CHECK_EQ(g_windows[4].scrollOffset(), 80); // +592 advanced by the step
+    SetGuiDialogs4Hooks(nullptr);
 }

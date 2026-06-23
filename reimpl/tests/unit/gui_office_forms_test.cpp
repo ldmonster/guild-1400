@@ -23,7 +23,9 @@ TEST(OfficeForms, VotePanelInitBuildsThreeHeaders) {
         CHECK(p.objects[c].kind == VotePanelObject::kHeader);
         CHECK_EQ(p.objects[c].textIdOrIcon, kVotePanelHeaderText[c]);
         CHECK_EQ(p.objects[c].color, kVotePanelHeaderColor); // 67
-        CHECK_EQ(p.objects[c].x, kVotePanelColumnX[c]);      // 32/62/47
+        // gilde.exe 0x49dc72: AddTextLabel(0, ...) — all 3 headers at x=0 (column x is
+        // the MARKER x). Prior golden wrongly expected the column x for headers.
+        CHECK_EQ(p.objects[c].x, 0);
     }
     CHECK_EQ(p.count[0], 0);
     CHECK_EQ(p.count[1], 0);
@@ -100,7 +102,7 @@ TEST(OfficeForms, ElectionFormSuccessSpeechLines) {
         MakeSeat(100, 6),   // seat0 -> 3634, packet
         MakeSeat(101, 7),   // seat1 -> 3635, packet
         MakeSeat(102, 15),  // seat2 vacant -> skipped
-        MakeSeat(103, 6),   // seat3 -> 3637, He message
+        MakeSeat(103, 6),   // seat3 -> 3637, BuildSpeechPacket (success path)
         MakeSeat(104, 3),   // seat4 role 3 -> skipped (not 6/7)
         MakeSeat(105, 7),   // seat5 -> 3639, packet
     };
@@ -114,7 +116,9 @@ TEST(OfficeForms, ElectionFormSuccessSpeechLines) {
     CHECK_EQ(l.lines[1].textId, 3635);
     CHECK_EQ(l.lines[2].seat, 3);
     CHECK_EQ(l.lines[2].textId, 3637);
-    CHECK(!l.lines[2].viaSpeechPacket);   // seat 3 -> He message
+    // gilde.exe 0x4a0ce1: success path sends seat 3 via BuildSpeechPacket too (the He
+    // message broadcast is the FAILURE path). Prior golden wrongly expected He message.
+    CHECK(l.lines[2].viaSpeechPacket);
     CHECK_EQ(l.lines[3].seat, 5);
     CHECK_EQ(l.lines[3].textId, 3639);
     CHECK(l.lines[3].viaSpeechPacket);
@@ -212,16 +216,18 @@ TEST(OfficeForms, TortureCase2InstrumentButtonsAndCost) {
     CHECK(f.built);
     CHECK(!f.isYesNo);
     CHECK_EQ(f.headerText, 4352);
-    CHECK_EQ(f.buttons.size(), 7u);
-    // Costs = tier * cost-byte table {8,10,12,15,18,21,24}.
-    const int expect[7] = {40, 50, 60, 75, 90, 105, 120};
-    for (int k = 0; k < 7; ++k) {
+    // gilde.exe 0x4a410a: the build loop runs only 3 times -> 3 buttons (the first 3
+    // shuffled instruments). Prior golden wrongly expected all 7.
+    CHECK_EQ(f.buttons.size(), 3u);
+    // Costs = tier * cost-byte table {8,10,12} for the first 3 instruments.
+    const int expect[3] = {40, 50, 60};
+    for (int k = 0; k < 3; ++k) {
         CHECK_EQ(f.buttons[k].textId, 4353);
         CHECK_EQ(f.buttons[k].cost, expect[k]);
         CHECK_EQ(f.buttons[k].payload, k); // instrument index = shuffle value
     }
-    // Clicking instrument 4's button selects payload 4.
-    CHECK_EQ(Office_DispatchTortureChoice(f, f.buttons[4].objectId), 4);
+    // Clicking instrument 2's button selects payload 2.
+    CHECK_EQ(Office_DispatchTortureChoice(f, f.buttons[2].objectId), 2);
 }
 
 TEST(OfficeForms, TortureCase5TierButtonsDisable) {
@@ -239,8 +245,9 @@ TEST(OfficeForms, TortureCase5TierButtonsDisable) {
     CHECK(!f.buttons[1].enabled);      // disabled
     CHECK(f.buttons[2].enabled);
     CHECK_EQ(Office_DispatchTortureChoice(f, f.buttons[2].objectId), 4);
-    // default = tier base (v57).
-    CHECK_EQ(Office_DispatchTortureChoice(f, 99999), 2);
+    // gilde.exe 0x4a46da: default = v58+1 (middle tier), since v77 (button[1] id) != -1.
+    // Prior golden wrongly expected the tier base (+0).
+    CHECK_EQ(Office_DispatchTortureChoice(f, 99999), 3);
 }
 
 TEST(OfficeForms, TortureUnknownCaseNotBuilt) {

@@ -247,7 +247,8 @@ TEST(NpcAction11Unit, BeginUnequipObjectAdvancesByRandPlus10) {
 }
 
 // ===========================================================================
-// BeginEquipObject — fast-mode 0/0 vs apprentice-span hours; +90 equip bit set.
+// BeginEquipObject — fast-mode +30 minutes vs apprentice-span hours; +90 bit set.
+// (disasm 0x4e47fd: fast path v6=0 days, v7=30 minutes.)
 // ===========================================================================
 TEST(NpcAction11Unit, BeginEquipObjectFastModeNoAdvanceSetsBit) {
     ResetAll();
@@ -262,10 +263,10 @@ TEST(NpcAction11Unit, BeginEquipObjectFastModeNoAdvanceSetsBit) {
     CHECK_EQ(g_rec.args25, 1);
     CHECK_EQ(g_rec.a25b, 64);
     CHECK_EQ(he.get32(16), 7);    // entity id recorded at +16
-    // fast mode: +82 stays at the stamped clock (no minutes/days added).
+    // fast mode: +82 = stamped clock advanced by 30 minutes (0 days).
     GameTime st; std::memcpy(&st, he.bytes + 82, sizeof st);
     CHECK_EQ(static_cast<int>(st.hour), 8);
-    CHECK_EQ(st.minute, 0);
+    CHECK_EQ(st.minute, 30);
 }
 
 TEST(NpcAction11Unit, BeginEquipObjectAlreadyEquippedFrees) {

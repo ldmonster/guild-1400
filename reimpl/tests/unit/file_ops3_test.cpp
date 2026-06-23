@@ -332,7 +332,8 @@ guild::u32 HookCwd(guild::u32 size, char* buf) {
 char g_allocPool[256];
 void* HookAlloc(guild::u32 /*size*/) { return g_allocPool; }
 int g_einval = 0;
-void HookEinval() { ++g_einval; }
+int g_einvalCode = 0;
+void HookEinval(int code) { ++g_einval; g_einvalCode = code; }
 } // namespace
 
 TEST(FileOps3Unit, ProcessIdAndWorkingDir) {
@@ -351,15 +352,28 @@ TEST(FileOps3Unit, ProcessIdAndWorkingDir) {
     CHECK(r == buf);
     CHECK(std::strcmp(buf, g_cwd) == 0);
 
-    // Caller buffer too small -> nullptr + EINVAL.
+    // Caller buffer too small -> nullptr + EINVAL (errno code 14, per 0x5eef0d).
     g_einval = 0;
+    g_einvalCode = 0;
     CHECK(VfsGetWorkingDir(buf, 3) == nullptr);
     CHECK_EQ(g_einval, 1);
+    CHECK_EQ(g_einvalCode, 14);
 
     // dst == null -> allocate via hook.
     char* a = VfsGetWorkingDir(nullptr, 0);
     CHECK(a == g_allocPool);
     CHECK(std::strcmp(a, g_cwd) == 0);
+
+    // dst == null and allocation fails -> nullptr + errno code 5 (per 0x5eeef2).
+    g_einval = 0;
+    g_einvalCode = 0;
+    FileOps3Hooks h2 = h;
+    h2.allocMem = [](guild::u32) -> void* { return nullptr; };
+    SetFileOps3Hooks(&h2);
+    CHECK(VfsGetWorkingDir(nullptr, 0) == nullptr);
+    CHECK_EQ(g_einval, 1);
+    CHECK_EQ(g_einvalCode, 5);
+    SetFileOps3Hooks(&h);
 
     SetFileOps3Hooks(&prev);
 

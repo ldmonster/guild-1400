@@ -116,8 +116,10 @@ u32 IllnessPackGroup(u32 state, int group, int value) {
 //
 // Decision/packing core (the command-delta + stock-debit tail is the caller's):
 //   1. Build the 8-entry "free" table (init all 0 from dword_5830C0; set 1 for
-//      each group whose sub-field is clear). Group 0 is special-cased: if its
-//      sub-field is NON-zero the function bails immediately (return 0).
+//      each group whose sub-field is clear). Group 0 is NOT special-cased: like
+//      every other group its slot is set to 1 only when its sub-field is clear
+//      (disasm @0x58ab13 jz->0x58ace4 sets freeTable[0]=1 then continues; a
+//      non-zero high nibble of byte0 simply falls through, leaving it 0).
 //   2. Roll a random start in [0,8) and linear-probe (wrapping) up to 8 slots
 //      for a free group; if none, return 0.
 //   3. group = chosenBit + 2; row = kDiseaseEvents[group].
@@ -139,10 +141,10 @@ DiseasePick IllnessPickRandomDiseaseEvent(u32 diseaseState) {
     // (1) free-group table. dword_5830C0 is all-zero (8 ints): start all 0.
     int freeTable[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
-    // Group 0 special case: if its sub-field is set, bail (matches the early
-    // `jz loc_58ACE4` that sets freeTable[0]=1 only when clear, then the test at
-    // 0x58ab13 `jz` means a NON-zero high nibble of byte0 falls straight through
-    // to the rest; a ZERO high nibble jumps to set freeTable[0]=1). So:
+    // Group 0 is handled exactly like the others (no early bail): @0x58ab13
+    // `test byte0,0F0h; jz loc_58ACE4` sets freeTable[0]=1 only when the high
+    // nibble of byte0 is clear, then continues to the group-1 test; a non-zero
+    // high nibble falls straight through, leaving freeTable[0]=0.
     if ((diseaseState & kGroupMask[0]) == 0)
         freeTable[0] = 1;
     for (int i = 1; i < 8; ++i) {

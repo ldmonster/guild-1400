@@ -56,8 +56,15 @@ const i32 kRoleTableB[kRoleTemplateSlots] = {
 };
 
 int OfficeFindRoleTemplate(u8 which, u8 roleId) {
-    // if ( !a2 || a2 >= 76 ) return 0;  (a2 == roleId)
-    if (roleId == 0 || roleId >= 76)
+    // 0x57c18b-0x57c192: test bl,bl / jz  then  cmp bl,4Ch / jge.
+    // The id byte (a2) lives in DL and the range gate is a SIGNED compare:
+    //   `jz` rejects 0; `jge 76` rejects bl >= 76 *as a signed char*.
+    // So a u8 roleId in 128..255 (negative as i8) is NOT rejected here in the
+    // original — it falls through, `movsx ecx,bl` sign-extends it negative, and
+    // the scan never matches (returns the terminator slot). Reproduce the signed
+    // gate exactly rather than the unsigned `roleId >= 76`.
+    const signed char sRole = static_cast<signed char>(roleId);
+    if (sRole == 0 || sRole >= 76)        // test bl,bl/jz ; cmp bl,4Ch/jge
         return kRoleNotFound;
 
     const i32* table;
@@ -70,9 +77,11 @@ int OfficeFindRoleTemplate(u8 which, u8 roleId) {
 
     // for ( result = v4; v3 < 76 && *result; result += 10 ) — *result is the id
     // dword; scan stops at the zero terminator or after 76 records.
+    // 0x57c1ab: cmp edx,4Ch/jge ; cmp dword[eax],0/jz ; movsx ecx,bl ; cmp ecx,[eax]
+    // Compare is (i32)(i8)roleId == (i32)table[v3] (full dword id).
     int v3 = 0;
     for (; v3 < kRoleTemplateSlots && table[v3] != 0; ++v3) {
-        if (roleId == static_cast<u8>(table[v3])) // a2 == *result
+        if (static_cast<int>(sRole) == table[v3]) // movsx ecx,bl ; cmp ecx,[eax]
             return v3;
     }
     // return &v4[10*v3]; — the end-of-scan record index (terminator slot).
@@ -109,7 +118,13 @@ bool OfficeAwaitPromoteResult(i32 person, i32 fromCity, i32 toCity) {
     i32 cmd = g_flow.tryPromote(person, fromCity, toCity, g_flow.ctx);
     if (cmd == -1)                          // if ( v3 == -1 ) return 0;
         return false;
-    // if ( *(_BYTE *)(v4 + 2) != 6 ) return 1;  (the promoted person's type byte)
+    // 0x562cab: cmp byte ptr [ecx+2],6 / jnz ->return 1.  ECX was set to a1 at
+    // entry (mov ecx,eax) but VIBE_Office_TryPromoteCharacter clobbers ecx
+    // (0x47ebdb mov ecx,ebx ...), so the byte actually read is whatever pointer
+    // ECX holds at the promote call's return — a residue determined inside that
+    // engine leaf (out of this file's tree). Modeled as the promoted person's
+    // record type byte (person+2) per the decompiler's intent; the exact ECX
+    // residue is a documented BOUNDARY routed through the personType hook.
     if (g_flow.personType(person, g_flow.ctx) != 6)
         return true;
     // while ( !GetPacketStatusById(v3) ) RefreshGuildState();
@@ -192,20 +207,24 @@ GesetzDescResult GesetzFormatDescriptionMid(char* dest, u8 op, int value,
                                             i32 subjectId, int lowFlag) {
     (void)value;
     GesetzDescResult r;
-    // The Mid leaf does NOT add the lowFlag offset (no v14 term); base is exact.
-    (void)lowFlag;
+    // 0x4c2f67-0x4c2f6e: xor ecx,ecx / cmp edx,1 / setle al / mov cl,al.
+    // ecx = (lowFlag <= 1) ? 1 : 0 — the flag. The op-13/op-15 paths then do
+    // `add ecx,1075h` / `add ecx,107Fh`, i.e. baseId = flag + 4213 / flag + 4223.
+    // (The Hex-Rays "v15 + 4213" v15 was NOT uninitialised — it is this flag.)
+    int flag = (lowFlag <= 1) ? 1 : 0;     // 0x4c2f69 cmp edx,esi(=1) ; setle
     int portrait = ResolvePortrait(subjectId);
     (void)portrait;
 
+    // 0x4c2f86: cmp al,0Dh / jb fallback / jbe op13 / cmp al,0Fh / jnz fallback.
     if (op == 13) {                        // a8 == 0xD
-        int baseId = 4213;                 // v15 + 4213, v15 == 0 here
+        int baseId = flag + 4213;          // add ecx,1075h
         g_descRender(dest, baseId, g_descCtx);
         r.valid = true;
         r.textId = baseId;
         return r;
     }
     if (op == 15) {                        // a8 == 15
-        int baseId = 4223;
+        int baseId = flag + 4223;          // add ecx,107Fh
         g_descRender(dest, baseId, g_descCtx);
         r.valid = true;
         r.textId = baseId;

@@ -208,13 +208,16 @@ TEST(RenderLeaves9, ShiftAccumulateValueTwo) {
 }
 
 TEST(RenderLeaves9, ShiftAccumulateZeroUnchanged) {
-    // all-zero input returns mid unchanged, exponent untouched.
+    // all-zero input: 0x5fa684 zeroes esi (`sub esi,esi`) and jumps straight to
+    // retn (locret_5FA6C4) — the `mov esi,edi` that copies the base exponent only
+    // runs on the nonzero path. So the exponent OUTPUT is 0 here, NOT the input
+    // 0x405E. edx(hi)/eax(mid) are likewise left at their (zero) inputs.
     u32 hiOut = 0xDEAD, loOut = 0xBEEF; u16 expOut = 0x1234;
     u32 ret = ShiftAccumulate(0, 0, 0, 0x405E, &hiOut, &loOut, &expOut);
     CHECK_EQ(ret, 0u);
     CHECK_EQ(hiOut, 0u);               // hi unchanged (was 0)
     CHECK_EQ(loOut, 0u);
-    CHECK_EQ(expOut, (u16)0x405E);     // exponent left at base (no normalization)
+    CHECK_EQ(expOut, (u16)0x0000);     // esi==0 on the all-zero path (5fa684)
 }
 
 // ===========================================================================

@@ -32,9 +32,16 @@ int LookupStreamHandleIndex(const DigitalAudio& d, shim::VoiceHandle handle) {
         const DigitalOutput* o = d.outputAt(i);
         if (!o || !o->open)                    // if (dword_62EA1C[i])
             continue;
-        for (int idx = 0; idx < static_cast<int>(o->maxSampleHandles); ++idx) {
-            if (handle == o->streamSlots[static_cast<std::size_t>(idx)]) // a1 == streamSlots[i][idx]
-                return idx;
+        // The original scans [0, maxSampleHandles); the slot array always held
+        // exactly that many entries. Clamp to the real vector size so an
+        // inconsistent/malformed record cannot read past the allocation (faithful
+        // guard — well-formed records have streamSlots.size() == maxSampleHandles).
+        std::size_t n = o->streamSlots.size() < o->maxSampleHandles
+                            ? o->streamSlots.size()
+                            : static_cast<std::size_t>(o->maxSampleHandles);
+        for (std::size_t idx = 0; idx < n; ++idx) {
+            if (handle == o->streamSlots[idx]) // a1 == streamSlots[i][idx]
+                return static_cast<int>(idx);
         }
     }
     return -1;
@@ -47,8 +54,11 @@ int LookupSampleDriverIndex(const DigitalAudio& d, shim::VoiceHandle handle) {
     for (int i = 0; i < 16; ++i, ++v6) {       // v2/v6 advance together
         const DigitalOutput* o = d.outputAt(i);
         if (o && o->open) {                    // if (dword_62EA1C[v2])
-            for (int s = 0; s < static_cast<int>(o->maxSampleHandles); ++s) {
-                if (handle == o->sampleSlots[static_cast<std::size_t>(s)])
+            std::size_t n = o->sampleSlots.size() < o->maxSampleHandles
+                                ? o->sampleSlots.size()
+                                : static_cast<std::size_t>(o->maxSampleHandles);
+            for (std::size_t s = 0; s < n; ++s) {
+                if (handle == o->sampleSlots[s])
                     return v6;
             }
         }
@@ -62,8 +72,11 @@ int LookupStreamDriverIndex(const DigitalAudio& d, shim::VoiceHandle handle) {
     for (int i = 0; i < 16; ++i, ++v6) {
         const DigitalOutput* o = d.outputAt(i);
         if (o && o->open) {
-            for (int s = 0; s < static_cast<int>(o->maxSampleHandles); ++s) {
-                if (handle == o->streamSlots[static_cast<std::size_t>(s)])
+            std::size_t n = o->streamSlots.size() < o->maxSampleHandles
+                                ? o->streamSlots.size()
+                                : static_cast<std::size_t>(o->maxSampleHandles);
+            for (std::size_t s = 0; s < n; ++s) {
+                if (handle == o->streamSlots[s])
                     return v6;
             }
         }
@@ -150,19 +163,30 @@ int ClampDigitalMasterVolume(int volume) {
 }
 
 // gilde.exe 0x56c148 — VIBE_Audio_ApplyVolumeSettings.
-//   v5 = (double)soundByte * scale0; SetMasterVolume((int)v5);
-//   sfx   = (double)sfxByte  * v5;  ApplyMasterVolume((int)sfx);
-//   music = (double)musicByte* v5;  SetMusicVolume((int)music);
-//   flt_64200C = (double)ambByte  * scale0;
-//   flt_6422A8 = (double)amb2Byte * scale1;
-// The float-to-int conversions truncate toward zero (VIBE_Coord_ConvertX sets
-// the x87 control word to chop mode). All operands are non-negative.
+// Disasm (reference of record — Hex-Rays mislabels the operands):
+//   v6 = (float)( (double)soundByte * scale0 );      // fstp var_C  (32-bit float!)
+//   SetMasterVolume ( trunc( (double)musicByte * v6 ) );   // fild byte_1233551, fmul var_C
+//   ApplyMasterVolume( trunc( (double)sfxByte   * v6 ) );   // fild byte_1233552, fmul var_C
+//   SetMusicVolume  ( trunc( (double)musicByte * v6 ) );   // fild byte_1233551, fmul var_C
+//   flt_64200C = (float)( (double)ambByte  * scale0 );      // fstp float global
+//   flt_6422A8 = (float)( (double)amb2Byte * scale1 );      // fstp float global
+// Key 1:1 details:
+//   * v6 is stored as a 32-bit float (fstp [esp] var_C, typed `float`) BEFORE
+//     the three master/sfx/music multiplies — so the products use the
+//     float-rounded v6, not the full-precision double. Model v6 as `float`.
+//   * master AND music both use musicByte (byte_1233551); soundByte feeds only
+//     v6. (Hex-Rays attributed byte_1233550/552 to the wrong sites.)
+//   * float->int truncates toward zero: each fistp is preceded by ConvertX
+//     (@0x5c6b08 sets the x87 RC to chop, then frndint). All operands >= 0.
 VolumeSettingsOut ApplyVolumeSettings(const VolumeSettingsIn& in) {
     VolumeSettingsOut out{};
-    const double v5 = static_cast<double>(in.soundByte) * static_cast<double>(in.scale0);
-    out.masterVolume = static_cast<int>(v5);            // SetMasterVolume((int)v5)
-    out.sfxVolume    = static_cast<int>(static_cast<double>(in.sfxByte) * v5);  // ApplyMasterVolume
-    out.musicVolume  = static_cast<int>(static_cast<double>(in.musicByte) * v5);// SetMusicVolume
+    // v6 = (float)(soundByte * scale0) — fmul keeps 80-bit, fstp rounds to float.
+    const float v6 = static_cast<float>(static_cast<double>(in.soundByte) *
+                                        static_cast<double>(in.scale0));
+    const double v6d = static_cast<double>(v6); // fild/fmul reload v6 as float->80-bit
+    out.masterVolume = static_cast<int>(static_cast<double>(in.musicByte) * v6d); // SetMasterVolume
+    out.sfxVolume    = static_cast<int>(static_cast<double>(in.sfxByte)   * v6d); // ApplyMasterVolume
+    out.musicVolume  = static_cast<int>(static_cast<double>(in.musicByte) * v6d); // SetMusicVolume
     out.ambientScale = static_cast<float>(static_cast<double>(in.ambByte) * static_cast<double>(in.scale0));
     out.ambient2Scale= static_cast<float>(static_cast<double>(in.amb2Byte) * static_cast<double>(in.scale1));
     return out;
@@ -213,9 +237,10 @@ int AppendAmbientVoice(AmbientVoiceList& list, shim::VoiceHandle handle) {
     if (list.count < kMaxAmbientVoices) {
         list.handles[static_cast<std::size_t>(list.count)] = handle;
         list.count = prior + 1;                // dword_6344A0 = v6 + 1
-        return prior + 1;
+        return prior + 1;                      // return (void*)(v6 + 1)
     }
-    return prior;
+    return static_cast<int>(handle);           // full: original returns `result`
+                                               // (the StartVoiceSample handle == h)
 }
 
 // gilde.exe 0x505da8 — VIBE_Audio_StopAmbientVoices.

@@ -54,9 +54,15 @@ void RadixPass(u32* histogram, const DrawListEntry* src, DrawListEntry* dst,
 //   pass 3: byte 3,  src=List2 dst=List1
 // Two passes leave the result in List1 (low 16 bits sorted); four passes leave it
 // in List1 fully sorted. For count<=1 the original skips sorting entirely.
+//
+// RETURN VALUE (verified vs disasm @0x5aef34): the original's eax is the input
+// `count` only on the count<=1 fast path (0x5aef46 returns eax untouched). Once
+// it sorts (count>1) the scatter loops end with `xor eax,eax; mov al,key;
+// ...; xor eax,eax` so eax==0 at every exit — the function returns 0 for count>1.
+// (All callers ignore the return; this is for byte-exact fidelity.)
 u32 RadixSortDrawList(DrawListBuffers& db, u32 count, bool twoPassOnly) {
     if (count <= 1)
-        return count;
+        return count;  // 0x5aef46: eax = input count
 
     // pass 0: List1 -> List2 (key byte 0)
     RadixPass(db.histogram, db.base1, db.base2, count, 0);
@@ -69,7 +75,7 @@ u32 RadixSortDrawList(DrawListBuffers& db, u32 count, bool twoPassOnly) {
         // pass 3: List2 -> List1 (key byte 3)
         RadixPass(db.histogram, db.base2, db.base1, count, 3);
     }
-    return count;
+    return 0;  // 0x5af09a / 0x5af1f4: eax cleared by the last scatter loop
 }
 
 // gilde.exe 0x5AC738 — VIBE_SceneGraph_WalkAndInvoke
@@ -94,10 +100,30 @@ u32 RadixSortDrawList(DrawListBuffers& db, u32 count, bool twoPassOnly) {
 // `root` accessor returns the first child via vt.child(root) and the terminator
 // via vt.sibling/stopAtSibling. To stay faithful, the null-node branch walks
 // vt.child(root) as a sibling list until a null sibling.
+namespace {
+// HARDENING (wave-11): bound the WalkAndInvoke child recursion. The walk recurses
+// one frame per child-list level; a corrupt/cyclic node tree (a child pointer
+// that re-enters an ancestor) would otherwise overflow the native stack. Real
+// scene-graph hierarchies are shallow, so this never trips on valid data and the
+// in-bounds traversal/output is byte-identical.
+constexpr int kWalkMaxDepth = 4096;
+
+char WalkAndInvokeDepth(void* root, void* node, void* ctx, i16 walkMask,
+                        i32 userArg, const WalkVTable& vt, int depth);
+} // namespace
+
 char WalkAndInvoke(void* root, void* node, void* ctx, i16 walkMask, i32 userArg,
                    const WalkVTable& vt) {
+    return WalkAndInvokeDepth(root, node, ctx, walkMask, userArg, vt, 0);
+}
+
+namespace {
+char WalkAndInvokeDepth(void* root, void* node, void* ctx, i16 walkMask,
+                        i32 userArg, const WalkVTable& vt, int depth) {
     if (!walkMask)
         return 0;
+    if (depth >= kWalkMaxDepth)
+        return 1;  // stop the walk safely (1 == "continue ok" to the caller)
 
     // node==null: start at the root's child list head. The original recursed via
     // WalkAndInvoke(root, root[128]-chain, ...); since the non-null branch below
@@ -118,7 +144,8 @@ char WalkAndInvoke(void* root, void* node, void* ctx, i16 walkMask, i32 userArg,
 
         void* child = vt.child(node);
         if (child && r >= 0)
-            r = WalkAndInvoke(root, child, ctx, childMask, userArg, vt);
+            r = WalkAndInvokeDepth(root, child, ctx, childMask, userArg, vt,
+                                   depth + 1);
         if (!r)
             return 0;
 
@@ -129,5 +156,6 @@ char WalkAndInvoke(void* root, void* node, void* ctx, i16 walkMask, i32 userArg,
             return 1;
     }
 }
+} // namespace
 
 } // namespace guild::render

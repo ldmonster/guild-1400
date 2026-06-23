@@ -29,11 +29,14 @@
 // or test consult the active source; the default leaves meshes untextured.
 // =============================================================================
 #include "guild/common/types.h"
-#include "render/agf_loader.h"      // render::BgfModel
-#include "render/bgf_loader.h"      // render::BgfModel / BgfMaterial / BgfPolygon
-#include "render/texture_bin.h"     // render::TextureBin / DecodedBmp
+#include "io/archive_mount.h"          // io::ArchiveMount (.TXS sidecar lookup)
+#include "render/agf_loader.h"         // render::BgfModel
+#include "render/bgf_loader.h"         // render::BgfModel / BgfMaterial / BgfPolygon
+#include "render/texture_bin.h"        // render::TextureBin / DecodedBmp
+#include "render/texture_set_table.h"  // render::TextureSetTable (.TXS)
 #include "shim/IFileSystem.h"
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -57,6 +60,10 @@ struct MaterialTextureTable {
         std::string materialName;          // BgfMaterial.name0
         std::string member;                // resolved Textures.BIN member ("" if none)
         const render::DecodedBmp* bmp = nullptr;  // decoded pixels (null if unresolved)
+        std::string setName;               // the .TXS row that bound this entry
+                                           // (set-0 load row or the season row;
+                                           //  "" = bound by the material name —
+                                           //  no sidecar adopted)
     };
     std::vector<Entry> textures;           // texId -> texture entry
     std::vector<int>   matToTex;           // material index -> texId (or -1)
@@ -64,7 +71,15 @@ struct MaterialTextureTable {
 
     int texturedPolys = 0;                 // polys with a resolved texture
     int untexturedPolys = 0;               // polys with no texture (texId == -1)
-    int resolvedMaterials = 0;             // materials whose name0 resolved to a BMP
+    int resolvedMaterials = 0;             // materials that resolved to a BMP
+
+    // Texture-set state (render/texture_set_table.h): the EFFECTIVE set this
+    // table binds (-1 = sidecar not adopted / debug-disabled; 0 = the engine
+    // load state — set-0 rows; >0 = a foliage season set over that baseline)
+    // and how many materials a season row actually swapped (the 0x5b3f54
+    // replacements beyond the set-0 baseline).
+    int appliedTextureSet = -1;
+    int swappedMaterials = 0;
 
     int PolyTexId(std::size_t poly) const {
         return poly < polyTexId.size() ? polyTexId[poly] : -1;
@@ -89,8 +104,13 @@ public:
     bool mounted() const { return bin_.mounted(); }
     render::TextureBin& bin() { return bin_; }
 
-    // Resolve a bare material name0 to a decoded texture (cached in the TextureBin).
-    // Returns null if the name has no matching BMP.
+    // Resolve a bare material name to a decoded texture (cached in the
+    // TextureBin). A 24-bit source is palettized in place on first decode —
+    // the VIBE_Texture_LoadSoftPalettize @0x5da34c software arm through the
+    // reconstructed VIBE_Quant_BuildPalette @0x6029f0 (render/
+    // texture_palettize.h) — so it carries 8-bit indices + a 256-colour
+    // palette exactly like an 8-bit source. Returns null if the name has no
+    // matching BMP.
     const render::DecodedBmp* ResolveMaterial(const char* name0);
 
     // Build (and cache by `key`) the per-poly texId table for `model`: walk each
@@ -108,9 +128,66 @@ public:
     TexSample SamplePoly(const MaterialTextureTable& tbl, std::size_t poly,
                          float u, float v) const;
 
+    // -----------------------------------------------------------------------
+    // TEXTURE SETS (.TXS) — the engine binds through the sidecar's name table
+    // (verified against the binary; see render/texture_set_table.h):
+    //
+    //   * VIBE_Mesh_LoadAndRegister @0x5d32d4 loads "<member>.TXS" via
+    //     VIBE_Mesh_LoadTextureSet @0x5d2240 for EVERY mesh; the table is
+    //     ADOPTED iff setCount > 0 and namesPerSet == materialCount
+    //     (VIBE_Model_LoadFastChunk @0x5f8a0e; reject -> a synthesized 1-set
+    //     table from the material names).
+    //   * ADOPTED: the LOAD-TIME texture of material m is the SET-0 row
+    //     (0x5f8c14) — NOT the .bgf material string (349 shipped materials
+    //     differ). The .bgf strings only select the load name when no table
+    //     is adopted (script name2 preferred, else name0 — 0x5d31b1; the
+    //     fast chunk's preferred second string IS the script's name2).
+    //   * Scene activation applies the SEASON (byte_634484 = day%4 @0x506df4)
+    //     as the set index to FOLIAGE nodes (pfl_/vg_/!vg_ @0x506388) via
+    //     VIBE_Object_SelectTextureSet @0x5b3f54: empty/unloadable season row
+    //     keeps the current (set-0) binding; season >= setCount keeps the
+    //     set-0 state (the 0x5b403b gate).
+    //
+    // The sidecar bytes come from the installed fetch hook, or — when none is
+    // installed — from a lazy self-mount of "Resources/Objects.BIN" through
+    // the IFileSystem given to Mount() (the archive the .bgf members live in).
+    // -----------------------------------------------------------------------
+    using TxsFetch = std::function<bool(const char* member, std::vector<u8>& out)>;
+    void SetTxsFetch(TxsFetch fn) { txsFetch_ = std::move(fn); }
+
+    // Active SEASON set for table builds (byte_634484). Foliage members bind
+    // their season rows over the set-0 baseline; every other adopted member
+    // binds its set-0 rows (the engine load state). -1 is a REIMPL-ONLY debug
+    // state (ignore sidecars, bind raw material names — the engine has no
+    // such state). The instance default is the PROCESS default below.
+    void SetActiveTextureSet(int set) { activeSet_ = set; }
+    int  activeTextureSet() const { return activeSet_; }
+
+    // Process-wide default for newly constructed sources. Initialised to 0 —
+    // the new game starts at day 0 -> season 0 -> set 0 (_F, Frühling), so a
+    // fresh session's city binds carry the engine's day-0 steady state. A
+    // session advancing days re-applies via SetActiveTextureSet(day % 4)
+    // (render::SeasonTextureSetFromDay) + a rebind.
+    static void SetDefaultActiveTextureSet(int set);
+    static int  DefaultActiveTextureSet();
+
 private:
+    // Fetch + parse (and cache) the ".TXS" sidecar for a .bgf member key.
+    // Returns null when the member has no parseable sidecar.
+    const render::TextureSetTable* TxsFor(const std::string& memberKey);
+
+    // Decode + (for a 24-bit source) palettize in place — see ResolveMaterial.
+    const render::DecodedBmp* DecodeAndPalettize(const char* name);
+
     render::TextureBin bin_;
     std::map<std::string, std::unique_ptr<MaterialTextureTable>> tables_;
+
+    shim::IFileSystem* fs_ = nullptr;             // from Mount(); sidecar reads
+    TxsFetch txsFetch_;                           // optional sidecar provider
+    std::unique_ptr<io::ArchiveMount> txsMount_;  // lazy Objects.BIN self-mount
+    bool txsMountTried_ = false;
+    std::map<std::string, render::TextureSetTable> txsCache_;  // by UPPER key
+    int activeSet_ = DefaultActiveTextureSet();
 };
 
 // ---------------------------------------------------------------------------

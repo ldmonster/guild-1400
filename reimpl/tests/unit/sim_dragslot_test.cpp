@@ -104,26 +104,30 @@ TEST(SimDragSlot, RemoveItemAbsentScansFullTable) {
 }
 
 // ---------------------------------------------------------------------------
-// StoreItem — overwrite (not accumulate), free on qty==0, slot-index return.
+// StoreItem — overwrite (not accumulate), free on qty==0. Return is the BYTE
+// offset 12*slot on a store, 6 when full (disasm 0x41f9ae-0x41f9b8).
 // ---------------------------------------------------------------------------
 TEST(SimDragSlot, StoreItemGoldenVector) {
     DragSlotTable t = FreshTable();
     DragSlotAddItem(t, 100, 12);  // slot0
     DragSlotAddItem(t, 200, 3);   // slot1
 
-    // store(200,9) OVERWRITES slot1 to 9 (not 3+9), returns slot index 1.
-    CHECK_EQ(DragSlotStoreItem(t, 200, 9), 1);
+    // store(200,9) OVERWRITES slot1 to 9 (not 3+9), returns byte offset 12*1=12.
+    CHECK_EQ(DragSlotStoreItem(t, 200, 9), 12);
     CHECK_EQ(t.slots[1].accum, 9);
 
-    // store(400,4) -> first free slot2, returns 2.
-    CHECK_EQ(DragSlotStoreItem(t, 400, 4), 2);
+    // store(400,4) -> first free slot2, returns 12*2=24.
+    CHECK_EQ(DragSlotStoreItem(t, 400, 4), 24);
     CHECK_EQ(t.slots[2].key, 400);
     CHECK_EQ(t.slots[2].accum, 4);
 
-    // store(500,0): finds a free slot, writes key then frees it (qty==0).
-    int idx = DragSlotStoreItem(t, 500, 0);
-    CHECK_EQ(t.slots[idx].key, -1);
-    CHECK_EQ(t.slots[idx].accum, 0);
+    // store(500,0): finds a free slot (slot3), writes key then frees it (qty==0).
+    // Return is the byte offset 12*slot; slot = off/12.
+    int off = DragSlotStoreItem(t, 500, 0);
+    CHECK_EQ(off, 36);                 // 12*3
+    int slot = off / 12;
+    CHECK_EQ(t.slots[slot].key, -1);
+    CHECK_EQ(t.slots[slot].accum, 0);
 }
 
 TEST(SimDragSlot, StoreItemFullTableReturnsSix) {
@@ -132,8 +136,8 @@ TEST(SimDragSlot, StoreItemFullTableReturnsSix) {
         DragSlotStoreItem(t, 2000 + k, k + 1);
     CHECK_EQ(DragSlotCountUsed(t), 6);
     CHECK_EQ(DragSlotStoreItem(t, 9999, 5), 6);  // full -> 6, no write
-    // Existing key overwrites in place.
-    CHECK_EQ(DragSlotStoreItem(t, 2002, 50), 2);
+    // Existing key overwrites in place; returns byte offset 12*2 = 24.
+    CHECK_EQ(DragSlotStoreItem(t, 2002, 50), 24);
     CHECK_EQ(t.slots[2].accum, 50);
 }
 

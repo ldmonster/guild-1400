@@ -276,3 +276,51 @@ TEST(world_amt_office, LabelPassesGate) {
     CHECK_EQ(HistoryRunLabelPasses(true, true, true, &ranCmd), 1);
     CHECK(ranCmd);
 }
+
+// ---------------------------------------------------------------------------
+// Boundary: the office-type record finder over 0 / 1 records and a count past
+// the terminator. AmtFindOfficeTypeRecord must never read past `count`.
+// ---------------------------------------------------------------------------
+TEST(WorldAmtOffice, FindOfficeTypeRecordEmptyTable) {
+    AmtTypeRecord recs[1] = {};
+    // count == 0: empty-table guard returns -1 without touching recs[0].
+    CHECK_EQ(AmtFindOfficeTypeRecord(recs, 0, 5), -1);
+    // A null pointer with count 0 is also safe (guard short-circuits first).
+    CHECK_EQ(AmtFindOfficeTypeRecord(nullptr, 0, 5), -1);
+}
+
+TEST(WorldAmtOffice, FindOfficeTypeRecordSingleAndTerminator) {
+    AmtTypeRecord recs[2];
+    recs[0].typeField = 7;
+    recs[0].nextPresent = 0;   // terminator after record 0
+    recs[1].typeField = 7;     // would match, but must never be reached
+    recs[1].nextPresent = 1;
+    // Match on record 0.
+    CHECK_EQ(AmtFindOfficeTypeRecord(recs, 2, 7), 0);
+    // No match: the terminator at record 0 stops the walk at index 0; record 1
+    // (which also has typeField 7) is never scanned -> -1, no OOB.
+    AmtTypeRecord recs2[2];
+    recs2[0].typeField = 3;
+    recs2[0].nextPresent = 0;
+    recs2[1].typeField = 99;
+    recs2[1].nextPresent = 0;
+    CHECK_EQ(AmtFindOfficeTypeRecord(recs2, 2, 99), -1);
+}
+
+// A fully-occupied slot table (all 64 occupied) is the "max stalls" boundary for
+// the placement probe: no free slot -> blocked (0), scanned without OOB.
+TEST(WorldAmtOffice, FreePlacementAllOccupiedBlocked) {
+    AmtSlot slots[kAmtSlotCount];
+    for (int i = 0; i < kAmtSlotCount; ++i) {
+        std::memset(&slots[i], 0, sizeof(AmtSlot));
+        slots[i].x = (u8)(i + 1);
+        slots[i].y = 1;
+        slots[i].marker = 0x00;       // occupied
+    }
+    // No free slot anywhere -> placement blocked regardless of footprint.
+    CHECK_EQ(AmtFindFreePlacement(slots, 100, 100, 4), 0);
+    // All-free table: a free slot exists; size 0 short-circuits to 1.
+    for (int i = 0; i < kAmtSlotCount; ++i)
+        slots[i].marker = kAmtSlotFreeHi;
+    CHECK_EQ(AmtFindFreePlacement(slots, 5, 5, 0), 1);
+}

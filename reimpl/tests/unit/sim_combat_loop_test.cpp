@@ -243,24 +243,36 @@ TEST(SimCombatLoop, ResolveMeleeSurvivesAboveRatio) {
 TEST(SimCombatLoop, ResolveMeleeBannerStabMarksDefeated) {
     AiHolder a(1, 100, 7);
     CombatUnit v{}; v.alive = 1; v.id = 2;
-    // weapon 366 (banner stab), fatal -> defeated marker (+8 = 4).
+    // gilde.exe 0x48cb3b: the weapon-366 banner "defeats" marker (+8 = 4) fires
+    // ONLY when ApplyUnitDeath returned 0 (the unit SURVIVED the ratio gate) AND
+    // the swing landed. A banner stab captures rather than kills. So use a SURVIVING
+    // ratio (50/100 = 0.5 >= 0.05): killed == false, defeated == true, alive == 4.
     MeleeResolveResult r = ResolveMeleeHit(a.ai, v, 10.0, 30.0, /*connected*/true,
-                                           /*mag*/10, 1.0, 100.0, kWpnStab2 /*366*/);
-    CHECK(r.killed);
-    CHECK(r.defeated);
-    CHECK_EQ(static_cast<int>(v.alive), kUnitDefeatedMarker);
+                                           /*mag*/10, 50.0, 100.0, kWpnStab2 /*366*/);
+    CHECK(!r.killed);                             // survived the ratio gate
+    CHECK(r.defeated);                            // banner stab marks it defeated
+    CHECK_EQ(static_cast<int>(v.alive), kUnitDefeatedMarker);  // +8 = 4
 }
 
 // ===========================================================================
 // PickScenario — mode flags + owner-type.
 // ===========================================================================
 TEST(SimCombatLoop, PickScenarioByModeFlags) {
+    // gilde.exe 0x489bcc: (v4 & 1) -> (v4 & 8) ? STADT : BERGPASS.
+    // The raid (&1) WITHOUT the indoor bit (&8) selects BERGPASS, not STADT.
     CHECK_EQ(static_cast<int>(PickScenario(kBattleRaid, false, 0, 0, 0).scenario),
+             static_cast<int>(CombatScenario::Bergpass));
+    // raid + indoor (0x01 | 0x08) -> STADT.
+    CHECK_EQ(static_cast<int>(
+                 PickScenario(static_cast<u8>(kBattleRaid | 0x08), false, 0, 0, 0).scenario),
              static_cast<int>(CombatScenario::StadtAttack));
+    // (v4 & 4) -> BERGPASS.
     CHECK_EQ(static_cast<int>(PickScenario(kBattleDefend, false, 0, 0, 0).scenario),
              static_cast<int>(CombatScenario::Bergpass));
+    // bit 0x02 (kBattleAttack) is NOT a scenario branch in the original — it falls
+    // through to the economic-raid person-kind switch (kind 0 / tax 0 -> None).
     CHECK_EQ(static_cast<int>(PickScenario(kBattleAttack, false, 0, 0, 0).scenario),
-             static_cast<int>(CombatScenario::Bergpass));
+             static_cast<int>(CombatScenario::None));
 }
 
 TEST(SimCombatLoop, PickScenarioRaeuberlagerWarmup) {

@@ -16,41 +16,55 @@ u32 g_gameTick = 0;
 // chained next-phase fn is present AND the motion gate at char+112 has cleared,
 // AND the priority/state gates pass, run node->next and latch char->phaseLatch.
 int DispatchCurrent(Character* ch) {
+    // edx = *(char+296). The decompile types it as a 4-byte (fn-ptr) array, so
+    // v1[5] == byte +0x14 (owner), not the +8 ready byte. Disasm confirms:
+    //   cmp dword ptr [edx+14h], 0   ; jz -> return 1   (owner gate, +0x14)
+    //   cmp dword ptr [edx], 0       ; step fn (+0x00)
     ActionNode* node = ch->actions;          // *(char+296)
-    if (!node)
+    if (!node)                               // test edx,edx ; jz -> return 0
         return 0;
-    if (!node->ready)                        // node[5] (+8 here): must be nonzero
+    if (!node->owner)                        // [edx+14h]==0 -> return 1  (NOT ready)
         return 1;
-    if (!node->step)                         // node[0]: no step fn
+    if (!node->step)                         // [edx]==0 -> return 1
         return 1;
 
-    // The original passes the *character*; our step fns take the node and reach
-    // the owner via node->owner, so we pass the node.
-    node->step(node);                        // (*node[0])(char)
-    // The step may have freed/replaced the head (self-unlink or chain). The
-    // original then reads node[4]/node[12] from the saved register; to stay
-    // memory-safe we only continue if `node` is still the live head.
-    if (ch->actions != node)
+    // (*v1)(a1): the original passes the character; our step fns take the node and
+    // reach the owner via node->owner. The node pointer (edx) is held across the
+    // call and node[4]/node[12] are read from it unconditionally afterward.
+    node->step(node);                        // call dword ptr [edx]
+    ActionStepFn chained = node->chained;    // ebp = [edx+4]
+    ++node->callCount;                       // ++[edx+0Ch]
+    if (!chained)                            // test ebp,ebp ; jz -> return 1
         return 1;
-    ActionStepFn chained = node->chained;    // node[4] (+4): chained phase fn
-    ++node->callCount;                       // ++node[12] (+12)
-    if (!chained)
+    // BOUNDARY (memory-safety): the original re-uses the saved edx even if the
+    // step replaced/freed the head (use-after-free is original UB). We bail if the
+    // head changed to stay host-safe; observationally identical on all inputs
+    // where the step keeps the node live (the only reachable case).
+    if (ch->actions != node)
         return 1;
     ActionNode* live = node;
 
-    // Motion gate: char+112 (current motion handle). The chained phase only runs
-    // once the prior motion has cleared and the latch/priority checks pass.
+    // Motion gate (disasm 0x4047ab..0x4047cf):
+    //   v6 = *(char+112);                    motion handle
+    //   if (!v6) return 1;
+    //   if (*(char+128)) return 1;           nextAnim blocks
+    //   if (*(char+133) == *(motion+108)) return 1;     latch == motion frame byte
+    //   if ((u8)*(node+8) > (int)*motion) return 1;     ready vs motion priority
+    // BOUNDARY: char+112 is an anim/motion handle (not an ActionNode); its +0
+    // priority int and +108 frame byte live in the render/anim subsystem (out of
+    // tree). With no live anim handle the gate evaluates to "skip", matching the
+    // headless behavior; the field reads below model the available state.
     ActionNode* motion = ch->motion;         // *(char+112)
     if (!motion
-        || ch->nextAnim                      // *(char+128) blocks
-        || ch->phaseLatch == 0               // *(char+133) == *(motion+108); model
-        || live->ready > 0) {                // *(node+8) > *motion (priority); model
-        // (the precise original gate uses motion-frame counters from the anim
-        //  system; with no anim handle those evaluate so the chain is skipped.)
+        || ch->nextAnim                      // *(char+128)
+        || ch->phaseLatch == 0               // *(char+133) == *(motion+108): modeled
+        || node->ready > 0) {                // (u8)*(node+8) > (int)*motion: modeled
         return 1;
     }
-    chained(live);                           // (*node[4])(char)
-    ch->phaseLatch = 0;                       // latch update (model)
+    chained(live);                           // call dword ptr [edx+4]
+    // *(char+133) = *(*(char+112)+108): copy the motion's current frame byte into
+    // the latch (NOT a clear). Modeled as the latch byte (anim frame is out of tree).
+    ch->phaseLatch = motion->ready;          // [ecx+85h] = [[ecx+70h]+6Ch]: modeled
     return 1;
 }
 
@@ -72,17 +86,17 @@ int CheckDurationExpiry(ActionNode* node) {
 void CheckDurationExpiryStep(ActionNode* node) { CheckDurationExpiry(node); }
 
 // gilde.exe 0x40b974 — VIBE_ActionQueue_FinishSetVisible (type 55).
-// When the status gate clears, toggle the owner's visibility from the node's
-// stored flag (node->args[1]) and free the node. The original gated on node[3]
-// (a status word); we gate on the first dispatch having occurred.
+//   if ( !result[3] ) { VIBE_Character_SetVisible(result[5], result[12]); Unlink(); }
+// 4-byte stride: result[3]=+0x0C=callCount, result[5]=+0x14=owner,
+// result[12]=+0x30=args[1] (the +48 slot, the stored visibility flag).
+// The gate is callCount==0 (fire once, on the first dispatch), and the visible
+// argument is args[1]; on any later call (callCount!=0) it is a no-op.
 void FinishSetVisible(ActionNode* node) {
-    // Original: if (!node[3]) { SetVisible(node[5], node[12]); Unlink(); }
-    // node[5]==owner(+20), node[12]==callCount/flag(+12). We use the stored
-    // visibility flag in args[1] and the install-time visible request.
-    Character* owner = node->owner;
-    int visible = node->args[1];
+    if (node->callCount != 0)            // if (result[3]) return result;  (no-op)
+        return;
+    Character* owner = node->owner;      // result[5] (+0x14)
+    int visible = node->args[1];         // result[12] (+0x30 == args[1])
     GetCharActionHooks().setVisible(owner, visible);
-    owner->visible = visible;
     UnlinkEntry(node);
 }
 

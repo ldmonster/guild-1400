@@ -59,7 +59,9 @@ i32 ComputeShadowClipRect(i32 dim, i32 minX, i32 maxX, i32 minY, i32 maxY,
     i32   v14   = minY;                       // y0
     i32   v50   = maxY;                       // y1
     float v40   = static_cast<float>(v49 - v51);
-    float v44   = 1.0f / v40;                 // uStep
+    // HARDEN: v44 = 1.0 / v40 is computed 80-bit (fld1; fdiv [float v40] @0x5f316e)
+    // then rounded to float; model as (float)(1.0/(double)v40), not float division.
+    float v44   = static_cast<float>(1.0 / static_cast<double>(v40)); // uStep
     float v39   = static_cast<float>(1.0 / static_cast<double>(maxY - minY)); // vStep
     float v43   = 0.0f;                       // vOff
     float v45   = 0.0f;                       // uOff
@@ -104,8 +106,13 @@ GroundVertex ProjectGroundVertex(i32 col, i32 row, u8 heightSample,
     GroundVertex v;
     v.x = static_cast<float>(static_cast<double>(col) * xStep + xBase);
     v.z = static_cast<float>(static_cast<double>(row) * zStep + zBase);
-    float h = static_cast<float>(static_cast<double>(heightSample) * yScale);
-    v.y = h + (groundY + kShadowZBias);
+    // HARDEN: v15 = height*yScale stays 80-bit on the x87 stack (fmul @0x5f2547)
+    // and is added to v37 (the precomputed float groundY+0.5) before the single
+    // fstp @0x5f2565. Keep the product as double; round once. The prior code
+    // rounded height*yScale to float first, double-rounding the Y.
+    double h = static_cast<double>(heightSample) * yScale;       // v15 (80-bit)
+    float bias = groundY + kShadowZBias;                          // v37 (float)
+    v.y = static_cast<float>(h + bias);                           // 0x5f255c/0x5f2565
     return v;
 }
 

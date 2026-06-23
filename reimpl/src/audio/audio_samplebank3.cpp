@@ -1,6 +1,7 @@
 // guild::audio::sb3 — see audio_samplebank3.h.  1:1 translations of the .txt
 // sample-bank parser/serializer + tree mutators + player slice of gilde.exe.
 #include "audio/audio_samplebank3.h"
+#include "crt/rand.h"
 
 #include <cstdio>
 #include <cstring>
@@ -29,6 +30,23 @@ static void StrNCopyPad(char* dst, const char* src, int n) {
         *dst++ = 0;
         --n;
     }
+}
+
+// Token space-encoding used by the .txt sample-bank format: scanf("%s") cannot
+// read embedded spaces, so the file stores names with every space written as a
+// '~' (0x7E).  After reading a token, LoadFromText decodes every '~' back to a
+// space; before writing a name, SaveToText encodes every space to '~'.  Both are
+// loc_5CB930 (StrStr) scans replacing the found byte in place:
+//   LoadFromText: for(i=StrStr(tok,"~"); i; i=StrStr(i+1,"~")) *i=' ';  (0x448b25)
+//   SaveToText:   for(i=StrStr(nm," ");  i; i=StrStr(i,  " ")) *i='~';  (0x448f18)
+// The SaveToText encode mutates the record's name buffer IN PLACE (observable).
+static void DecodeTildeToSpace(char* s) { // '~' -> ' '
+    for (char* p = s; *p; ++p)
+        if (*p == '~') *p = ' ';
+}
+static void EncodeSpaceToTilde(char* s) { // ' ' -> '~'  (in place, mutates name)
+    for (char* p = s; *p; ++p)
+        if (*p == ' ') *p = '~';
 }
 
 // loc_5CB930 — VIBE_Util_StrStr(eax=hay, edx=needle): pointer to first occurrence
@@ -96,9 +114,14 @@ int GetSampleFileSize(const char* path) {
 // substitution.  When no needle hits, the path is just `name` (no-op).
 static void RewritePath(char* dst, const char* name, const char* root, const char* needle) {
     // Copy `name` into a scratch buffer so we can mutate (the original works on a
-    // 256-byte stack copy filled by StrNCopyPad).
+    // 256-byte stack copy filled by StrNCopyPad). StrNCopyPad does NOT NUL-
+    // terminate when `name` fills all 256 bytes; the subsequent StrStr / strlen
+    // would then read past the buffer. Reserve one byte and terminate it so a
+    // 256+-char (malformed) name cannot drive an out-of-bounds read. Well-formed
+    // tokens (<=255 chars from the tokenizer) are unaffected.
     char scratch[256];
-    StrNCopyPad(scratch, name, 256);
+    StrNCopyPad(scratch, name, 255);
+    scratch[255] = 0;
     char* hit = StrStrH(scratch, needle);
     if (!hit) {
         // No token: dst = scratch (already the stored name).  /*0x4495f0 false*/
@@ -106,14 +129,19 @@ static void RewritePath(char* dst, const char* name, const char* root, const cha
         return;
     }
     *hit = 0;                       // terminate before the token /*0x449600*/
-    // dst = [scratch prefix][root][scratch after token].
+    // dst = [scratch prefix][root][scratch after token]. The destination buffer
+    // is 256 bytes in every caller; bound the writes to that capacity so a long
+    // `root`/tail (malformed input) fails safe instead of overrunning the stack.
+    constexpr std::size_t kCap = 256;
+    std::size_t w = 0;
     std::size_t plen = std::strlen(scratch);
-    std::memcpy(dst, scratch, plen);
-    char* w = dst + plen;
-    for (const char* r = root; *r; ++r) *w++ = *r; // append root /*0x44960c..*/
+    std::size_t copy = plen < kCap - 1 ? plen : kCap - 1;
+    std::memcpy(dst, scratch, copy);
+    w = copy;
+    for (const char* r = root; *r && w < kCap - 1; ++r) dst[w++] = *r; // append root
     const char* tail = hit + 5;     // skip the 5-char token /*needle+5*/
-    while (*tail) *w++ = *tail++;    // append remainder      /*0x449644..*/
-    *w = 0;
+    while (*tail && w < kCap - 1) dst[w++] = *tail++;                   // append remainder
+    dst[w] = 0;
 }
 
 // ---- tree allocation helpers (VIBE_Memory_AllocDebug + zero-fill) ------------
@@ -255,6 +283,7 @@ int LoadFromText(const char* root, const char* path) {
     if (ReadTokenH(stream, tok, 256) == -1) {       // 0x448a08
         status = -1;
     } else {
+        DecodeTildeToSpace(tok);                    // 0x448b18 '~'->' '
         StrNCopyPad(g_activeBank->name, tok, 256);
     }
 
@@ -268,6 +297,7 @@ int LoadFromText(const char* root, const char* path) {
         if (lastSample) lastSample->smpNext = node; // 0x448a76
         else g_activeBank->sampleHead = node;       // 0x448b4e
         lastSample = node;
+        DecodeTildeToSpace(tok);                    // 0x448ab9 '~'->' '
         char resolved[256];
         RewritePath(resolved, tok, root, "%lang");  // path rewrite (no-op typ.)
         StrNCopyPad(node->name, tok, 256);          // 0x448ada (stores the token)
@@ -285,6 +315,7 @@ int LoadFromText(const char* root, const char* path) {
             if (lastVar) lastVar->varNext = var;    // 0x448c4f
             else g_activeBank->varNext = var;       // 0x448e8f
             lastVar = var;
+            DecodeTildeToSpace(tok);                // 0x448c92 '~'->' '
             StrNCopyPad(var->name, tok, 50);        // 0x448cb8
 
             // Samples of this variation until "{EndOfVariation}".
@@ -297,6 +328,7 @@ int LoadFromText(const char* root, const char* path) {
                 if (lastVarSample) lastVarSample->smpNext = node; // 0x448d1b
                 else var->sampleHead = node;        // 0x448eaf (var first sample)
                 lastVarSample = node;
+                DecodeTildeToSpace(tok);            // 0x448d5e '~'->' '
                 char resolved[256];
                 RewritePath(resolved, tok, root, "%lang");
                 StrNCopyPad(node->name, tok, 256);  // 0x448d7f
@@ -321,20 +353,25 @@ int SaveToText(const char* path) {
     if (!stream) return -1;                         // 0x448efa
     char line[512];
 
-    // "%s\n" of the bank name. /*0x448f35*/
+    // "%s\n" of the bank name.  Every space in the name is rewritten to '~'
+    // IN PLACE before the write (0x448f08..0x448f23) — an observable side effect.
+    EncodeSpaceToTilde(g_activeBank->name);         // 0x448f18 ' '->'~'
     std::snprintf(line, sizeof(line), "%s\n", g_activeBank->name);
     WriteTextH(stream, line);
 
     for (SbRecord* s = g_activeBank->sampleHead; s; s = s->smpNext) { // 0x448f40
+        EncodeSpaceToTilde(s->name);                                 // 0x448f62 ' '->'~'
         std::snprintf(line, sizeof(line), "%s\n", s->name);          // 0x448f76
         WriteTextH(stream, line);
     }
     WriteTextH(stream, "{EndOfSamples}\n");         // 0x448f8e
 
     for (SbRecord* v = g_activeBank->varNext; v; v = v->varNext) {   // 0x448f99
+        EncodeSpaceToTilde(v->name);                                 // 0x448fc3 ' '->'~'
         std::snprintf(line, sizeof(line), "%s\n", v->name);          // 0x448fd7
         WriteTextH(stream, line);
         for (SbRecord* s = v->sampleHead; s; s = s->smpNext) {       // 0x448fe4
+            EncodeSpaceToTilde(s->name);                             // 0x448ff5 ' '->'~'
             std::snprintf(line, sizeof(line), "%s\n", s->name);      // 0x449009
             WriteTextH(stream, line);
         }
@@ -394,28 +431,46 @@ int ResolveSamplePaths(const char* root) {
 }
 
 // gilde.exe 0x4490e4 — VIBE_SampleBank_PlaySample.
-// `name` with no '.' -> a variation name: choose sample (index % count), recurse.
+// `name` with no '.' -> a variation name: the binary draws ONE VIBE_Util_RandNext
+//   (crt::RandNext, the 1103515245 LCG) and picks sample `RandNext() % count`,
+//   then recurses with that (dotted) sample's name.  The original has no caller-
+//   supplied index — selection is purely random; `index` is retained only as a
+//   vestigial seed-free parameter and is IGNORED on the variation branch.
 // A dotted name -> a concrete sample: probe its size and "play" it.  The Miles
 // device interaction is routed through the hooks (no-op by default).
 int PlaySample(const char* name, int index) {
+    (void)index; // binary has no index arg; variation pick is RandNext()%count
     // loc_5CB930(name, ".") != 0  <=>  name contains a '.'.  /*0x449108*/
     char scan[256];
     StrNCopyPad(scan, name, 256);
     bool hasDot = StrStrH(scan, ".") != nullptr;
     if (!hasDot) {
-        // Variation branch.  CountSamples then walk to (index % count).
+        // Variation branch.  Disasm order @0x449333..0x44935e:
+        //   r   = RandNext()                 ; one RNG draw, ALWAYS
+        //   cnt = CountSamples(name)         ; samples in this variation
+        //   idx = r % cnt  (signed idiv)     ; edx = remainder
+        //   var = FindVariationByName(name)
+        //   walk var->sampleHead, dec idx until == -1 -> picked sample
+        int r = crt::RandNext();                    // 0x449333 (RNG state advances)
+        // CountSamples(name): walk the variation's sample list.
         SbRecord* var = nullptr;
         for (SbRecord* v = g_activeBank ? g_activeBank->varNext : nullptr; v; v = v->varNext)
             if (std::strcmp(name, v->name) == 0) { var = v; break; } // FindVariationByName
-        if (!var) return -1;                        // 0x449122
-        // Walk: i starts at first sample, decrement index until -1.  /*0x44935e*/
+        // The binary does `idiv cnt` BEFORE the var-existence test, so an unknown
+        // variation (cnt==0) is a divide-by-zero crash in the original; callers
+        // never pass one.  We return -1 instead of crashing (RNG already drawn).
+        if (!var) return -1;                        // 0x449122 (binary: would crash)
+        int cnt = 0;                                // CountSamples(name) 0x44933c
+        for (SbRecord* s = var->sampleHead; s; s = s->smpNext) ++cnt;
+        if (cnt == 0) return 0;                     // avoid div-by-zero; no sample
+        int idx = r % cnt;                          // idiv: edx = signed remainder
+        // Walk: i starts at first sample, decrement idx until -1.  /*0x44935e*/
         SbRecord* s = var->sampleHead;
-        int n = index;
         while (s) {
-            if (--n == -1) break;
+            if (--idx == -1) break;
             s = s->smpNext;
         }
-        if (s) return PlaySample(s->name, /*index unused on recurse*/ 0); // 0x44937a
+        if (s) return PlaySample(s->name, 0);       // 0x44937a (recurse, dotted)
         return 0;                                   // 0x44913f
     }
 

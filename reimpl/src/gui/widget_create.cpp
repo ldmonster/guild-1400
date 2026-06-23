@@ -124,7 +124,7 @@ int Object_AddTextLabel(i16 x, i16 y, int winSlot, const char* text) {
     w.type()       = kTypeLabel;                     // +24 = 67 'C'
     w.x()          = static_cast<i16>(win.x() + x);  // +16 = win.x + a1
     w.y()          = static_cast<i16>(win.y() + y - win.scrollCur()); // +18 = win.y + a2 - scroll
-    i16 propW      = Property_Get(text, w.at<i32>(110) >> 16); // VIBE_Property_Get
+    i16 propW      = Property_Get(text, w.ld<i32>(110) >> 16); // VIBE_Property_Get
     w.order()      = 2;                              // +26
     w.w()          = static_cast<i16>(propW + 96);   // +20 = width + 96
     w.h()          = static_cast<i16>(g_defaultCtrlH); // +22 = dword_69FFB0 word
@@ -156,7 +156,7 @@ int Object_AddButtonLabel(i16 x, i16 y, int winSlot, const char* text) {
     w.type()    = kTypeButton;                       // +24 = 70 'F'
     w.x()       = static_cast<i16>(win.x() + x);     // +16
     w.y()       = static_cast<i16>(win.y() + y - win.scrollCur()); // +18
-    i16 propW   = Property_Get(text, w.at<i32>(110) >> 16);
+    i16 propW   = Property_Get(text, w.ld<i32>(110) >> 16);
     w.order()   = 2;                                 // +26
     w.clipY0()  = 0;                                 // +32 = 0
     w.clipX0()  = 0;                                 // +28 = 0
@@ -176,7 +176,7 @@ int Object_SetText(int widgetIdx, const char* text) {
     CopyStr(reinterpret_cast<char*>(&w.at<char>(116)), text); // overwrite text buffer +116
     // Recompute width unless either render-override flag (+88 / +92) is set.
     if (w.at<i32>(88) == 0 && w.at<i32>(92) == 0) {
-        i16 propW = Property_Get(text, w.at<i32>(110) >> 16);
+        i16 propW = Property_Get(text, w.ld<i32>(110) >> 16);
         w.w() = propW;                               // +20
         return propW;
     }
@@ -229,14 +229,18 @@ int Widget_CreateSlider(i16 x, i16 y, int value, int range, int maxVal, int gfxB
     // The original picks horizontal vs vertical from flags bit 1/2 and walks the 84-byte
     // metric table at gfxBase+1 / gfxBase / gfxBase+3. We reproduce the size selection.
     int n = 0;
+    // tile is a gfx metric (>>16 of the slider gfx record); in the real game the
+    // slider gfx always resolves so tile != 0. Guard tile==0 (only reachable with an
+    // unresolved gfxBase, e.g. a headless form parse) so the tile-count divide can't
+    // fault — behaviour-identical for every real input.
     if (flags & 1) {                                 // vertical
         int tile = GfxMetricDword(gfxBase + 1, 80) >> 16;
-        n = range / tile + (range % tile ? 1 : 0);
+        n = tile ? range / tile + (range % tile ? 1 : 0) : 0;
         w.w() = SliderTrackExtent(gfxBase, flags);   // +20
         w.h() = static_cast<i16>(range + 2 * GfxMetricWord(gfxBase, 82));
     } else if (flags & 2) {                          // horizontal
         int tile = GfxMetricDword(gfxBase + 1, 78) >> 16;
-        n = range / tile + (range % tile ? 1 : 0);
+        n = tile ? range / tile + (range % tile ? 1 : 0) : 0;
         w.h() = SliderTrackExtent(gfxBase, flags);   // +22
         w.w() = static_cast<i16>(range + 2 * (GfxMetricDword(gfxBase, 80) >> 16)); // +20
     }
@@ -436,7 +440,7 @@ int Object_RecomputeSize(int widgetIdx) {
     int animMargin = 24;                             // v18 default when AnimationFlags fails
     if (w.at<i32>(88)) { w.w() = static_cast<i16>(animMargin); return animMargin; }
     int width = Property_Get(reinterpret_cast<const char*>(&w.at<char>(120)),
-                             w.at<i32>(110) >> 16) + animMargin + 6;
+                             w.ld<i32>(110) >> 16) + animMargin + 6;
     w.w() = static_cast<i16>(width);
     return width;
 }
@@ -489,7 +493,7 @@ char Object_SetEditText(int widgetIdx, const char* text) {
     Widget& w = g_widgets[widgetIdx];
     // The owning-window shared text-buffer splice (+44 buffer, +120 cursor, +188 length;
     // the VIBE_Util_MemMove dance) is DEFERRED. Model part: recompute width + inline copy.
-    w.w() = Property_Get(text, w.at<i32>(110) >> 16); // +20
+    w.w() = Property_Get(text, w.ld<i32>(110) >> 16); // +20
     CopyStr(reinterpret_cast<char*>(&w.at<char>(124)), text); // +124 inline copy
     return 0;
 }

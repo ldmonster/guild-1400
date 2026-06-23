@@ -134,7 +134,41 @@ struct SellResolve {
     // Carry-capacity inputs (destCarried path):
     u8   personKind = 0; bool hasAvatar = false;
     int  typeCategory = 0; bool carriable = true;
+    // --- storage-node phase context (0x496b90 node mutations; consumed by the
+    //     installed SellStoragePhase — see buildingtype_callers.h, which owns
+    //     the 1:1 phases).  Null/default values keep each phase step inert. ---
+    bool srcIdPresent  = true;        // *(a1+20) != -1 (source-phase gate)
+    bool destIdPresent = true;        // *(a1+16) != -1 (dest-phase gate)
+    i32  destId = -1;                 // *(a1+16) (AddObjekt parent id)
+    u8*  srcStockNodePtr  = nullptr;  // v56 — source stock node (count dword @+14)
+    u8*  destStockNodePtr = nullptr;  // v55 — existing dest stock node (null => ensure)
+    u8*  srcBuildingRec   = nullptr;  // v52 — source building record (RemoveStorageRoom)
+    u8*  destBuildingRec  = nullptr;  // v50 — dest building record (AllocStorageRoom)
+    u8*  srcStorageRec    = nullptr;  // v4  — source storage container (parent arg)
+    u8*  destStorageRec   = nullptr;  // v57 — dest storage container (count-bump gate)
+    u8*  srcChildList     = nullptr;  // v54 — source child-list field (RemoveByProt)
+    const u8* destOwnerRec = nullptr; // v3  — dest owner record (+2 kind byte)
+    i32  lastDestNodeId = 0;          // out: *(destNode+2) (the dword_631290 latch)
 };
+
+// ---------------------------------------------------------------------------
+// Storage-node phase backend — the 0x496b90 source/dest stock-node mutations
+// trade_sell had deferred (storage-room alloc/remove, dest node ensure).  The
+// 1:1 phases live in buildingtype_callers.{h,cpp} (SellStoragePhase1to1) and
+// are installed by WireBuildingCallers().  The default base instance is inert
+// (both phases succeed without touching anything — the pre-wiring behavior).
+// ---------------------------------------------------------------------------
+struct SellStoragePhase {
+    virtual ~SellStoragePhase() = default;
+    // 0x496ec2..0x496f47: source node count decrement + depleted-node removal.
+    // Returns false on the original's `return 1` reject paths.
+    virtual bool SourcePhase(SellResolve& r, i32 qty) { (void)r; (void)qty; return true; }
+    // 0x496f4b..0x4974ce + LABEL_58: dest node ensure / count increment + latch.
+    virtual bool DestPhase(SellResolve& r, i32 qty) { (void)r; (void)qty; return true; }
+};
+void TradeSetStoragePhase(SellStoragePhase* phase);   // nullptr => inert default
+SellStoragePhase* TradeStoragePhase();
+
 // Resolves and (optionally) commits the transfer; returns the moved quantity.
 i32 TradeSellObjektResolve(SellResolve& r, bool commit);
 

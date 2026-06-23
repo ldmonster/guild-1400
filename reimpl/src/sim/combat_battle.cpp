@@ -8,14 +8,18 @@ namespace guild::sim {
 
 // ---------------------------------------------------------------------------
 // Recovered constant: VIBE_Math_RandomFloatScaled @0x58b910.
-//   return (double)(int)RandNext() * flt_62675C;   flt_62675C == 1/32767.
+//   fild int; fmul flt_62675C  ->  (double)(int)RandNext() * (double)flt_62675C.
+// flt_62675C bytes = 00 01 00 38 == float 0x38000100 == 3.0518509447574615e-05
+//   (float-rounded 1/32767, NOT exact double 1/32767). Confirmed via get_bytes;
+//   the multiply uses the FLOAT value promoted to double, so we must keep float.
 // RandNext() is in [0, 0x7FFF] (== 0..32767), so the result is in [0, 1].
 // ---------------------------------------------------------------------------
-static constexpr double kRandFloatScaledScale = 1.0 / 32767.0; // flt_62675C
+static constexpr float kRandFloatScaledScale = 3.0518509447574615e-05f; // flt_62675C (0x38000100)
 
 // gilde.exe 0x58b910 — VIBE_Math_RandomFloatScaled.
 static double RandomFloatScaled() {
-    return static_cast<double>(crt::RandNext()) * kRandFloatScaledScale;
+    return static_cast<double>(crt::RandNext()) *
+           static_cast<double>(kRandFloatScaledScale);
 }
 
 // ===========================================================================
@@ -23,25 +27,33 @@ static double RandomFloatScaled() {
 // ===========================================================================
 
 // gilde.exe 0x485dc0 — the weapon-type weight switch (the v8 value).
+// IMPORTANT: in the original `v8` is a FLOAT; the constants are float-precision
+// (0.80000001 == float(0.8), 0.69999999 == float(0.7), 0.89999998 == float(0.9),
+// 0.30000001 == float(0.3)). Return float-rounded values so the strength math is
+// bit-identical to the binary (double 0.8 differs from float(0.8) by ~1.2e-8).
 double WeaponWeight(i16 weaponType) {
     switch (static_cast<u16>(weaponType)) {
-        case 340:           return 0.5;            // stab
-        case 342:           return 0.8;            // 0x156 sword
-        case 344:           return 1.0;            // 0x158 sword2
-        case 350:           return 0.7;            // 0x15E (LABEL_20)
-        case 352:           return 0.7;            // 0x160 dodge
-        case 366:           return 0.8;            // stab2 banner
-        case 374:           return 0.9;            // thrown bomb
-        default:            return 0.3;            // everything else (LABEL_22)
+        case 340:           return static_cast<float>(0.5);   // stab (0.5 exact)
+        case 342:           return static_cast<float>(0.8);   // 0x156 sword (0.80000001)
+        case 344:           return static_cast<float>(1.0);   // 0x158 sword2 (1.0 exact)
+        case 350:           return static_cast<float>(0.7);   // 0x15E (0.69999999)
+        case 352:           return static_cast<float>(0.7);   // 0x160 dodge (0.69999999)
+        case 366:           return static_cast<float>(0.8);   // stab2 banner (0.80000001)
+        case 374:           return static_cast<float>(0.9);   // thrown bomb (0.89999998)
+        default:            return static_cast<float>(0.3);   // LABEL_22 (0.30000001)
     }
 }
 
 // gilde.exe 0x485dc0 — VIBE_Combat_GetSoundRangeScale.
+//   v7 = (float)EvalProductionRating(u, 3);  v8 = (float)weight;
+//   v6 = (float)(v7 * v8);                    // FLOAT multiply, float result
+//   return (double)ComputeOutputRatio(u) * (double)v6;
 double GetSoundRangeScale(const CombatUnitAI& u) {
-    double rating = static_cast<double>(u.productionRating); // EvalProductionRating(u,3)
-    double weight = WeaponWeight(u.weaponType);
-    double v6 = rating * weight;
-    return static_cast<double>(u.outputRatio) * v6;          // * ComputeOutputRatio
+    float v7 = u.productionRating;                            // EvalProductionRating(u,3)
+    float v8 = static_cast<float>(WeaponWeight(u.weaponType));
+    float v6 = v7 * v8;                                       // float intermediate
+    return static_cast<double>(u.outputRatio) *
+           static_cast<double>(v6);                           // * ComputeOutputRatio
 }
 
 // ===========================================================================
@@ -52,21 +64,26 @@ double GetSoundRangeScale(const CombatUnitAI& u) {
 double ScoreUnitForRole(const CombatUnitAI& u, u8 role) {
     bool deadRangedTarget =
         (u.weaponClass == 1 || u.weaponClass == 2) && u.activeTargetHp <= 0;
+    // NOTE: cases 0,1,4,5 store the result through a FLOAT stack slot in the
+    // original (v9/v11 result, v13), so the return is float-rounded. Cases 2/3
+    // return exact double literals. Reproduce the float rounding.
     switch (role) {
         case 0: {                                  // attack
-            double mult = u.role ? 0.5 : 1.0;      // *(a1+452) nonzero -> 0.5
+            float mult = u.role ? 0.5f : 1.0f;     // *(a1+452) nonzero -> 0.5
             if (deadRangedTarget)
-                mult = 0.2;
-            return GetSoundRangeScale(u) * mult;
+                mult = 0.2f;
+            // v9 = (float)(GetSoundRangeScale(u) * v10)
+            return static_cast<float>(GetSoundRangeScale(u) * static_cast<double>(mult));
         }
         case 1: {                                  // conquer ware
-            double mult;
-            if (u.role == 1)        mult = 1.0;
-            else if (u.role)        mult = 0.5;
-            else                    mult = 0.40000001;  // float 0.4
+            float mult;
+            if (u.role == 1)        mult = 1.0f;
+            else if (u.role)        mult = 0.5f;
+            else                    mult = static_cast<float>(0.40000001); // float 0.4
             if (deadRangedTarget)
-                mult = 1.0;
-            return mult / GetSoundRangeScale(u);
+                mult = 1.0f;
+            // return (float)(v11 / GetSoundRangeScale(u))
+            return static_cast<float>(static_cast<double>(mult) / GetSoundRangeScale(u));
         }
         case 2:                                    // move to conquer
             return (u.role == 2) ? 1.0 : 0.5;
@@ -74,12 +91,13 @@ double ScoreUnitForRole(const CombatUnitAI& u, u8 role) {
             return 1.0;
         case 4:                                    // tile
             if (u.role == 2)
-                return 0.2;
-            return 1.0 / static_cast<double>(u.outputRatio);
+                return 0.2;                        // result = 0.2 (double slot)
+            // v13 = (float)(1.0 / ComputeOutputRatio(a1)); result = v13
+            return static_cast<float>(1.0 / static_cast<double>(u.outputRatio));
         case 5:                                    // escape
             if (u.role == 2)
                 return 0.2;
-            return 1.0 / static_cast<double>(u.outputRatio);
+            return static_cast<float>(1.0 / static_cast<double>(u.outputRatio));
         default:
             return 0.0;                            // v9 == 0.0 default
     }
@@ -144,22 +162,26 @@ void AssignUnitsToRoles(std::vector<CombatUnitAI*>& units, const RoleWeights& we
     // mirror that with a working copy that we null out on assignment.
     std::vector<CombatUnitAI*> pool = units;
 
+    // The chosen role index (v29) is STICKY across outer iterations in the binary:
+    // when no cumulative threshold covers the roll (v13 reaches 6 -> break) v29 is
+    // left at its previous value (the binary leaves it uninitialized on the very
+    // first iteration; that pure edge case is UB in the original). We seed it to 5
+    // (the documented last-index fallthrough) and only update it when a threshold
+    // matches, reproducing the sticky carry-over for the well-defined cases.
+    u8 chosenRole = 5;
     for (int k = 0; k < count; ++k) {
         double roll = RandomFloatScaled();             // v26 (CRT LCG)
         // Pick the role whose cumulative threshold first covers the roll.
-        u8 chosenRole = 5;
         if (roll <= static_cast<double>(weights[0])) {
-            chosenRole = 0;
+            chosenRole = 0;                             // LABEL_31 with v13 == 0
         } else {
-            int r = 1;
-            for (; r < 6; ++r) {
+            for (int r = 1; r < 6; ++r) {              // v13 = 1..5
                 if (roll <= static_cast<double>(weights[r])) {
-                    chosenRole = static_cast<u8>(r);
+                    chosenRole = static_cast<u8>(r);    // LABEL_31: v29 = v13
                     break;
                 }
+                // v13 >= 6 -> break leaving v29 (chosenRole) unchanged (sticky).
             }
-            if (r >= 6)
-                chosenRole = 5;                         // last index if none cover
         }
 
         // Among the remaining pool, pick the best-scoring unit for the role.
@@ -195,7 +217,10 @@ void AssignUnitsToRoles(std::vector<CombatUnitAI*>& units, const RoleWeights& we
 BattleAction BuildOrderForUnit(const CombatUnitAI& u, bool alive, bool captured) {
     if (!u.unit)
         return BattleAction::None;
-    if (alive && captured)                             // actor[533]==1
+    // gilde.exe 0x48c27f: the switch is entered ONLY when the unit is alive AND
+    // not captured ( *(a2+8) && actor[533] != 1 ). A dead unit (and a captured
+    // one) builds no order.
+    if (!alive || captured)                            // *(a2+8)==0 or actor[533]==1
         return BattleAction::None;
     switch (u.role) {                                  // *(a2+452)
         case kRoleAttack: {
@@ -223,22 +248,31 @@ BattleAction BuildOrderForUnit(const CombatUnitAI& u, bool alive, bool captured)
 AttackEval EvaluateAttack(double distance, double weaponRange, u8 accuracyByte,
                           u8 selfSkill, double skillMod, bool hasUnitTarget,
                           float targetWorth, u8 weaponMinDmg, u8 weaponMaxDmg,
-                          CutsceneRng& rng) {
+                          CutsceneRng& rng, bool alwaysFires) {
     AttackEval e;
     // In range if within the weapon's reach (v16 > range -> v84 = 0).
     e.inRange = (distance <= weaponRange);
     if (!e.inRange)
         return e;
 
-    // Hit-chance: roll a CRT d255, then compute the accuracy threshold.
-    // chance = (i16)accuracyByte * 0.01 * (i16)selfSkill [* skillMod];
-    int roll = Math_RandomModulo(0xFF);                  // RandomModulo(255)
-    double acc = static_cast<double>(static_cast<i16>(accuracyByte)) * kAccuracyScale;
-    double chanceF = acc * static_cast<double>(static_cast<i16>(selfSkill));
-    if (skillMod != 1.0)
-        chanceF *= skillMod;                             // dword_631200 modifier
-    int chance = static_cast<int>(chanceF);
-    e.fires = roll > (255 - chance);                     // v38 > 255 - (int)v37
+    // gilde.exe 0x491688 LABEL_46:  if ( v87[88] == 2 || ( ...roll... ) ).
+    // weaponClass==2 short-circuits the `||`, so the hit-chance roll (and the
+    // Math_RandomModulo(255) CRT-LCG draw) is SKIPPED and the shot always fires.
+    if (alwaysFires) {
+        e.fires = true;
+    } else {
+        // Hit-chance: roll a CRT d255, then compute the accuracy threshold.
+        // chance = (i16)accuracyByte * 0.01 * (i16)selfSkill [* skillMod];
+        int roll = Math_RandomModulo(0xFF);              // RandomModulo(255)
+        double acc = static_cast<double>(static_cast<i16>(accuracyByte)) * kAccuracyScale;
+        double chanceF = acc * static_cast<double>(static_cast<i16>(selfSkill));
+        if (skillMod != 1.0)
+            chanceF *= skillMod;                         // dword_631200 modifier
+        // The chance is truncated by VIBE_Coord_ConvertX (TRUNCATE toward zero);
+        // for the always-positive chanceF this matches the (int) cast.
+        int chance = static_cast<int>(chanceF);
+        e.fires = roll > (255 - chance);                 // v39 > 255 - (int)v38
+    }
 
     if (e.fires) {
         int range = static_cast<int>(weaponMaxDmg) - static_cast<int>(weaponMinDmg);
@@ -294,7 +328,8 @@ bool TickOrderSlot(OrderSlot& slot, CombatUnitAI& self, CombatUnitAI* target,
             AttackEval e = EvaluateAttack(
                 ctx.distanceToTarget, ctx.weaponRange, ctx.accuracyByte,
                 ctx.selfSkill, ctx.skillMod, hasUnitTarget, targetWorth,
-                self.weaponMinDmg, self.weaponMaxDmg, *ctx.rng);
+                self.weaponMinDmg, self.weaponMaxDmg, *ctx.rng,
+                /*alwaysFires=*/self.weaponClass == 2);
             slot.firing = e.inRange ? 1 : 0;             // v4[29] = v84
             slot.predictedDamage = e.predictedDamage;    // *(v4+9)
             slot.hitFlag = e.fires ? 1 : 0;              // *(v4+8)
@@ -352,16 +387,23 @@ BattleWinner EvaluateBattleOutcome(const std::vector<CombatUnitAI*>& attackers,
 // ===========================================================================
 
 namespace {
-double SumStrength(const std::vector<CombatUnitAI*>& side) {
-    double sum = 0.0;
+// gilde.exe 0x490146/0x4901c8: the strength is accumulated as an INT with a
+// per-iteration VIBE_Coord_ConvertX TRUNCATION:  v59 = (int)(GetSoundRangeScale +
+// (double)v59).  This is NOT the same as summing in double and truncating once at
+// the end (e.g. 1.6,1.6,1.6 -> 1,2,3 step-wise == 3, vs (int)4.8 == 4). Reproduce
+// the per-step truncation exactly.
+int SumStrength(const std::vector<CombatUnitAI*>& side) {
+    int acc = 0;
     for (const CombatUnitAI* u : side) {
         if (!u || !u->unit)
             continue;
         u8 a = u->unit->alive;
-        if (a != 0 && a != 4)                            // alive and not fled
-            sum += GetSoundRangeScale(*u);
+        if (a != 0 && a != 4) {                          // alive and not fled
+            double sum = GetSoundRangeScale(*u) + static_cast<double>(acc);
+            acc = static_cast<int>(sum);                 // ConvertX truncate
+        }
     }
-    return sum;
+    return acc;
 }
 } // namespace
 
@@ -369,15 +411,20 @@ double SumStrength(const std::vector<CombatUnitAI*>& side) {
 AutoResolveResult AutoResolveBattle(const std::vector<CombatUnitAI*>& attackers,
                                     const std::vector<CombatUnitAI*>& defenders) {
     AutoResolveResult r;
-    double atkSum = SumStrength(attackers);              // v58 accumulation
-    double defSum = SumStrength(defenders);              // v57 accumulation
+    // gilde.exe: the attacker units live at +128 (v59), the defenders at +192
+    // (v58). Each strength is an int-with-per-step-ConvertX-truncation sum.
+    int atkSum = SumStrength(attackers);                 // v59 (offset +128)
+    int defSum = SumStrength(defenders);                 // v58 (offset +192)
 
-    // The original evaluates: defenderScore = RandomModulo(30) + v57; then
-    // attackerScore = v58 + RandomModulo(30). The two RandomModulo calls are in
-    // that source order (defender +30 first, attacker +30 second).
-    int defScore = Math_RandomModulo(0x1E) + static_cast<int>(defSum);   // v31 (int)
-    // Begin = (unsigned __int16)(v58 + RandomModulo(30)) — note the u16 truncation.
-    int atkScore = static_cast<u16>(static_cast<int>(atkSum) + Math_RandomModulo(0x1E));
+    // gilde.exe 0x490232/0x49024a: defender score (v31) is rolled FIRST, attacker
+    // score (Begin) SECOND. The (u16) applies only to the RandomModulo(30) result
+    // (always < 30, so a no-op) — there is NO outer u16 truncation of the sum.
+    //   v31   = (u16)RandomModulo(30) + v58(defenderSum)
+    //   Begin = v59(attackerSum) + (u16)RandomModulo(30)
+    int defRoll = static_cast<u16>(Math_RandomModulo(0x1E));
+    int defScore = defRoll + defSum;                     // v31
+    int atkRoll = static_cast<u16>(Math_RandomModulo(0x1E));
+    int atkScore = atkSum + atkRoll;                     // Begin
 
     r.attackerScore = atkScore;
     r.defenderScore = defScore;

@@ -23,13 +23,13 @@ MethodEnv Env() { MethodEnv e = guild::ai::DefaultMethodEnv(); e.rng_mod = RngSt
 TEST(Meisterai3E2E, SessionDispatchAcrossScorers) {
     MethodEnv e = Env();
 
-    // Type 2 (RandomValue): returns rng_mod(modulus).
+    // Type 2 (RandomValue @0x467994): returns rng_mod(7) — modulus hardcoded 7 in binary.
     {
         SessionInputs in;
-        in.sessionType = 2; in.match2 = true; in.randModulus = 5;
-        static const int seq[] = {13};  // 13 % 5 = 3
+        in.sessionType = 2; in.match2 = true;
+        static const int seq[] = {13};  // 13 % 7 = 6
         Reset(seq, 1);
-        CHECK_EQ(guild::ai::EvaluateSessionDecision(in, e), 3);
+        CHECK_EQ(guild::ai::EvaluateSessionDecision(in, e), 6);
     }
 
     // Type 5 (purchase desire): delegates to EvalPurchaseDesire.

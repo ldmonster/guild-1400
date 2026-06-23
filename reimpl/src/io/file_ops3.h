@@ -48,11 +48,21 @@ struct FileOps3Hooks {
     guild::u32 (*getCurrentDir)(guild::u32 size, char* buf) = nullptr;
     // VIBE_File_MapLastError() — translate the OS error into errno. Default: no-op.
     void (*mapLastError)() = nullptr;
-    // VIBE_Runtime_SetErrnoEinval(). Default: no-op.
-    void (*setErrnoEinval)() = nullptr;
+    // VIBE_Runtime_SetErrnoEinval(code@eax) @0x5fb1c0 — store `code` into the CRT
+    // errno slot ([off_64A90C()+4] = code). It is NOT a fixed-EINVAL setter: the
+    // working-dir path passes 14 (EINVAL) when the caller buffer is too small and
+    // 5 (EIO) when the allocation fails. Default: no-op.
+    void (*setErrnoEinval)(int code) = nullptr;
     // VIBE_Memory_AllocFromFreeList(size). Default returns nullptr.
     void* (*allocMem)(guild::u32 size) = nullptr;
+    // VIBE_Memory_FreeToFreeList(ptr) — partner of allocMem; releases a buffer
+    // returned by VfsGetWorkingDir(nullptr,...). Default: no-op.
+    void (*freeMem)(void* ptr) = nullptr;
 };
+
+// Release a buffer obtained from VfsGetWorkingDir(nullptr,...) via the installed
+// freeMem hook (no-op if unset). Lets owners free the returned working-dir block.
+void VfsFreeMem(void* ptr);
 
 // Install a hook backend; pass nullptr to restore the inert defaults. Returns
 // the previously-installed hooks.

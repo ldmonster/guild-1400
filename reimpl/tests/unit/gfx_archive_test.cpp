@@ -187,3 +187,101 @@ TEST(GfxArchive, MalformedHeaderRejected) {
     GfxArchive arc2;
     CHECK(!arc2.LoadFromMemory(bigcount));
 }
+
+// ===========================================================================
+// HARDENING (wave-11): malformed gilde.gfx / SHAPBANK blobs. Each must be
+// rejected (false / empty out) without reading past the buffer (ASAN+UBSAN).
+// ===========================================================================
+
+TEST(GfxArchiveHarden, EmptyAndOneByteBuffers) {
+    GfxArchive arc;
+    for (std::size_t n = 0; n <= 4; ++n) {
+        std::vector<u8> b(n, 0xAB);
+        CHECK(!arc.LoadFromMemory(b));   // < 4-byte count, or count without records
+        CHECK(!arc.ok());
+    }
+}
+
+TEST(GfxArchiveHarden, AbsurdCountRejected) {
+    std::vector<u8> b(4, 0);
+    PutU32(b, 0, 0xFFFFFFFFu);            // count overflowing the file by far
+    GfxArchive arc;
+    CHECK(!arc.LoadFromMemory(b));
+}
+
+TEST(GfxArchiveHarden, RecordOffsetPastBuffer) {
+    // One record whose dataOffset points past EOF: ShapeCount/DecodeShape must
+    // bail (not read OOB) even though the directory itself parsed.
+    const u32 count = 1;
+    std::vector<u8> file(4 + count * 84, 0);
+    PutU32(file, 0, count);
+    std::size_t base = 4;
+    std::memcpy(file.data() + base, "_BAD", 4);
+    PutU32(file, base + 48, 0xFFFF0000u);   // dataOffset way past EOF
+    PutU32(file, base + 56, 0x100);         // dataSize
+    GfxArchive arc;
+    CHECK(arc.LoadFromMemory(file));        // directory parses
+    CHECK_EQ(arc.ShapeCount(0), 0);         // out-of-range blob -> 0, no OOB
+    DecodedShape sh;
+    CHECK(!arc.DecodeShape(0, 0, sh));      // safe reject
+}
+
+TEST(GfxArchiveHarden, ShapeCountVsBlobMismatch) {
+    // Blob declares a shape count but is too small to hold the offset table /
+    // shape header. DecodeShapeBlob must reject without over-reading.
+    std::vector<u8> blob(0x49, 0);          // just big enough to read count+table[0]
+    PutU16(blob, 0x2A, 4);                  // claims 4 shapes
+    PutU32(blob, 0x45, 0x1000);             // offsetTable[0] points past the blob
+    DecodedShape sh;
+    CHECK(!DecodeShapeBlob(blob.data(), blob.size(), 0, sh));
+    CHECK(!DecodeShapeBlob(blob.data(), blob.size(), 3, sh));
+}
+
+TEST(GfxArchiveHarden, ShapeOffsetTablePastBlob) {
+    // A valid-looking count but the per-shape offset entry runs past the blob.
+    std::vector<u8> blob(0x4A, 0);
+    PutU16(blob, 0x2A, 100);                // 100 shapes
+    // offsetTable starts at 0x45; entry for shape 50 is at 0x45 + 200, past EOF.
+    DecodedShape sh;
+    CHECK(!DecodeShapeBlob(blob.data(), blob.size(), 50, sh));
+}
+
+TEST(GfxArchiveHarden, ShapeDimsAndRowTableOverrun) {
+    // A shape header with a huge width*height (rejected) and a row table that
+    // points past the shape (rejected) — neither may touch memory out of bounds.
+    auto makeOne = [](int w, int h, u32 rowTabRel, std::size_t blobExtra) {
+        const u32 shapeOff = 0x80;
+        std::vector<u8> blob(shapeOff, 0);
+        PutU16(blob, 0x2A, 1);
+        PutU32(blob, 0x45, shapeOff);
+        blob.resize(shapeOff + 0x32 + blobExtra, 0);
+        PutU16(blob, shapeOff + 6, (u16)w);
+        PutU16(blob, shapeOff + 0x0A, (u16)h);
+        PutU32(blob, shapeOff + 0x26, 0);          // not a FULL bitmap
+        PutU32(blob, shapeOff + 0x2A, rowTabRel);  // row-table offset (rel to shape)
+        return blob;
+    };
+    DecodedShape sh;
+    // Zero/oversized dims rejected.
+    CHECK(!DecodeShapeBlob(makeOne(0, 4, 0x32, 64).data(), 0x80 + 0x32 + 64, 0, sh));
+    auto big = makeOne(0x4000, 0x4000, 0x32, 64);  // 268M px > ceiling
+    CHECK(!DecodeShapeBlob(big.data(), big.size(), 0, sh));
+    // Row table offset past the shape -> reject.
+    auto badtab = makeOne(2, 2, 0xFFFF0000u, 64);
+    CHECK(!DecodeShapeBlob(badtab.data(), badtab.size(), 0, sh));
+}
+
+TEST(GfxArchiveHarden, FullBitmapPixelsTruncated) {
+    // A FULL (uncompressed) shape (field@0x26 == -1) whose declared w*h*3 pixels
+    // run past the blob must be rejected, not read OOB.
+    const u32 shapeOff = 0x80;
+    std::vector<u8> blob(shapeOff, 0);
+    PutU16(blob, 0x2A, 1);
+    PutU32(blob, 0x45, shapeOff);
+    blob.resize(shapeOff + 0x32 + 4, 0);     // only 4 pixel bytes available
+    PutU16(blob, shapeOff + 6, 64);          // width 64
+    PutU16(blob, shapeOff + 0x0A, 64);       // height 64 -> needs 64*64*3 bytes
+    PutU32(blob, shapeOff + 0x26, 0xFFFFFFFFu);  // FULL flag
+    DecodedShape sh;
+    CHECK(!DecodeShapeBlob(blob.data(), blob.size(), 0, sh));
+}

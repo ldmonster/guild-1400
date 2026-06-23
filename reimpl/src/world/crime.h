@@ -74,6 +74,13 @@ int StraftatResolveAndClear(i32 crimeId, int force);
 using ResolveNotifyFn = void (*)(int crimeIndex, i32 perpetratorId);
 void StraftatSetResolveNotifyFn(ResolveNotifyFn fn);
 
+// Hook for VIBE_City_RemoveCrimeFromGrid(target@+33, location@+28) — the cleared
+// path calls this UNCONDITIONALLY (0x4c3628), once, before walking the evidence
+// pairs. Default no-op (the City grid is a cross-cluster leaf). Args:
+// (target == crime +33, location == crime +28).
+using ResolveRemoveGridFn = void (*)(i32 target, u8 location);
+void StraftatSetResolveRemoveGridFn(ResolveRemoveGridFn fn);
+
 // ===========================================================================
 // Evidence / Beweis pairing.
 // ===========================================================================

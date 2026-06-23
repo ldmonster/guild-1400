@@ -145,6 +145,36 @@ TEST(RenderTerrainGrid, TileTypeIndexAndUniform) {
     CHECK(TileIsUniform(&g, 0, 1, 0));
 }
 
+// gilde.exe 0x5bbbf4: v6 lives in dl (a signed byte) and the "no reference yet"
+// sentinel is 0xFF (== -1 as char). A terrain-type byte of 0xFF therefore ALIASES
+// the sentinel: at 0x5bbc38 `cmp dl,0FFh` re-takes the seed branch (0x5bbc40
+// `mov dl,[ecx+ebx]`), so a leading 0xFF cell NEVER becomes the reference — it
+// re-seeds the sentinel. Crucially, once a real (non-0xFF) reference IS seeded,
+// a later 0xFF cell takes the compare branch (0x5bbc63 `cmp dl,[ecx+ebx]`) and
+// MISMATCHES (ref != 0xFF) -> returns 0. So 0xFF is "invisible" only while no real
+// reference exists yet, not afterwards. Visit order is y-major, x-minor.
+// Golden-lock that sentinel-collision behavior.
+TEST(RenderTerrainGrid, TileUniform0xFFSentinelCollision) {
+    const int N = 4;
+    u8 types[N * N];
+    for (int i = 0; i < N * N; ++i) types[i] = 0xFF; // all 0xFF
+    TileGrid g{N, N - 1, types};
+    // Every cell is 0xFF -> v6 never escapes the sentinel -> returns 1 (uniform/true).
+    CHECK(TileIsUniform(&g, 0, 2, 0));
+
+    // Leading 0xFF then reals: span=1 visits (0,0),(1,0),(0,1),(1,1).
+    // (0,0)=0xFF re-seeds (stays sentinel), (1,0)=5 seeds ref=5, rest=5 -> uniform true.
+    for (int i = 0; i < N * N; ++i) types[i] = 5;
+    types[0 * N + 0] = 0xFF;            // first visited cell is 0xFF (index 0)
+    CHECK(TileIsUniform(&g, 0, 1, 0));
+
+    // 0xFF AFTER a real reference is NOT transparent: it mismatches.
+    // (0,0)=5 seeds ref=5, (1,0)=0xFF -> ref(5)!=0xFF -> return false.
+    for (int i = 0; i < N * N; ++i) types[i] = 5;
+    types[0 * N + 1] = 0xFF;            // (x=1,y=0) -> index 1, visited 2nd
+    CHECK(!TileIsUniform(&g, 0, 1, 0));
+}
+
 // ---------------------------------------------------------------------------
 // Water: gradient fill + wave grid.
 // ---------------------------------------------------------------------------

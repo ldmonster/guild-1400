@@ -251,3 +251,46 @@ TEST(ModeFsm, StepIsNoOpOutsideMenu) {
 
     gui::MainMenu_SetCommandSink(nullptr);
 }
+
+// ---- HARDENING (wave-12): degenerate / bad transitions ----
+
+// ModeForSessionFlags is total: any flag word — including unknown high bits and
+// 0 — maps to a defined GameMode (priority NewGame > Load > Network > MainMenu).
+TEST(ModeFsm, ModeForSessionFlagsIsTotal) {
+    CHECK(play::ModeForSessionFlags(0) == play::GameMode::kMainMenu);
+    CHECK(play::ModeForSessionFlags(gui::kSessionNewGame) == play::GameMode::kNewGame);
+    CHECK(play::ModeForSessionFlags(gui::kSessionLoadSave) == play::GameMode::kLoadGame);
+    CHECK(play::ModeForSessionFlags(gui::kSessionNetwork) == play::GameMode::kNetwork);
+    // Unknown high bits alone -> nothing armed -> back to the menu (no UB).
+    CHECK(play::ModeForSessionFlags(0x40000000) == play::GameMode::kMainMenu);
+    CHECK(play::ModeForSessionFlags(-1) == play::GameMode::kNewGame);   // all bits set
+    // New Game wins when several bits are set at once.
+    CHECK(play::ModeForSessionFlags(gui::kSessionNewGame | gui::kSessionLoadSave |
+                                    gui::kSessionNetwork) == play::GameMode::kNewGame);
+}
+
+// GameModeName never returns null and handles an out-of-enum value gracefully.
+TEST(ModeFsm, GameModeNameNeverNull) {
+    CHECK(play::GameModeName(play::GameMode::kMainMenu) != nullptr);
+    CHECK(play::GameModeName(play::GameMode::kQuit) != nullptr);
+    CHECK(play::GameModeName(static_cast<play::GameMode>(999)) != nullptr);
+}
+
+// The lifecycle edge methods are no-ops outside their valid source state — calling
+// them in the wrong mode must not corrupt the transition history or change mode.
+TEST(ModeFsm, LifecycleEdgesNoOpInWrongState) {
+    play::ModeFsm fsm;
+    fsm.start();
+    CHECK(fsm.mode() == play::GameMode::kMainMenu);
+    const std::size_t n0 = fsm.transitions().size();
+    // enterInGame only fires from a session sub-mode; endSession only from InGame.
+    fsm.enterInGame();                 // in MainMenu -> no-op
+    fsm.endSession();                  // in MainMenu -> no-op
+    CHECK(fsm.mode() == play::GameMode::kMainMenu);
+    CHECK_EQ(fsm.transitions().size(), n0);
+    // endSession when InGame is the valid edge; from a session sub-mode it is a no-op.
+    // (We can't enter a sub-mode without the dispatch, so just re-assert idempotence.)
+    fsm.endSession();
+    CHECK(fsm.mode() == play::GameMode::kMainMenu);
+    CHECK_EQ(fsm.transitions().size(), n0);
+}

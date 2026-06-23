@@ -92,11 +92,55 @@ TEST(CutsceneMisc5, ClassifyMeisterRecords) {
     int aA = 99, aB = 99;
     int outB[8];
     int nB = SceneClassifyMeisterRecords(kinds, subState, 5, &aA, &aB, outB, 8);
-    CHECK_EQ(aA, 1);   // first class-12 sub-0
-    CHECK_EQ(aB, 2);   // first class-12 sub-1
-    CHECK_EQ(nB, 2);   // two class-11 records
+    CHECK_EQ(aA, 1);   // class-12 sub-0 @1; both found at index 2 -> scan stops
+    CHECK_EQ(aB, 2);   // class-12 sub-1 @2 completes v5 == 3
+    CHECK_EQ(nB, 2);   // two class-11 records (the second scan runs to `count`)
     CHECK_EQ(outB[0], 0);
     CHECK_EQ(outB[1], 3);
+}
+
+// gilde.exe 0x504ce0 — the binary OVERWRITES the anchor candidate on every
+// class-12 match (the v4/v3 stores are unconditional) and only stops once BOTH
+// anchors were seen (v5 == 3): the LAST qualifying match before the both-found
+// point wins; records after that point never update an anchor.
+TEST(CutsceneMisc5, ClassifyMeisterOverwritesUntilBothFound) {
+    // sub-0 @0, sub-0 @1 (overwrites @0), sub-1 @2 (-> v5 == 3, stop),
+    // sub-0 @3 (after the stop: must NOT overwrite).
+    u8 kinds[]    = {12, 12, 12, 12};
+    u8 subState[] = { 0,  0,  1,  0};
+    int aA = 99, aB = 99;
+    int outB[4];
+    int nB = SceneClassifyMeisterRecords(kinds, subState, 4, &aA, &aB, outB, 4);
+    CHECK_EQ(aA, 1);   // LAST sub-0 before both found (index 1, not 0 / not 3)
+    CHECK_EQ(aB, 2);
+    CHECK_EQ(nB, 0);
+}
+
+// Symmetric overwrite on the sub-1 (anchorB) side.
+TEST(CutsceneMisc5, ClassifyMeisterOverwritesAnchorB) {
+    // sub-1 @0, sub-1 @1 (overwrites @0), sub-0 @2 (-> v5 == 3, stop),
+    // sub-1 @3 unreached.
+    u8 kinds[]    = {12, 12, 12, 12};
+    u8 subState[] = { 1,  1,  0,  1};
+    int aA = 99, aB = 99;
+    int nB = SceneClassifyMeisterRecords(kinds, subState, 4, &aA, &aB, nullptr, 0);
+    CHECK_EQ(aB, 1);   // LAST sub-1 before both found
+    CHECK_EQ(aA, 2);
+    CHECK_EQ(nB, 0);
+}
+
+// When the second anchor kind never appears, v5 never reaches 3, the scan runs
+// to the end of the array and the LAST match of the present kind wins outright.
+TEST(CutsceneMisc5, ClassifyMeisterLastMatchWinsWhenNeverBothFound) {
+    u8 kinds[]    = {12, 11, 12, 12};
+    u8 subState[] = { 0,  0,  0,  0};
+    int aA = 99, aB = 99;
+    int outB[4];
+    int nB = SceneClassifyMeisterRecords(kinds, subState, 4, &aA, &aB, outB, 4);
+    CHECK_EQ(aA, 3);   // overwritten 0 -> 2 -> 3 (full scan, no early stop)
+    CHECK_EQ(aB, -1);
+    CHECK_EQ(nB, 1);
+    CHECK_EQ(outB[0], 1);
 }
 
 TEST(CutsceneMisc5, ClassifyMeisterNoAnchors) {
@@ -157,7 +201,11 @@ TEST(CutsceneMisc5, ComputeProductionTickRateGoldens) {
 namespace {
 struct Recorder {
     int loadResult = 0;
-    const char* lastFile = nullptr;
+    // COPY of the load path, not the pointer: SceneLoadStadtScene formats the
+    // path into a local stack buffer and passes it to the hook synchronously, so
+    // stashing the raw pointer dangles after return (ASAN stack-use-after-return).
+    char lastFile[280] = {0};
+    bool gotFile = false;
     int traverseMasks[8] = {0};
     int traverseN = 0;
     int q17Count = 0;
@@ -168,7 +216,10 @@ struct Recorder {
 };
 Recorder g_rec;
 
-int RecLoad(const char* f) { g_rec.lastFile = f; return g_rec.loadResult; }
+int RecLoad(const char* f) {
+    if (f) { std::strncpy(g_rec.lastFile, f, sizeof(g_rec.lastFile) - 1); g_rec.gotFile = true; }
+    return g_rec.loadResult;
+}
 void RecTraverse(int m) { if (g_rec.traverseN < 8) g_rec.traverseMasks[g_rec.traverseN++] = m; }
 void RecQ17(i32 o, i32, int, int p) { g_rec.q17Count++; g_rec.lastQ17Obj = o; g_rec.lastQ17Product = p; }
 void RecCmd15(i32, i32 amt) { g_rec.cmd15Amt = amt; }
@@ -185,7 +236,7 @@ TEST(CutsceneMisc5, LoadStadtSceneSuccessRunsTraversal) {
     SetSceneSyncHooks(&h);
 
     CHECK_EQ(static_cast<int>(SceneLoadStadtScene("ROM")), 1);
-    if (g_rec.lastFile)
+    if (g_rec.gotFile)
         CHECK_EQ(std::strcmp(g_rec.lastFile, "scenes/*stadt_ROM.ed3"), 0);
     CHECK_EQ(g_rec.traverseN, 1);
     CHECK_EQ(g_rec.traverseMasks[0], 6);  // particle-emitter init mask

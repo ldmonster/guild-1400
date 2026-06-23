@@ -2,6 +2,7 @@
 #include "sim/command_codec.h"
 #include "test.h"
 
+#include <cstddef>
 #include <cstring>
 
 using namespace guild;
@@ -23,6 +24,82 @@ static const u16 kGoldenFixed[96] = {
     21, 55, 20, 144, 53, 20, 64, 52, 68, 68, 28, 36,
     28, 97, 56, 20, 20, 145, 24, 28, 26, 28, 52, 145,
 };
+
+// ---------------------------------------------------------------------------
+// Packet GEOMETRY pin (wave-13 1:1 audit). The Command lockstep codec's wire
+// layout is determinism-critical: every constant below is a recovered 1:1 value
+// from command.h's provenance (the qmemcpy(...,0x99) stride in EnqueuePacket /
+// StoreReceivedPacket, the (seq & 0x7FFF) ring index, the 10-byte ACK entry
+// stride byte_B5FB60, the 0x77 Append* cursor guard, the 96-entry jump table
+// funcs_4941F4 @0x631298, the +0x91/+0x95 intrusive links, and the 0x20/14 sync
+// discriminator). Pinning them at runtime guards against a silent drift of the
+// header constants away from their documented binary origins.
+// ---------------------------------------------------------------------------
+TEST(SimCommand, PacketGeometryConstantsGolden) {
+    // Fixed wire/staging record stride — qmemcpy(...,0x99).
+    CHECK_EQ(kPacketStride, (u32)153);
+    CHECK_EQ(kPacketStride, (u32)0x99);
+    CHECK_EQ(sizeof(CommandPacket), (std::size_t)153);
+
+    // Send-ring capacity and sequence mask (ring index = seq & 0x7FFF).
+    CHECK_EQ(kSendRingSlots, (u32)0x8000);
+    CHECK_EQ(kSendRingSlots, (u32)32768);
+    CHECK_EQ(kSeqMask, (u32)0x7FFF);
+
+    // ACK/status table: 10-byte entries, 32768 of them (byte_B5FB60).
+    CHECK_EQ(kAckEntryBytes, (u32)10);
+    CHECK_EQ(sizeof(AckEntry), (std::size_t)10);
+    CHECK_EQ(kAckTableBytes, (u32)327680);
+    CHECK_EQ(kAckTableBytes, kAckEntryBytes * kSendRingSlots);
+
+    // Append* payload cursor guard (0x77 == 119).
+    CHECK_EQ(kMaxPayload, (u32)0x77);
+    CHECK_EQ(kMaxPayload, (u32)119);
+
+    // Dispatch jump-table slot count (funcs_4941F4 @0x631298 has 96 entries).
+    CHECK_EQ(kNumOpcodes, (u32)96);
+
+    // Header field offsets (EnqueuePacket store sites).
+    CHECK_EQ((u32)kFOpcode, (u32)0x00);
+    CHECK_EQ((u32)kFLen,    (u32)0x01);
+    CHECK_EQ((u32)kFFlag,   (u32)0x03);
+    CHECK_EQ((u32)kFCmdId,  (u32)0x04);
+    CHECK_EQ((u32)kFCount,  (u32)0x08);
+    CHECK_EQ((u32)kFExtra,  (u32)0x0C);
+    CHECK_EQ((u32)kFSync,   (u32)0x10);
+
+    // Intrusive doubly-linked-list link fields (+0x91 / +0x95).
+    CHECK_EQ((u32)kLPrev, (u32)145);
+    CHECK_EQ((u32)kLPrev, (u32)0x91);
+    CHECK_EQ((u32)kLNext, (u32)149);
+    CHECK_EQ((u32)kLNext, (u32)0x95);
+
+    // Sync packet discriminator: opcode 0x20 && byte[+16] == 14.
+    CHECK_EQ((u32)kSyncType,   (u32)0x20);
+    CHECK_EQ((u32)kSyncMarker, (u32)14);
+}
+
+// AckEntry field layout + the three documented status codes (0 pending /
+// 1 free-init / 2 applied-acked). Verifies the +0/+1/+2/+6 byte placement that
+// EnqueuePacket / ExecCommands / GetPacketSeqById read and write.
+TEST(SimCommand, AckEntryFieldLayoutGolden) {
+    AckEntry e{};
+    e.status = 2;
+    e.slot   = 0x11;
+    e.ring   = -1;
+    e.seq    = 0x44332211;
+    const u8* raw = reinterpret_cast<const u8*>(&e);
+    CHECK_EQ(raw[0], (u8)2);        // +0 status
+    CHECK_EQ(raw[1], (u8)0x11);     // +1 slot
+    // +2 ring (i32, little-endian) == -1
+    i32 ring;
+    std::memcpy(&ring, raw + 2, sizeof(ring));
+    CHECK_EQ(ring, (i32)-1);
+    // +6 seq (i32, little-endian)
+    i32 seq;
+    std::memcpy(&seq, raw + 6, sizeof(seq));
+    CHECK_EQ(seq, (i32)0x44332211);
+}
 
 TEST(SimCommand, OpcodeSizeTableGolden) {
     for (int op = 0; op < 96; ++op) {
@@ -142,6 +219,45 @@ TEST(SimCommand, SendRingSequenceWraparound) {
     CHECK_EQ(wrapRing, (i32)0);          // slot wrapped to 0
     CHECK_EQ(wrapCount, (u32)0x8000);    // but the Count kept counting
     CHECK_EQ(q.send_count(), (u32)0x8001);
+}
+
+// ---------------------------------------------------------------------------
+// EnqueuePacket disconnected latch: dword_764CF0 set => the encoder early-outs
+// with -1 and touches no ring/send-count state (the first line of 0x49388c).
+// ---------------------------------------------------------------------------
+TEST(SimCommand, EnqueueRejectsWhenDisconnected) {
+    CommandQueue q;
+    q.set_standalone(false);
+    q.set_disconnected(true);
+    CommandPacket staged{};
+    staged.opcode() = 4; // size 17
+    CHECK_EQ(q.EnqueuePacket(staged), (i32)-1);
+    CHECK_EQ(q.send_count(), (u32)0);       // counter untouched
+    CHECK(q.pending_head() == nullptr);     // nothing linked
+}
+
+// ---------------------------------------------------------------------------
+// ExecCommands sequence classification (the lost-command / resync branch of
+// 0x494088). An in-order Count advances last_req_count by exactly 1; a gap
+// (a Count that is neither last_req+1, nor last_sync, nor a sync packet) snaps
+// last_req_count to the received Count ("Lost a Command" resync).
+// ---------------------------------------------------------------------------
+TEST(SimCommand, ExecLostCommandResyncsLastRequested) {
+    CommandQueue q;
+    q.set_standalone(false);
+
+    // Receive a packet whose Count is 5 while last_req_count is still 0: this is
+    // NOT last_req+1 (==1), not last_sync (==0 but opcode!=sync gate), and not a
+    // sync frame, so the resync branch snaps last_req_count to 5.
+    CommandPacket frame{};
+    frame.opcode() = 4;              // a plain fixed opcode (size 17)
+    frame.set_cmd_id(7);            // a tracked command (cmdId != -1)
+    frame.set_count(5);            // out-of-order Count
+    CHECK_EQ(q.StoreReceivedPacket(frame), 0);
+    q.ExecCommands();
+    CHECK_EQ(q.last_req_count(), (u32)5);     // resynced to the received Count
+    // The ACK slot for cmdId 7 is stamped applied (status 2).
+    CHECK_EQ(q.GetPacketStatusById(7), 2);
 }
 
 // ---------------------------------------------------------------------------

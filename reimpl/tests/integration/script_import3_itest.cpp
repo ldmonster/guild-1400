@@ -32,7 +32,7 @@ TEST(ScriptImport3Itest, RegisterThenFindRoundTrip) {
     CHECK_EQ(RegisterCommands(), 1);
 
     const char* names[] = {
-        "ecmd_Dummy", "Print", "PrintInt", "PrintFloat", "Random", "GetTime",
+        "ecmd_Dummy", "Print", "PrintInt", "PrintFloat", "rnd", "GetTime",
         "RunScript", "RunScriptInt", "RunScriptString", "StopScript", "Sleep",
         "FindScript", "KillLocalScripts", "CallUserFunction",
         "CallUserFunctionExtended",

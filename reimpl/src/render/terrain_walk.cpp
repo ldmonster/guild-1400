@@ -24,6 +24,10 @@ static constexpr double kFogShadeCap  = 255.0;  // dbl_628B54
 static inline Vertex*  VBuf(TerrainTile* t)  { return reinterpret_cast<Vertex*>(t->vertexBuf); }
 static inline Polygon* PBuf(TerrainTile* t)  { return reinterpret_cast<Polygon*>(t->polyBuf); }
 
+// The 16.0f stamp the stitch writes into the appended poly +24 (the original wrote
+// the raw dword 1098907648 == 0x41800000 == 16.0f).  @0x5bf22c lines 1047/1267/1496/1666.
+static constexpr float kStitchUvStamp = 16.0f;  // 1098907648 == 0x41800000
+
 // gilde.exe 0x5bf22c lines 505..531 — Phase-0 light-param select.
 void SetupTerrainLight(TerrainRenderState& st, bool flatLit, const float sunScale[3],
                        const float sunAmbient[3], const float sunBias[3]) {
@@ -163,53 +167,105 @@ i32 RenderTerrain(TerrainFloor* floor, TerrainRenderState& st, const TerrainWalk
                 if (updated) {
                     tile->polyCount = 0;                          // *(v428+32) = 0
                     Polygon* pcur = PBuf(tile);                   // v192
-                    // texture-source for this tile's LOD (v379) + cell stride (v374):
-                    const u8* mipSrc = floor->mipTexSrc[lod >> 1];// *(Floor + 4*(lod>>1)+36)
-                    i32 texCell = ( (size * (worldY / lod) / lod) + (worldX / lod) ) & mask; // v374
+                    // The per-LOD slope/visibility flag buffer v379 = *(Floor +
+                    // 4*(lod>>1) + 36) — the BuildTilePolys @0x5bc45c OUTPUT (NOT the
+                    // raw texture source). Its bytes carry the 0x80 slope/visibility
+                    // bit (BuildTilePolys' QuadPolyVisible result) and the 0x40
+                    // sub-texture marker; the diagonal split reads its SIGN. This is
+                    // the SAME buffer the texture sub-id sampling indexes.
+                    const u8* slopeBuf = floor->mipTexSrc[lod >> 1];// v379
+                    // v374 (line 718): linear cell index into v379, masked ONCE by
+                    // Floor+8 (== N*N-1, the LINEAR cell mask) at init; the inner
+                    // walk then advances it raw (v413 = v379 + v374; ++v413 per col;
+                    // v374 += N/lod per row, unmasked).
+                    i32 v374 = ( (size * (worldY / lod) / lod) + (worldX / lod) ) & mask; // v374
                     i32 rowsM1 = v179 - 1;
                     i32 colsM1 = v180 - 1;                        // v426
                     // Iterate the (v179-1) x (v180-1) quads (lines 727..794).
                     Vertex* vbase = VBuf(tile);                   // v466 (vertex buffer base)
                     i32 vRowStride = v180;                        // verts per built row
                     for (i32 qr = 0; qr < rowsM1; ++qr) {
-                        i32 tc = texCell;                          // running texture cell
+                        const u8* v413 = slopeBuf ? (slopeBuf + v374) : nullptr; // v413
                         for (i32 qc = 0; qc < colsM1; ++qc) {
+                            // v494 = *v413 (line 740); v194 = *v413 & 0x40 -> the
+                            // sub-texture id from byte_13DCE58 (line 741..743). When no
+                            // slope buffer is bound (standalone walk) the split defaults
+                            // to 0 (>= 0 => the TL-BR diagonal), matching an all-zero
+                            // BuildTilePolys output (every quad visible, TL-BR split).
+                            i8 v494 = v413 ? (i8)v413[qc] : (i8)0;
                             // Per-cell texture sub-id from the opaque byte_13DCE58 table
-                            // (line 743) — supplied as the cell type's low 6 bits via the
-                            // build hook's texSrc; here folded into the GetOrBuildTile id.
-                            const u8* texSrc = mipSrc ? mipSrc : floor->texSrc;
+                            // (line 743) — supplied via the build hook's texSrc.
+                            const u8* texSrc = slopeBuf ? slopeBuf : floor->texSrc;
                             u32 texId = hooks.getOrBuildTile
                                 ? hooks.getOrBuildTile(texSrc, size,
                                                        (worldX / lod) + qc, (worldY / lod) + qr,
                                                        lod, hooks.cacheState)
                                 : 0;
                             // The quad's two triangles split on the per-cell flag (the
-                            // *(v413) byte >= 0 test, line 748). v494 == that flag byte.
-                            // We use the cell type byte's sign as the split selector
-                            // (faithful: the original read its own per-tile flag buffer).
+                            // *(v413) byte >= 0 test, line 748). v494 IS that flag byte
+                            // (the real BuildTilePolys output buffer — proxy removed).
                             i32 i00 =  qr      * vRowStride + qc;
                             i32 i01 =  qr      * vRowStride + qc + 1;
                             i32 i10 = (qr + 1) * vRowStride + qc;
                             i32 i11 = (qr + 1) * vRowStride + qc + 1;
-                            i8 split = (i8)types[tc & mask];
+                            i8 split = v494;
                             Polygon& p0 = pcur[0];
                             Polygon& p1 = pcur[1];
+                            // VERTEX NAMING (1:1 with @0x5bf22c lines 730..786):
+                            //   v417 = vert(row,col)     = i00   (TL)
+                            //   v416 = vert(row,col+1)   = i01   (TR)
+                            //   v414 = vert(row+1,col)   = i10   (BL)
+                            //   v415 = vert(row+1,col+1) = i11   (BR)
+                            // The split byte v494 = *(v379 + v374) is the per-LOD slope/
+                            // hidden-flag buffer (BuildTilePolys @0x5bc45c output); >=0 ==
+                            // the TL-BR diagonal, <0 == the BL-TR diagonal. Re-verified
+                            // wave-5: the engine has NO backface cull anywhere in the
+                            // terrain path (RasterizeTexturedTriangle @0x5F7D58 normalises
+                            // winding by signed-area sign; ComputeVertexClipFlags @0x5ad614
+                            // is frustum-only), so this exact winding is the genuine one —
+                            // the wave-4 row-mirror hack is removed (see header / progress).
                             if (split >= 0) {
-                                // lines 749..762: v0=i00, v1=i11, v2=i01 / v01? — engine
-                                // wrote +0=i00,+4=i11,+8=i01 then sets flag38 bit0.
-                                p0.v0 = &vbase[i00]; p0.v1 = &vbase[i11]; p0.v2 = &vbase[i01];
+                                // @0x5bf22c lines 752..761 (v494 >= 0):
+                                //   tri0 = (v417,v415,v414) = (i00,i11,i10)
+                                //   tri1 = (v417,v416,v415) = (i00,i01,i11)
+                                //   +38 |= 1
+                                p0.v0 = &vbase[i00]; p0.v1 = &vbase[i11]; p0.v2 = &vbase[i10];
                                 p0.flags38 |= 1;
-                                p1.v0 = &vbase[i00]; p1.v1 = &vbase[i10]; p1.v2 = &vbase[i11];
+                                p1.v0 = &vbase[i00]; p1.v1 = &vbase[i01]; p1.v2 = &vbase[i11];
+                                p1.flags38 |= 1;
                             } else {
-                                // lines 764..776: the alternate diagonal; clears flag38 bit0.
-                                p0.v0 = &vbase[i00]; p0.v1 = &vbase[i01]; p0.v2 = &vbase[i10];
+                                // @0x5bf22c lines 765..774 (v494 < 0):
+                                //   tri0 = (v414,v417,v416) = (i10,i00,i01)
+                                //   tri1 = (v416,v415,v414) = (i01,i11,i10)
+                                //   +38 &= ~1
+                                p0.v0 = &vbase[i10]; p0.v1 = &vbase[i00]; p0.v2 = &vbase[i01];
                                 p0.flags38 &= 0xFE;
                                 p1.v0 = &vbase[i01]; p1.v1 = &vbase[i11]; p1.v2 = &vbase[i10];
+                                p1.flags38 &= 0xFE;
                             }
                             // texture id stored at poly+20 and +60 (lines 747/751/765).
                             // (modelled via uvZ as the bound id is engine-internal.)
                             p0.uvZ = (float)texId;
                             p1.uvZ = (float)texId;
+
+                            // ---- PER-QUAD UV EMISSION (@0x5c1f95..0x5c203f) ----
+                            // subTexId = (cellFlag & 0x40) ? byte_13DCE58[..]&0x3F : 0.
+                            // The cell flag is *v413 (== v494) — its 0x40 bit gates the
+                            // sub-id, its 0x80 bit (the visible/slope bit) gates whether
+                            // the UV pointers are stamped at all. Pass A here always emits
+                            // a VISIBLE quad (flags36|0x80 below), matching the engine's
+                            // (cellFlag & 0x80) branch for built quads. tri0 gets the
+                            // first 6 floats of flt_13FE540[subTexId*0x60], tri1 the next 6.
+                            if (st.uvTable && tile->polyUv) {
+                                u8 cellFlag = (u8)v494;          // *v413 (var_4)
+                                i32 quadIdx = qr * colsM1 + qc;  // linear quad index (edi)
+                                u32 subTexId = TerrainSubTexId(cellFlag, st.subTexSrc, quadIdx);
+                                i32 pIdx = (i32)(&p0 - PBuf(tile));   // poly slot of tri0
+                                TerrainQuadUvT0(&tile->polyUv[kTriUvFloats * pIdx],
+                                                st.uvTable, subTexId);          // poly+0x10
+                                TerrainQuadUvT1(&tile->polyUv[kTriUvFloats * (pIdx + 1)],
+                                                st.uvTable, subTexId);          // poly+0x38
+                            }
                             // The quad emits VISIBLE polys: BuildTilePolys (tile_lighting
                             // QuadPolyVisible) marks the +36 high bit ("backface-visible")
                             // for the front-facing quad. Pass C's signed-area cull then
@@ -218,9 +274,8 @@ i32 RenderTerrain(TerrainFloor* floor, TerrainRenderState& st, const TerrainWalk
                             p1.flags36 |= 0x80u;
                             pcur += 2;
                             tile->polyCount += 2;                  // *(v428+32) += 2 (line 781)
-                            ++tc;
                         }
-                        texCell += size / lod;                     // v374 += *(Floor)/lod (787)
+                        v374 += size / lod;                        // v374 += *(Floor)/lod (787)
                     }
                 }
 
@@ -230,36 +285,282 @@ i32 RenderTerrain(TerrainFloor* floor, TerrainRenderState& st, const TerrainWalk
         }
 
         // ===== Pass B: 2:1 LOD-seam stitch (lines 813..1736) =====
-        // For each tile bordering a lower-LOD neighbour on its right/down/up edges,
-        // emit the extra stitch triangles. The four sub-blocks (v487<7 right, v486
-        // down, v486<7 up) each append stitch polys when the neighbour edge LOD is
-        // nonzero and finer than this tile's LOD. We reproduce the gate + the count
-        // of stitch quads (the per-stitch vertex maths mirror Pass A's EmitVertex).
+        // RECONSTRUCTED 1:1 from the full decompile @0x5bf22c lines 848..1691 (four
+        // arms). For a tile (row=v486, col=v487) with lod=v454 the stitch fixes the
+        // T-junction crack on each edge whose neighbour has a strictly FINER edge-LOD
+        // byte (*(neighbour+318) < lod). Per boundary poly it splits the seam edge at
+        // its MIDPOINT (half-step v387 = lod>>1):
+        //   (1) emits ONE midpoint Vertex at vertexBuf[subdivCached] (v465 = 80*
+        //       subdivCached + vertexBuf) at the half-step world position along the
+        //       seam (same world/light math as Pass-A BuildTileVertex), recording it
+        //       into the clip scratch v483[3*i + {0,1,2}] = {vertPtr, seamU, seamV};
+        //   (2) RE-POINTS the boundary poly's FAR seam-vertex pointer to the midpoint
+        //       (so it spans [near-corner .. midpoint]);
+        //   (3) APPENDS ONE poly at polyBuf[polyCount] (v482/v481/v480/v479) — a copy
+        //       of the boundary poly with v1 := midpoint (so it spans [.. midpoint ..
+        //       far-corner]) and +24 (uvX) stamped 16.0f (1098907648);
+        //   (4) bumps polyCount(+32)+1, subdivCached(+16)+1, vertCount(+56)+1.
+        // Boundary-poly walk per arm (v455=cols=v180, v456=rows=v179; quad pairs are
+        // pcur[0]/pcur[1] @ poly index 2*(qr*colsM1+qc)/+1 from Pass A):
+        //   RIGHT(col<7): guard rows!=1; loop rows-1; boundary=PBuf[2*v455-4 +1] (last
+        //     column 2nd-tri), per-row stride 2*(v455-1) polys; seam down axisV.
+        //   LEFT (col>0): guard rows!=1; loop rows-1; boundary=PBuf[0] (first column
+        //     1st-tri), per-row stride 2*(v455-1); seam down axisV.
+        //   UP   (row>0): guard cols!=1; loop cols-1; boundary=PBuf[0] (first row),
+        //     stride 2 polys (one quad along U); seam across axisU.
+        //   DOWN (row<7): guard cols!=1; loop cols-1; boundary=PBuf[(v455-1)*(2*v456-4)]
+        //     (last row, 1st-tri base), stride 2; seam across axisU.
+        // Each arm skips boundary polys whose v0 pointer is null (hidden quad: *v470==0).
+        //
+        // The re-pointed seam-vertex SLOT and the copied source tri differ per arm /
+        // diagonal (decompiled exactly below); the diagonal is *(poly+38)&1 (the shared
+        // Pass-A split flag): TL-BR (set) vs BL-TR (clear).
+        //
+        // SEAM-UV MIDPOINT BLEND (@0x5bf22c lines 953..1043 etc.) — RECONSTRUCTED 1:1
+        // (wave-18, was the wave-17 named boundary). The engine midpoint-blends the
+        // seam UV pair with flt_628B48=0.5 into a per-tile 24-byte UV scratch (tile+60
+        // == drawData) backed by the global UV table flt_13FE540 (a 24-float-stride
+        // table Pass-A writes poly+16/+56 pointers INTO at @0x5c1ff5/0x5c2015). The
+        // full flt_13FE540 UV-emission subsystem is now modelled: Pass-A stamps each
+        // quad poly's tri0/tri1 6-float UV record (TerrainQuadUvT0/T1) into the per-tile
+        // polyUv array (poly+16/+56 image); Pass-B copies the boundary tri's record into
+        // the per-tile uvScratch, blends the seam endpoints (TerrainSeamBlendUv, 0.5),
+        // re-points both boundary + appended polys at their scratch records, and stamps
+        // the blended midpoint UV into the appended midpoint vertex slot — exactly the
+        // two-qmemcpy + blend the disasm performs (see emitSeamPoly). flt_13FE540 and
+        // byte_13DCE58 are all-zero in the static image (get_bytes verified); the table
+        // is built at runtime by BuildTerrainUvTable (@0x5b94cc) and supplied via
+        // st.uvTable, so subTexId == 0 and the single 24-float record is used. When
+        // st.uvTable/tile->polyUv are null the walk emits geometry only (inert).
         if (updated) {
             for (i32 row = 0; row < 8; ++row) {      // v486
+                i32 worldX = 0;
+                i32 worldY = row * tileSpan;         // v444
                 for (i32 col = 0; col < 8; ++col) {  // v487
+                    worldX = col * tileSpan;         // v436
                     TerrainTile* tile = &floor->tiles[row * 8 + col];
                     u8 lod = tile->lod;              // v454
                     if (lod == 0) continue;
                     tile->vertCount = 0;             // *(v435+56) = 0 (line 845)
-                    tile->polyCount = tile->polyCount; // (poly count carries from Pass A)
-                    // The stitch appends extra polys when a neighbour's edge LOD is
-                    // nonzero and strictly finer (< lod). We honour the three gates.
-                    auto stitchEdge = [&](u8 neighbourLod, bool active) {
-                        if (!active || neighbourLod == 0 || !(neighbourLod < lod)) return;
-                        // One stitch strip => (subdiv-1) extra triangles appended to the
-                        // tile's poly buffer. The per-vertex maths are EmitVertex with the
-                        // half-step (v387 = lod>>1) offsets; the engine wrote them into the
-                        // same polyBuf. We append the strip count to polyCount so the tail
-                        // draw-list pass picks them up.
-                        i32 strip = (tileSpan / (i32)lod);   // v455-1 worth of quads
-                        if (strip < 0) strip = 0;
-                        tile->polyCount += strip;            // ++*(v435+32) per stitch tri
+                    tile->uvScratchCount = 0;        // per-tile UV scratch cursor reset
+                    const i32 v387 = lod >> 1;       // half-step (line 833)
+
+                    // v455 = cols (= v180), v456 = rows (= v179): the Pass-A subdiv
+                    // counts WITH the col-7/row-7 edge adjustment (lines 834..846).
+                    const i32 v455 = TileSubdivCount(tileSpan, lod, col, row, true);   // cols
+                    const i32 v456 = TileSubdivCount(tileSpan, lod, col, row, false);  // rows
+
+                    Vertex*  vbase = VBuf(tile);
+                    Polygon* pbase = PBuf(tile);
+                    void**   clip  = reinterpret_cast<void**>(tile->clipList);  // v483
+
+                    // Emit one seam midpoint vertex + far-vertex re-point + appended
+                    // poly for a single boundary poly. `world`/`cellIdx` give the
+                    // midpoint world position + height cell; `seamU`/`seamV` the clip
+                    // scratch coords; `repoint` selects which slot of the boundary poly
+                    // becomes the midpoint; `copyTri` is the source tri for the append;
+                    // `appendSlot` which slot of the appended copy becomes the midpoint.
+                    auto emitSeamPoly =
+                        [&](const float world[3], i32 cellIdx, i32 seamU, i32 seamV,
+                            Polygon* boundary, int repointSlot,
+                            Polygon* copySrc, int appendSlot) {
+                        // Midpoint vertex at vertexBuf[subdivCached] (v465 = 80*+16 + +24).
+                        Vertex* mid = &vbase[tile->subdivCached];
+                        u8 h = heights[cellIdx];                  // *(v460 + v381)
+                        u8 t = types[cellIdx];                    // *(v460 + v380)
+                        EmitVertex(*mid, st, world, h, t);        // world xyz + RGB light
+
+                        // Clip scratch v483[0..2] = {vert, seamU, seamV} (lines 904..906).
+                        if (clip) {
+                            i32 base = 3 * tile->vertCount;
+                            clip[base + 0] = mid;
+                            clip[base + 1] = reinterpret_cast<void*>((intptr_t)seamU);
+                            clip[base + 2] = reinterpret_cast<void*>((intptr_t)seamV);
+                        }
+
+                        // Appended poly = a COPY of the boundary triangle (the engine
+                        // qmemcpy'd the 40-byte record), with v1 := midpoint and uvX :=
+                        // 16.0f (the +24 dword stamp).  (lines 981/1010/1043..1047 etc.)
+                        Polygon* app = &pbase[tile->polyCount];
+                        *app = *copySrc;
+                        Vertex* far;
+                        switch (repointSlot) {       // boundary poly far-vertex re-point
+                            case 0:  far = boundary->v0; boundary->v0 = mid; break;
+                            case 1:  far = boundary->v1; boundary->v1 = mid; break;
+                            default: far = boundary->v2; boundary->v2 = mid; break;
+                        }
+                        (void)far;
+                        switch (appendSlot) {        // appended copy gets the midpoint as v1
+                            case 0:  app->v0 = mid; break;
+                            case 1:  app->v1 = mid; break;
+                            default: app->v2 = mid; break;
+                        }
+                        app->uvX = kStitchUvStamp;   // *(poly+24) = 16.0f
+
+                        // ---- SEAM-UV MIDPOINT BLEND (@0x5bf22c, flt_628B48 = 0.5) ----
+                        // Per the disasm (RIGHT arm @0x5bfcc8..0x5bfe1b, the three sibling
+                        // arms identical): the engine consumes TWO per-tile 24-byte UV
+                        // scratch records (tile+60 == drawData, indexed 24*counter):
+                        //   rec N   = qmemcpy of the BOUNDARY poly's 6-float UV record;
+                        //             midpoint-blend it (TerrainSeamBlendUv, diagonal =
+                        //             boundary.flags38&1); re-point boundary's UV at rec N.
+                        //   rec N+1 = qmemcpy of the APPENDED (copied) poly's 6-float UV
+                        //             record; stamp the blended midpoint (u,v) into the
+                        //             appended midpoint vertex's slot (v1); re-point the
+                        //             appended poly's UV at rec N+1.
+                        if (st.uvTable && tile->polyUv && tile->uvScratch) {
+                            const bool diagTLBR = (boundary->flags38 & 1) != 0;
+                            i32 bIdx = (i32)(boundary - pbase);   // boundary poly slot
+                            i32 aIdx = (i32)(app - pbase);        // appended poly slot
+                            // rec N <- boundary poly's UV record, blended.
+                            float* recN = &tile->uvScratch[kTriUvFloats * tile->uvScratchCount];
+                            const float* src = &tile->polyUv[kTriUvFloats * bIdx];
+                            for (int q = 0; q < kTriUvFloats; ++q) recN[q] = src[q];
+                            TerrainSeamBlendUv(recN, diagTLBR);   // 0.5 midpoint average
+                            // boundary poly's UV record := rec N (poly+0x10 re-point).
+                            for (int q = 0; q < kTriUvFloats; ++q)
+                                tile->polyUv[kTriUvFloats * bIdx + q] = recN[q];
+                            // The blended midpoint (u,v) — the slot the blend wrote into
+                            // (TL-BR -> vert 2 == floats 4,5; BL-TR -> vert 0 == floats 0,1).
+                            float midU = diagTLBR ? recN[4] : recN[0];
+                            float midV = diagTLBR ? recN[5] : recN[1];
+                            ++tile->uvScratchCount;
+                            // rec N+1 <- appended poly's UV record (copy of boundary's
+                            // pre-blend record == src), then stamp the blended midpoint
+                            // into the appended midpoint vertex's slot (v1 == floats 2,3).
+                            float* recN1 = &tile->uvScratch[kTriUvFloats * tile->uvScratchCount];
+                            for (int q = 0; q < kTriUvFloats; ++q) recN1[q] = src[q];
+                            recN1[2] = midU;   // *(eax+8)  = blendedU
+                            recN1[3] = midV;   // *(eax+0xC)= blendedV
+                            for (int q = 0; q < kTriUvFloats; ++q)
+                                tile->polyUv[kTriUvFloats * aIdx + q] = recN1[q];
+                            ++tile->uvScratchCount;
+                        }
+
+                        // Counters: polyCount+1, subdivCached(vertex)+1, vertCount+1.
+                        tile->polyCount   += 1;      // *(v435+32) += 1
+                        tile->subdivCached += 1;     // *(v435+16) += 1
+                        tile->vertCount   += 1;      // *(v435+56) += 1
                     };
-                    stitchEdge(tile->edgeRightLod, col < 7);  // lines 848..1062
-                    stitchEdge(tile->edgeDownLod,  row > 0);  // lines 1064..1282
-                    stitchEdge(tile->edgeUpLod,    row > 0);  // lines 1284..1510 (v486)
-                    stitchEdge(tile->edgeLeftLod,  row < 7);  // lines 1512..1691 (v486<7)
+
+                    // ---- RIGHT arm (col<7): vertical seam, iterates rows ------------
+                    if (col < 7 && tile->edgeRightLod != 0 && tile->edgeRightLod < lod) {
+                        if (v456 != 1) {
+                            // world = origin + axisU*(tileSpan+worldX) + axisV*(v387+worldY)
+                            float u = (float)(tileSpan + worldX), v = (float)(v387 + worldY);
+                            float acc[3] = {
+                                st.axisU[0]*u + st.axisV[0]*v + st.originView[0],
+                                st.axisU[1]*u + st.axisV[1]*v + st.originView[1],
+                                st.axisU[2]*u + st.axisV[2]*v + st.originView[2] };
+                            i32 cell = (tileSpan + worldX + size*(v387 + worldY)) & mask; // v460
+                            i32 seamV = v387 + worldY;
+                            i32 pIdx = 2*v455 - 4 + 1;        // last-col 2nd-tri (v470+40)
+                            for (i32 i = 0; i < v456 - 1; ++i) {
+                                Polygon* firstTri = &pbase[pIdx - 1];     // *v470
+                                if (firstTri->v0) {
+                                    Polygon* b = &pbase[pIdx];            // boundary 2nd-tri
+                                    // diagonal *(v470+38)&1: TL-BR re-point v2; BL-TR v0.
+                                    int rep = (b->flags38 & 1) ? 2 : 0;
+                                    emitSeamPoly(acc, cell, tileSpan + worldX, seamV,
+                                                 b, rep, b, /*appendSlot=*/1);
+                                }
+                                // advance one row down the seam (axisV*lod), cell += N*lod.
+                                acc[0]+=st.axisV[0]*lod; acc[1]+=st.axisV[1]*lod; acc[2]+=st.axisV[2]*lod;
+                                cell += size*lod;  seamV += lod;
+                                pIdx += 2*(v455 - 1);
+                            }
+                        }
+                    }
+
+                    // ---- LEFT arm (col>0): vertical seam, iterates rows -------------
+                    if (col > 0 && tile->edgeLeftLod != 0 && tile->edgeLeftLod < lod) {
+                        if (v456 != 1) {
+                            float u = (float)worldX, v = (float)(v387 + worldY);
+                            float acc[3] = {
+                                st.axisU[0]*u + st.axisV[0]*v + st.originView[0],
+                                st.axisU[1]*u + st.axisV[1]*v + st.originView[1],
+                                st.axisU[2]*u + st.axisV[2]*v + st.originView[2] };
+                            i32 cell = (worldX + size*(v387 + worldY)) & mask;  // v459
+                            i32 seamV = v387 + worldY;
+                            i32 pIdx = 0;                      // first-col 1st-tri (v469)
+                            for (i32 i = 0; i < v456 - 1; ++i) {
+                                Polygon* b = &pbase[pIdx];     // boundary = first-col 1st-tri
+                                if (b->v0) {
+                                    // LEFT always re-points v0 (lines 1192/1241 *v469);
+                                    // appended slot is v2 (TL-BR, line 1216 +2) or v1
+                                    // (BL-TR, line 1265 +1).
+                                    int app = (b->flags38 & 1) ? 2 : 1;
+                                    emitSeamPoly(acc, cell, worldX, seamV,
+                                                 b, /*repoint=*/0, b, app);
+                                }
+                                acc[0]+=st.axisV[0]*lod; acc[1]+=st.axisV[1]*lod; acc[2]+=st.axisV[2]*lod;
+                                cell += size*lod;  seamV += lod;
+                                pIdx += 2*(v455 - 1);
+                            }
+                        }
+                    }
+
+                    // ---- UP arm (row>0): horizontal seam, iterates cols ------------
+                    if (row > 0 && tile->edgeUpLod != 0 && tile->edgeUpLod < lod) {
+                        if (v455 != 1) {
+                            float u = (float)(v387 + worldX), v = (float)worldY;
+                            float acc[3] = {
+                                st.axisU[0]*u + st.axisV[0]*v + st.originView[0],
+                                st.axisU[1]*u + st.axisV[1]*v + st.originView[1],
+                                st.axisU[2]*u + st.axisV[2]*v + st.originView[2] };
+                            i32 cell = (v387 + worldX + size*worldY) & mask;  // v458
+                            i32 seamU = v387 + worldX;
+                            i32 pIdx = 0;                     // first-row poly (v468)
+                            for (i32 i = 0; i < v455 - 1; ++i) {
+                                Polygon* b = &pbase[pIdx];    // boundary = first-row poly
+                                if (b->v0) {
+                                    // TL-BR: re-point 2nd-tri.v0 (v488=v468+10 -> +40 = 2nd
+                                    //   tri, slot 0) and copy 2nd tri; BL-TR: re-point
+                                    //   1st-tri.v2 (v468[2]) and copy 1st tri.
+                                    if (b->flags38 & 1) {
+                                        Polygon* tri2 = &pbase[pIdx + 1];   // 2nd tri (v468+40)
+                                        emitSeamPoly(acc, cell, seamU, worldY,
+                                                     tri2, /*repoint v0*/0, tri2, /*append v1*/1);
+                                    } else {
+                                        emitSeamPoly(acc, cell, seamU, worldY,
+                                                     b, /*repoint v2*/2, b, /*append v1*/1);
+                                    }
+                                }
+                                acc[0]+=st.axisU[0]*lod; acc[1]+=st.axisU[1]*lod; acc[2]+=st.axisU[2]*lod;
+                                cell += lod;  seamU += lod;
+                                pIdx += 2;
+                            }
+                        }
+                    }
+
+                    // ---- DOWN arm (row<7): horizontal seam, iterates cols ----------
+                    if (row < 7 && tile->edgeDownLod != 0 && tile->edgeDownLod < lod) {
+                        if (v455 != 1) {
+                            float u = (float)(v387 + worldX), v = (float)(tileSpan + worldY);
+                            float acc[3] = {
+                                st.axisU[0]*u + st.axisV[0]*v + st.originView[0],
+                                st.axisU[1]*u + st.axisV[1]*v + st.originView[1],
+                                st.axisU[2]*u + st.axisV[2]*v + st.originView[2] };
+                            i32 cell = (v387 + worldX + size*(tileSpan + worldY)) & mask;  // v457
+                            i32 seamU = v387 + worldX;
+                            i32 pIdx = (v455 - 1) * (2*v456 - 4);   // last-row 1st-tri base (v467)
+                            for (i32 i = 0; i < v455 - 1; ++i) {
+                                Polygon* firstTri = &pbase[pIdx];   // *v467
+                                if (firstTri->v0) {
+                                    // v123 = v467 if TL-BR else v467+40 (1st vs 2nd tri);
+                                    // re-point v123.v2 (v123+2), append copy with v1 = mid.
+                                    Polygon* b = (firstTri->flags38 & 1)
+                                                 ? firstTri : &pbase[pIdx + 1];
+                                    emitSeamPoly(acc, cell, seamU, tileSpan + worldY,
+                                                 b, /*repoint v2*/2, b, /*append v1*/1);
+                                }
+                                acc[0]+=st.axisU[0]*lod; acc[1]+=st.axisU[1]*lod; acc[2]+=st.axisU[2]*lod;
+                                cell += lod;  seamU += lod;
+                                pIdx += 2;
+                            }
+                        }
+                    }
+
                     tile->prevLod = tile->lod;                // *(v461+95)=*(v461+94) (1724)
                 }
             }

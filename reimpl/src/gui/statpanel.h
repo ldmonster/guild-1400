@@ -88,6 +88,54 @@ i32 LegendStateToMask(const std::array<bool, kLegendRows>& checked);
 std::array<bool, kLegendRows> MaskToLegendState(i32 mask);
 
 // ---------------------------------------------------------------------------
+// Statistics-panel GRAPH-SERIES plotters (wave-20).
+//
+// RenderChart @0x55ee70 dispatches into four line-series renderers, each walking a
+// 16-sample series stored in the interleaved economy-history table (5 floats per
+// row, stride 20 bytes; one column per series).  Per column they draw a segment
+// connecting the previous column's plotted point to the current column's.  All
+// recover the same observable: the integer screen (x,y) of each plotted sample.
+//
+// Shared layout (from ChartColumnStep / kFirstColumnX in statchart.h):
+//   step = ChartColumnStep(windowW) = (windowW-105)/16  (trunc toward zero)
+//   x_k  = 45 + k*step                                  (k = 0..15)
+//   height = (float)(windowH - 30)                      [a12 - 30]
+// Every float->int site routes through VIBE_Coord_ConvertX (TRUNCATE toward zero,
+// wave-17).  The series*height product is formed in x87 extended precision; we widen
+// both factors to double to reproduce it bit-exactly (float32 product diverges).
+//
+//   VIBE_StatPanel_DrawGraphSeriesA @0x55e778  series flt_1234FA0 (col 1)
+//   VIBE_StatPanel_DrawGraphSeriesB @0x55e9b4  series flt_1234FA8 (col 4)
+//   VIBE_StatPanel_DrawGraphSeriesC @0x55ebf0  series flt_1234FA4 (col 2)
+// A/B/C are identical structurally; they differ only in series source, draw colour,
+// and the closing scalar (== element[15] of the series).  Each sample is clamped to
+// >= 0.0 (flt_641DA8) and plotted at:
+//   y_k = (int) trunc( (double)(windowH-22) - (double)height * (double)max(s_k,0) )
+// ---------------------------------------------------------------------------
+
+// Per-series plotted points (16 samples).  `series` must hold kChartSamples floats.
+std::array<ChartPoint, kChartSamples> ComputeGraphSeriesPoints(
+    const float* series, int windowW, int windowH);
+
+// ---------------------------------------------------------------------------
+// VIBE_StatPanel_DrawGraphLine @0x55e600 — the odd plotter.  It overlays TWO series
+// (flt_1234FAC col 4 and flt_1234F98 col 0): each segment joins the FAC point at the
+// previous column to the F98 point at the current column.  Unlike A/B/C there is NO
+// per-sample clamp, and the baseline is a FLOAT:
+//   baseline = (float)( (double)(windowH-32) + 10.0(flt_624A9C) )   == windowH-22
+//   y(series) = (int) trunc( (double)baseline - (double)series * (double)height )
+// Returns the two plotted-point columns: `.first` = FAC series, `.second` = F98.
+// (The dead running-max loop over flt_1234FAC is preserved as a comment; its result
+// v27 is never used by the original.)
+// ---------------------------------------------------------------------------
+struct GraphLinePoints {
+    std::array<ChartPoint, kChartSamples> seriesFAC;  // flt_1234FAC column
+    std::array<ChartPoint, kChartSamples> seriesF98;  // flt_1234F98 column
+};
+GraphLinePoints ComputeGraphLinePoints(
+    const float* seriesFAC, const float* seriesF98, int windowW, int windowH);
+
+// ---------------------------------------------------------------------------
 // Command hook (mockable) — the form/chart/legend mutations.
 // ---------------------------------------------------------------------------
 struct StatPanelCommandSink {

@@ -86,6 +86,22 @@ enum class MeisterRoutine {
 // currency snapshot, and the routine calls themselves are deferred).
 MeisterRoutine ClassifyMeisterRoutine(int category, u8 aiClass);
 
+// gilde.exe 0x4533a8 — VIBE_Ai_EvaluateMeister dispatch tail (rule 13 bind). After
+// its budget logging + currency snapshot + danger-grid stamps, the original
+// classifies the meister by VIBE_Building_MapTypeToCategory(typeByte) + the
+// AiPlayer +0 class byte and dispatches to the matching VIBE_Ai_CalcMeister*
+// routine. This entry point performs exactly that real call edge:
+// ClassifyMeisterRoutine then guild::sim::DispatchMeisterCalc (the wave-19
+// reconstructed Calc bodies for Farming/Wache/Diebe/Ambush). Production/Bank/
+// PlanProduction stay with their own planner module (DispatchMeisterCalc no-ops
+// them). `meisterRec` is the live 536-byte person record (the original's v2);
+// `attackBudget` is the meister's currency snapshot (v2[110]). The dispatched Calc
+// runs against guild::sim::g_meisterLeaves / g_meisterCmdSink / g_meisterGameTime
+// (the engine bridge sets these; null leaves take the original's null/zero path).
+// Returns the classified routine.
+MeisterRoutine EvaluateMeister(int category, u8 aiClass, void* meisterRec,
+                               int attackBudget);
+
 // --- intrigue selection rules (self-contained cores) -------------------------
 
 // gilde.exe 0x47d0e8 (core) — AiPlayer_TrySingleAttack acceptance rule. Once a

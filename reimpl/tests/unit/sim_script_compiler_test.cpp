@@ -42,10 +42,16 @@ TEST(SimScriptLex, OperatorTableSubcodes) {
     CHECK_EQ(find(">"),  (int)kOpGt);
     CHECK_EQ(find("/"),  (int)kOpDiv);
     CHECK_EQ(find("*"),  (int)kOpMul);
-    CHECK_EQ(find("|"),  (int)kOpBitOr);
-    CHECK_EQ(find("&"),  (int)kOpBitAnd);
-    CHECK_EQ(find("||"), (int)kOpOr);
-    CHECK_EQ(find("&&"), (int)kOpAnd);
+    // byte_767958 spelling->offset (ConsoleParseLine 0x4453a4, subcode=off/5):
+    //   '|'  -> unk_7679D0 = 24 (eval acc|=)  ; '&'  -> unk_7679D5 = 25 (acc&=)
+    //   '||' -> unk_7679C6 = 22 (returns a|b) ; '&&' -> unk_7679CB = 23 (a&b)
+    // script_vm.h's locked enum names these: kOpOr=24, kOpAnd=25,
+    // kOpBitOr=22, kOpBitAnd=23 (verified vs sim_script_test + the evaluator
+    // 0x443ff0 ladders). The single-char fold ops are kOpOr/kOpAnd.
+    CHECK_EQ(find("|"),  (int)kOpOr);
+    CHECK_EQ(find("&"),  (int)kOpAnd);
+    CHECK_EQ(find("||"), (int)kOpBitOr);
+    CHECK_EQ(find("&&"), (int)kOpBitAnd);
 }
 
 TEST(SimScriptLex, KeywordTableSubcodes) {
@@ -53,11 +59,15 @@ TEST(SimScriptLex, KeywordTableSubcodes) {
         for (const auto& e : kKeywordTable) if (std::string(e.text) == t) return e.subcode;
         return -1;
     };
-    CHECK_EQ(find("while"),   (int)kKwWhile);
-    CHECK_EQ(find("for"),     (int)kKwFor);
-    CHECK_EQ(find("return"),  (int)kKwReturn);
-    CHECK_EQ(find("if"),      (int)kKwIf);
-    CHECK_EQ(find("include"), (int)kKwInclude);
+    // byte_767450 spelling->offset (ConsoleParseLine 0x4453a4, subcode=off/16):
+    //   while=1, if=2, return=3, else=4, #include=5 ('do' is at offset 0, never
+    //   matched). There is NO 'for' keyword, and include is spelled '#include'.
+    //   script_vm.h's locked enum is mislabeled: kKwFor==2 is actually `if`,
+    //   kKwIf==4 is the branch/else code, kKwInclude==5 (verified sim_script_test).
+    CHECK_EQ(find("while"),    (int)kKwWhile);    // 1
+    CHECK_EQ(find("if"),       (int)kKwFor);      // 2  (mislabeled enum: kKwFor==if)
+    CHECK_EQ(find("return"),   (int)kKwReturn);   // 3
+    CHECK_EQ(find("#include"), (int)kKwInclude);  // 5
 }
 
 // --- tokenizing a small .esc source -> expected token stream ----------------
@@ -92,11 +102,13 @@ TEST(SimScriptLex, TokenizeKeywordsAndCommand) {
     CHECK_EQ((int)toks[0].cls, (int)kTokKeyword);
     CHECK_EQ((int)toks[0].sub, (int)kKwWhile);
     CHECK_EQ((int)toks[1].cls, (int)kTokSymbol);   // '('
-    CHECK_EQ((int)toks[1].sub, 27);
+    // byte_767958: '(' -> unk_767994 = 12, ')' -> unk_767999 = 13
+    // (ConsoleParseLine 0x4453a4; '[' / ']' are 27 / 28).
+    CHECK_EQ((int)toks[1].sub, 12);
     CHECK_EQ((int)toks[2].cls, (int)kTokIntLit);
     CHECK_EQ(toks[2].value, 1);
     CHECK_EQ((int)toks[3].cls, (int)kTokSymbol);   // ')'
-    CHECK_EQ((int)toks[3].sub, 28);
+    CHECK_EQ((int)toks[3].sub, 13);
     CHECK_EQ((int)toks[4].cls, (int)kTokFuncCall); // command Sleep
     CHECK_EQ(toks[4].value, 0);
 }

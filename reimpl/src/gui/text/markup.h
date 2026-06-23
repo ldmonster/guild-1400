@@ -30,7 +30,8 @@
 //                                alone selects a font via dword_62D2B0+digit)
 //   'A'  0x41  -> LineFeed       (advance N lines; digit prefix = N, default 1)
 //   '<'  0x3C  -> BoundRight     (set right content bound from $M metric)
-//   '='  0x3D  -> BoundLeft      (set left content bound from $M metric)
+//   '='  0x3D  -> Unknown        (NOT a token: 0x416720 routes 0x3D to the
+//                                 "Unknown textparameter" path, same as '>'/'?'/'@')
 //   'i'  0x69  -> Inline        ('$ia'/'$in' => red button sprite, else widget)
 //   't'  0x74  -> EditField     ('$t' / '$tt' edit/text field)
 //   's'/'a'/'n'/'b'/'c' -> object-kind selectors for the preceding token

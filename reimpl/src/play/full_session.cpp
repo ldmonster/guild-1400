@@ -178,19 +178,35 @@ WorldRenderer::Options SessionRenderOptions(int fbW, int fbH) {
 }
 
 // Render one interactive frame of the live world into `dev` (if non-null), filling
-// the per-frame counts and (for a FileDumpGraphicsDevice) the dumped BMP path.
-// Returns whether the frame presented. A render is PURE (no world mutation).
+// the per-frame counts, an FNV-1a content hash of the device backbuffer (the
+// content-sensitive frame witness) and (for a FileDumpGraphicsDevice) the dumped
+// BMP path. Returns whether the frame presented. A render is PURE (no world
+// mutation).
 bool RenderSessionFrame(int fbW, int fbH, shim::IGraphicsDevice* dev,
-                        int* outObjects, int* outNonClear, std::string* outPath) {
+                        int* outObjects, int* outNonClear, std::string* outPath,
+                        std::uint64_t* outHash) {
     if (outObjects) *outObjects = 0;
     if (outNonClear) *outNonClear = 0;
     if (outPath) outPath->clear();
+    if (outHash) *outHash = 0;
     if (!dev)
         return false;
     WorldRenderer wr;
     RenderStats st = wr.render(SessionRenderOptions(fbW, fbH), *dev);
     if (outObjects) *outObjects = wr.lastBuild().sceneObjects();
     if (outNonClear) *outNonClear = wr.binder().nonClearPixels();
+    if (outHash) {
+        if (shim::Surface* bb = dev->backbuffer()) {
+            const u8* p = static_cast<const u8*>(bb->pixels);
+            std::uint64_t h = 1469598103934665603ull;            // FNV-1a 64
+            const std::size_t n = (std::size_t)bb->pitch * (std::size_t)bb->height;
+            for (std::size_t i = 0; p && i < n; ++i) {
+                h ^= p[i];
+                h *= 1099511628211ull;
+            }
+            *outHash = h;
+        }
+    }
     if (outPath) {
         if (auto* fdd = dynamic_cast<shim::FileDumpGraphicsDevice*>(dev))
             *outPath = fdd->framePath(fdd->presentCount() - 1,
@@ -355,7 +371,8 @@ void RunInGameArc(const SessionScript& s, shim::IGraphicsDevice* dev, SessionTra
     // -- pre-action interactive frames (real render, pure) --------------------
     for (int i = 0; i < s.framesBeforeAction; ++i) {
         bool pres = RenderSessionFrame(s.fbW, s.fbH, dev, &t.frameBeforeObjects,
-                                       &t.frameBeforeNonClear, &t.frameBeforePath);
+                                       &t.frameBeforeNonClear, &t.frameBeforePath,
+                                       &t.frameBeforeHash);
         if (pres) { ++t.framesRendered; ++t.preActionFrames; }
     }
 
@@ -391,7 +408,8 @@ void RunInGameArc(const SessionScript& s, shim::IGraphicsDevice* dev, SessionTra
     // -- post-action interactive frames (the changed world; visibly differs) --
     for (int i = 0; i < s.framesAfterAction; ++i) {
         bool pres = RenderSessionFrame(s.fbW, s.fbH, dev, &t.frameAfterObjects,
-                                       &t.frameAfterNonClear, &t.frameAfterPath);
+                                       &t.frameAfterNonClear, &t.frameAfterPath,
+                                       &t.frameAfterHash);
         if (pres) { ++t.framesRendered; ++t.postActionFrames; }
     }
 }

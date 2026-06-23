@@ -1,6 +1,7 @@
 #include "sim/npcaction10.h"
 
 #include "sim/npcaction.h"   // NpcClock() (shared global game clock)
+#include "sim/npcaction_notify.h" // kNotifyTag* + NotifyJoinLeaveGroup (0x4c9dec)
 #include "sim/gametime.h"
 #include "util/math_random.h"
 #include "util/math_rng_float.h"
@@ -98,12 +99,17 @@ void NpcAction10_RunCreditStep(HeRecord* h) {
             He_ReqHandle(h) = H->queueEntity29 ? H->queueEntity29(-1, h) : -1;
             return;
         }
-        double charge = (double)F32(h, 192) * kCreditChargeMul * (double)F32(h, 180);
+        // gilde.exe 0x4e596c — v29 is a 4-byte FLOAT slot: the triple-double product
+        // (double)+192 * 0.01 * (double)+180 is computed in x87 (80-bit) then `fstp`
+        // narrows it to float. The held-vs-charge compare (fild held; fcomp v29) and the
+        // truncating conversion (fld v29; ConvertX frndint truncate; fistp) both operate
+        // on the float-narrowed value, so model charge as float.
+        float charge = (float)((double)F32(h, 192) * kCreditChargeMul * (double)F32(h, 180));
         i32 held = H->sumCurrencyHeld ? H->sumCurrencyHeld(creditor) : 0;
-        if ((double)held >= charge) {
+        if ((double)held >= (double)charge) {
             // affordable: transfer `charge` from creditor (+1) to debtor (+176),
             // accumulate into the building's +85 running total.
-            i32 amt = (i32)charge;
+            i32 amt = (i32)charge;                       // ConvertX truncate toward zero
             if (H->queueRequest16)
                 H->queueRequest16(H->objId ? H->objId(bldg) : -1, F32(h, 176), amt);
         } else {
@@ -170,13 +176,15 @@ i32 NpcAction10_MasterExamState(HeRecord* h) {
 
     i32 sv = He_State(h);
     if (sv == 0) {
+        // gilde.exe 0x4cb9f0 — EventPanel_CreateSlot runs FIRST (it sets +116), THEN the
+        // +116 window is checked. eventPanelCreate models CreateSlot+SelectWindow; emission
+        // order is create -> rich -> clocks -> advance -> voice, matching the disasm.
+        i32 r = H->eventPanelCreate ? H->eventPanelCreate(h) : 0;
         if (H->panelWindow && H->panelWindow(h)) {
             if (H->renderRichString) H->renderRichString(0x1376);
             StampClock(h, 68);
             StampClock(h, 82);
             Advance(h, 82, 24, 0, 0);             // +24h deadline
-            i32 r = H->eventPanelCreate ? H->eventPanelCreate(h) : 0;
-            (void)r;
             if (H->playSample) H->playSample(-7, "_NACHRICHTEN_HS_20");
             ++He_State(h);
             return r;
@@ -281,7 +289,15 @@ i32 NpcAction10_KidnapCarryStep(HeRecord* h) {
                     w = (float)w;
                 else
                     w = kKidnapWealthCap;
-                i32 ransom = (i32)(w * factor);
+                // gilde.exe 0x4eadd3..0x4eae09: fld v29(clamped wealth float); fmul v30(factor
+                // float, e.g. rank1 = 0x3CA3D70A = 0.0199999996); product stays in st0 (80-bit).
+                // Coord_ConvertX @0x4eae01 sets the x87 RC bits to "truncate toward zero" and
+                // executes `frndint` (disasm @0x5c6b19), making st0 the TRUNCATED integral value;
+                // the following `fistp` @0x4eae09 just stores the already-integral st0. Net:
+                // ransom = trunc(wealth * factor), the multiply kept wide (model as double).
+                // NOTE: a float*float product would pre-round 50000*0.02f to 1000.0 and yield
+                // 1000; the binary keeps 80-bit precision (999.99998) and truncates to 999.
+                i32 ransom = (i32)((double)w * (double)factor);
                 if (H->queueSlotReset28)
                     H->queueSlotReset28(62, H->objId(victim), H->objId(captor), ransom);
             }
@@ -324,26 +340,36 @@ void NpcAction10_FireSpreadStep(HeRecord* h) {
         ++He_State(h);
         break;
     case 1: {
-        // nearest-neighbour pick among the +4..+63 scratch slots vs the +236 anchor.
+        // gilde.exe 0x4ee558..0x4ee692 — nearest-neighbour pick. The orig anchor is the
+        // +236 person; v5 walks a1+0..a1+60 and reads the candidate id at *(v5+172), i.e.
+        // the +172..+232 slot array (16 dwords). For each candidate != -1 and != anchor's
+        // objId that resolves to a person, it computes the 3D distance between the anchor
+        // and candidate world points (Transform_PointThroughBoneChain @0x5c8b38 + sqrt)
+        // and keeps the nearest into v32; *(a1+236) = nearest candidate's objId (or -1).
+        // BOUNDARY: the per-candidate distance uses Transform_PointThroughBoneChain, a
+        // 3D bone-chain transform over real scene geometry that is not part of the
+        // NpcAction10Hooks contract (no spatial scene in the synthetic harness). The slot
+        // walk / anchor gating / +236 write are reconstructed 1:1; the distance is proxied
+        // through withinTolerance so the machine still advances. Modelled as: first
+        // in-range candidate wins (bestDist sentinel kFireSpreadMaxDist = flt 1e8).
         void* anchor = H->personQueryBegin ? H->personQueryBegin(F32(h, 236)) : nullptr;
-        i32 best = 0;
-        float bestDist = kFireSpreadMaxDist;
-        for (int i = 8; i < 64; i += 4) {       // scratch[2..15] (orig walks v5 to +64)
-            i32 cand = F32(h, i);
-            if (!anchor || cand == 0)
+        void* best = nullptr;
+        float bestDist = kFireSpreadMaxDist;            // v33 = 100000000.0
+        for (int off = 172; off != 236; off += 4) {     // *(v5+172), v5: a1+0..a1+60 (16 slots)
+            if (!anchor)
                 continue;
-            i32 anchorId = F32(h, 172);
-            if (anchorId != -1 && anchorId != H->objId(anchor))
+            i32 cand = F32(h, off);
+            if (cand == -1 || cand == H->objId(anchor))
                 continue;
-            void* candRec = H->personQueryBegin ? H->personQueryBegin(F32(h, 172)) : nullptr;
+            void* candRec = H->personQueryBegin ? H->personQueryBegin(cand) : nullptr;
             if (!candRec)
                 continue;
-            float d = H->withinTolerance ? 1.0f : kFireSpreadMaxDist; // distance proxy
-            if (d < bestDist) { best = cand; bestDist = d; }
+            // distance proxy (see BOUNDARY note above).
+            float d = (H->withinTolerance && H->withinTolerance(anchor, candRec, kFireSpreadMaxDist))
+                          ? 0.0f : kFireSpreadMaxDist;
+            if (d < bestDist) { best = candRec; bestDist = d; }
         }
-        F32(h, 236) = best ? H->objId(reinterpret_cast<void*>(static_cast<intptr_t>(best)))
-                           : -1;
-        if (!best) F32(h, 236) = -1;
+        F32(h, 236) = best ? (H->objId ? H->objId(best) : -1) : -1;
         StampClock(h, 82);
         ++He_State(h);
         break;
@@ -486,7 +512,8 @@ i32 NpcAction10_TavernSocializeState(HeRecord* h) {
         } else {
             i32 c = F32(h, 192);
             if (c == 1) {
-                if (H->sendMessage) H->sendMessage(H->objId ? H->objId(tavern) : -1, /*"new "*/ 0);
+                // gilde.exe 0x4ca8b1: NotifyJoinLeaveGroup("new ", v13=tavern, v6=seat).
+                if (H->notifyJoinLeaveGroup) H->notifyJoinLeaveGroup(kNotifyTagNew, tavern, seat);
                 --F32(h, 192);
                 StampClock(h, 82);
                 Advance(h, 82, 1, 0, 0);
@@ -495,7 +522,8 @@ i32 NpcAction10_TavernSocializeState(HeRecord* h) {
                     Advance(h, 82, 1, 0, 0);
                     return H->queueEntity29 ? H->queueEntity29(0, h) : -1;
                 }
-                if (H->sendMessage) H->sendMessage(H->objId ? H->objId(tavern) : -1, /*"exec"*/ 0);
+                // gilde.exe 0x4ca903: NotifyJoinLeaveGroup("exec", v13=tavern, v6=seat).
+                if (H->notifyJoinLeaveGroup) H->notifyJoinLeaveGroup(kNotifyTagExec, tavern, seat);
                 StampClock(h, 82);
                 Advance(h, 82, 1, 0, 0);
             }
@@ -687,13 +715,18 @@ u8 NpcAction10_EvaluateAssignProfession(u8 prevResult, void* person,
     for (int cat = 0; cat < 13; ++cat)
         hist[cat] = 0;
 
-    // RNG-pick an under-represented bucket: rng(4) discarded, start = rng(13).
+    // RNG-pick an under-represented bucket. gilde.exe 0x47416f/0x47418d: the original
+    // draws EXACTLY two RandomModulo calls — RandomModulo(4) (discarded @0x47416f) then
+    // RandomModulo(0xD) @0x47418d which initialises the start bucket. The loop guard
+    // `v18+1` (0x4741ff) reuses the SAME ax register as the RandomModulo(0xD) result, so
+    // guard == start+1; there is NO third RNG draw. (Earlier reconstruction drew a bogus
+    // RandomModulo(1) here, corrupting the global LCG stream — fixed to match disasm.)
     util::RandomModulo(4);
     int start = (int)util::RandomModulo(0xD);
     int chosen = -1;
     int probe = 13;
     int b = start;
-    int guard = (int)util::RandomModulo(1) + 1;       // (v18+1) ceiling proxy
+    int guard = start + 1;                            // v18+1, aliases start (no extra draw)
     while (b == 0 || hist[b] != 0 || guard <= hist[(b + 14) % 13]) {
         b = (b + 1) % 13;
         if (--probe == 0)

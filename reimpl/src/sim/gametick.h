@@ -91,25 +91,35 @@ int RunNpcTurnFlagSweep(const u16* aliveMarker, const u8* kinds,
 
 // ===========================================================================
 // Plant/farm growth (VIBE_Plant_AdvanceGrowthStage 0x56eba4, growth-rule core).
-// The original walks a 384-node sub-array (stride 6 dwords / 24 bytes) of one
-// farm building's plant nodes; for each node whose type byte (node[10]>>24) is
-// not 0xFF and whose growth-stage byte (node[+13]) is below the per-type cap
-// (OfficeTypeRecord+68), it increments the stage by 1. The model-detach and
-// reload (Object_DetachAndRelease / EnsureModelsLoaded) is render plumbing
-// (DEFERRED). This recovers the integer growth rule.
+// The original walks a 64-node sub-array of one farm building's plant nodes:
+//   v2 = base; v3 = base + 0x600 (1536 bytes); do { ... v2 += 0x18; } while v2!=v3
+// i.e. stride 24 bytes (6 dwords) over a 0x600-byte span == 64 nodes
+// (lea ebx,[eax+600h] @0x56ebac; add edx,18h @0x56ebff — disasm-verified, the
+//  Hex-Rays "a1 + 384" is 384 *dwords* = the span, NOT the node count).
+// For each node whose empty-marker byte (the top byte of node[+0x0A], i.e. the
+// signed-extended byte at offset 13: `sar [edx+0Ah],18h == -1`) is not 0xFF and
+// whose growth-stage byte ([edx+0Dh], the SAME byte at offset 13) is below the
+// per-type cap (OfficeTypeRecord[+0x44=68], unsigned compare `jnb`), it
+// increments the stage by 1. The model-detach and reload
+// (Object_DetachAndRelease / EnsureModelsLoaded) is render plumbing (DEFERRED).
+// This recovers the integer growth rule.
 //   if stage < cap: stage += 1.
 // ===========================================================================
-constexpr int kPlantNodeCount  = 384;
-constexpr int kPlantNodeStride = 6;   // dwords (24 bytes)
+constexpr int kPlantNodeCount  = 64;  // 0x600 / 0x18 (disasm @0x56ebac/0x56ebff)
+constexpr int kPlantNodeStride = 6;   // dwords (24 bytes / 0x18)
 
 // Advance one plant node's growth stage toward its cap. Returns the new stage.
 u8 PlantAdvanceStage(u8 stage, u8 cap);
 
-// A synthetic plant node (the two fields the growth rule reads/writes).
+// A synthetic plant node (the fields the growth rule reads/writes). NOTE: in the
+// binary the empty-marker and the growth stage are the SAME byte (offset 13);
+// `typeByte` here mirrors that marker (0xFF == empty) and `stage` the value it
+// increments — for a real node the two always coincide, but the split keeps the
+// "skip empty / else grow" rule legible. cap is OfficeTypeRecord[+68].
 struct PlantNode {
-    u8 typeByte = 0;   // node[10]>>24 ; 0xFF == empty slot (skipped)
-    u8 stage    = 0;   // node[+13]    ; current growth stage (mutated)
-    u8 cap      = 0;   // OfficeTypeRecord[+68] for typeByte
+    u8 typeByte = 0;   // offset 13 as marker; 0xFF == empty slot (skipped)
+    u8 stage    = 0;   // offset 13 as growth stage (mutated; unsigned < cap)
+    u8 cap      = 0;   // OfficeTypeRecord[+68] for this node's type
 };
 
 // Advance every non-empty node in `nodes` one stage toward its cap (mirrors the

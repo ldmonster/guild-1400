@@ -129,7 +129,10 @@ TEST(CharActionYE2E, SabotageThenNotifyFlow) {
 
     // 1) InitSabotage: slot empty, query resolves a saboteur.
     RecBuf saboteur;
-    *reinterpret_cast<i32*>(HeBytes(saboteur.get()) + 1) = 4321;
+    {  // +1 is unaligned for i32; store via memcpy (byte-identical, no UB).
+        i32 _v = 4321;
+        std::memcpy(HeBytes(saboteur.get()) + 1, &_v, sizeof(_v));
+    }
     Cas3_Slot16(r.get()) = -1;
     g_s3.queryResults.push_back(saboteur.get());
     i32 sabHandle = InitSabotage(r.get());

@@ -238,25 +238,36 @@ TEST(GuildAssign, SuccessorSingleCandidateInstalls) {
 // PersonHasOfficeObject.
 // ===========================================================================
 TEST(GuildAssign, PersonHasOfficeObjectPresent) {
+    // gilde.exe 0x480abc scans the CollectByCategory holder buffer for an entry
+    // whose +4 (PrimaryId) == the entry's secondary id (NOT the object table).
     MockState s;
     GuildPersonRec ok{}; ok.valid = true; ok.hasBuilding = true;
     s.people.push_back({100, ok}); // primary
     s.people.push_back({200, ok}); // secondary
-    s.objects.push_back({200, 34, 0, 0}); // object carries the secondary id
 
     OfficeHolder entry = MakeHolder(7, 100, 34, 0, 2, 200);
+    // collected buffer: one entry whose PrimaryId (+4) == the secondary id (200).
+    std::vector<OfficeHolder> collected;
+    collected.push_back(MakeHolder(1, 200, 34, 0, 0, 0));
+
     GuildAssignContext gx = MakeCtx(s);
-    CHECK(PersonHasOfficeObject(entry, gx));
+    CHECK(PersonHasOfficeObject(entry, collected.data(),
+                                static_cast<int>(collected.size()), gx));
 
     // wrong state -> false.
     entry.state = 3;
-    CHECK(!PersonHasOfficeObject(entry, gx));
+    CHECK(!PersonHasOfficeObject(entry, collected.data(),
+                                 static_cast<int>(collected.size()), gx));
 
-    // object missing -> false.
+    // collected buffer empty -> false.
     entry.state = 2;
-    s.objects.clear();
-    GuildAssignContext gx2 = MakeCtx(s);
-    CHECK(!PersonHasOfficeObject(entry, gx2));
+    CHECK(!PersonHasOfficeObject(entry, collected.data(), 0, gx));
+
+    // collected buffer present but no +4 matches the secondary id -> false.
+    std::vector<OfficeHolder> noMatch;
+    noMatch.push_back(MakeHolder(1, 999, 34, 0, 0, 0));
+    CHECK(!PersonHasOfficeObject(entry, noMatch.data(),
+                                 static_cast<int>(noMatch.size()), gx));
 }
 
 TEST(GuildAssign, PersonHasOfficeObjectExcludedSecondary) {
@@ -265,10 +276,13 @@ TEST(GuildAssign, PersonHasOfficeObjectExcludedSecondary) {
     GuildPersonRec sec{}; sec.valid = true; sec.hasBuilding = true; sec.excluded = true;
     s.people.push_back({100, primary});
     s.people.push_back({200, sec});
-    s.objects.push_back({200, 34, 0, 0});
     OfficeHolder entry = MakeHolder(7, 100, 34, 0, 2, 200);
+    std::vector<OfficeHolder> collected;
+    collected.push_back(MakeHolder(1, 200, 34, 0, 0, 0));
     GuildAssignContext gx = MakeCtx(s);
-    CHECK(!PersonHasOfficeObject(entry, gx)); // excluded secondary fails the gate
+    // excluded secondary fails the gate (gilde.exe 0x480b04 `[edx+1B1h] != 0`).
+    CHECK(!PersonHasOfficeObject(entry, collected.data(),
+                                 static_cast<int>(collected.size()), gx));
 }
 
 // ===========================================================================

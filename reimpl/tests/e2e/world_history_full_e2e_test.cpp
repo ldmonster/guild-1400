@@ -81,7 +81,8 @@ TEST(WorldHistoryFullE2E, DynastyAndChronicleFlow) {
 
     // Token classification of a substitution placeholder.
     CHECK(HistoryClassifyTokenMode("_USE2") == HistoryTokenMode::kUse);
-    CHECK_EQ(HistoryTokenSlot("_USE2", HistoryTokenMode::kUse), 2);
+    // gilde.exe 0x4fd44c: slot digit is at token[5]; "_USE_2" places '2' there.
+    CHECK_EQ(HistoryTokenSlot("_USE_2", HistoryTokenMode::kUse), 2);
     CHECK_EQ(HistoryRoleNameIndex("RND_SPIELER"), 14);
 
     Chronicle chron;

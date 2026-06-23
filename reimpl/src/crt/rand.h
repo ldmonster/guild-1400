@@ -21,4 +21,12 @@ int RandNext();
 // CRT srand — set the generator state (matches std::srand semantics).
 void Srand(u32 seed);
 
+// VIBE_Util_RandSeed @0x5cb8e0 — the engine's own seed accessor (not std::srand).
+//   ptr = GetRandStatePtr(); if (ptr) *ptr = seed; return ptr;
+// Returns the state pointer (the original's eax). Equivalent to Srand() plus the
+// null-guard and the pointer return. Callers: VIBE_Sound_LibInit (0x445e83),
+// VIBE_TimeBase_StartTimer (0x44e2b3), VIBE_Scene_SyncWorldOnEnter (0x5046bb),
+// VIBE_World_LoadBuildingAndObjectData (0x583873), VIBE_Math_RandomSeed_Thunk.
+u32* RandSeed(u32 seed);
+
 } // namespace guild::crt

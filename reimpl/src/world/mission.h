@@ -80,11 +80,13 @@ int MissionFindBySource(i32 sourceOwner);
 // `crimeType` is a trackable mission type.
 bool MissionTypeIsTrackable(u8 crimeType);
 
-// Evaluates whether `crimeType` advances the mission in `slot`: the slot must be
-// occupied, its type must equal `crimeType`, and `crimeType` must be trackable.
-// On a match the slot's progress counter is incremented (mirrors
-// `++*((_DWORD*)result + 7)` at slot+28 in the original). Returns true if it
-// advanced. (slot+28 == fieldAt28 is the progress dword the tracker bumps.)
+// Tail of VIBE_Mission_TrackCrimeProgress (after FindBySource located `slot`):
+// the slot must be occupied and `crimeType` must be trackable, else the original
+// returns 0 (false). When both hold the original returns 1 (true) UNCONDITIONALLY
+// — it only ALSO increments the slot's progress counter (mirrors
+// `++*((_DWORD*)result + 7)` at slot+28 == fieldAt28) when the slot's type byte
+// equals `crimeType`. So a trackable-but-mismatched type still returns true
+// without bumping the counter.
 bool MissionRequirementAdvance(int slot, u8 crimeType);
 
 } // namespace guild::world

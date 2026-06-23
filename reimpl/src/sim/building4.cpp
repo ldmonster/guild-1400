@@ -267,7 +267,10 @@ void Building4_SyncProfessionState(std::int32_t rec, std::int32_t objId,
     } else if (workKind == 31) {
         prof = 11;
     } else {
-        prof = static_cast<int>(defaultProf) - 1;   // (+354 byte) - 1
+        // gilde.exe 58a200: edx = *(int*)(rec+0x162) >> 24 (arithmetic sar), then
+        // dec. The +357 byte is sign-extended, so model it through int8 before the
+        // -1, matching the original's signed shift.
+        prof = static_cast<int>(static_cast<std::int8_t>(defaultProf)) - 1;
     }
 
     hk->CommandBeginDeltaPacket(rec, objId);

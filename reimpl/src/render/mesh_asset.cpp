@@ -1,4 +1,5 @@
 #include "render/mesh_asset.h"
+#include "render/mesh_lod_name.h"
 
 #include <cctype>
 #include <cstring>
@@ -234,6 +235,49 @@ Mesh* MeshAssetCache::LoadOrFind(const char* path, const std::string& name) {
     map_[k] = std::move(mesh);
     order_.push_back(k);
     return raw;
+}
+
+// ---------------------------------------------------------------------------
+// gilde.exe 0x5D345C — VIBE_Mesh_LoadOrFindByName.
+// Orchestrates BuildLodFileName + the cache. `base` (v8) is the file leaf name the
+// loader opens; `key` (v7) is the registry/cache key. The original's LoadAndRegister
+// is the cache's LoadOrFind (load-if-absent + register); we reuse it for every
+// variant rather than redefining the base loader.
+// ---------------------------------------------------------------------------
+Mesh* Mesh_LoadOrFindByName(MeshAssetCache& cache, const char* name, const char* dir) {
+    char base[256];  // v8 — file leaf name
+    char key[256];   // v7 — registry key
+
+    // 1. Base-LOD names.
+    BuildLodFileName(name, dir, base, 0, key);
+
+    // 2. Cache lookup: FindStockObject(key) else FindStockObject(base).
+    Mesh* obj = cache.Find(key);
+    if (!obj)
+        obj = cache.Find(base);
+    if (obj)
+        return obj;
+
+    // 3. Miss -> load+register the base (LoadAndRegister(base, key)).
+    obj = cache.LoadOrFind(base, key);
+
+    // 4. The "_s" variant (only emitted when LOD is enabled).
+    if (BuildLodFileName(name, dir, base, -1, key))
+        cache.LoadOrFind(base, key);
+
+    // 5. Multi-LOD mode: load LOD frames 1..2.
+    if ((LodModeByte() & 0x7F) == 1) {
+        for (int i = 1; i < 3; ++i) {
+            // Skip indices BuildLodFileName declines (returns 0); stop at i >= 3.
+            while (!BuildLodFileName(name, dir, base, i, key)) {
+                if (++i >= 3)
+                    return obj;
+            }
+            cache.LoadOrFind(base, key);
+        }
+    }
+
+    return obj;
 }
 
 } // namespace guild::render

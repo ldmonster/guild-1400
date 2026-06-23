@@ -27,12 +27,18 @@ bool MissionResolveReward(u8 value, MissionRewardInfo* out) {
         return false;
     const EventDesc& rec = g_eventTable[idx];
     out->descriptorIndex = idx;
-    // RunSpecialDialog: VIBE_Text_RenderRichString(*((_DWORD*)v14 + 1) + 1) — the
-    // dword at rec+4 used as a text id, +1; RunRewardSummary uses the same dword +2.
-    out->nameTextId = static_cast<int>(rec.value) + 1;   // rec+4 (+1)
-    out->bodyTextId = static_cast<int>(rec.value) + 2;   // rec+4 (+2)
-    // RunRewardSummary / RunSpecialDialog voice suffix: *(_DWORD*)(v37 + 12) == rec+0x0C.
-    out->voiceIndex = rec.paramB;                        // rec+0x0C
+    // The dialogs hold the descriptor pointer as v15 = &byte_63CD4C[v4], i.e. the
+    // address of the +4 value byte (rec+4). The text id is the dword one step on:
+    //   RunSpecialDialog : VIBE_Text_RenderRichString(*((_DWORD*)v15 + 1) + 1)
+    //   RunRewardSummary : VIBE_Text_RenderRichString(*(_DWORD*)(v42 + 4) + 2)
+    // (rec+4)+4 == rec+8 == EventDesc.paramA, with +1 / +2 respectively.
+    out->nameTextId = rec.paramA + 1;   // rec+8 (RunSpecialDialog,  +1)
+    out->bodyTextId = rec.paramA + 2;   // rec+8 (RunRewardSummary,  +2)
+    // Voice suffix dwords differ between the two dialogs:
+    //   RunSpecialDialog : *((_DWORD*)v15 + 2)      == (rec+4)+8  == rec+0x0C (paramB)
+    //   RunRewardSummary : *(_DWORD*)(v42 + 12)     == (rec+4)+12 == rec+0x10 (paramC)
+    out->specialVoiceIndex = rec.paramB;  // rec+0x0C  ("_AUFTRAEGE_VERGABE_HS_%.2d")
+    out->rewardVoiceIndex  = rec.paramC;  // rec+0x10  ("_AUFTRAEGE_ERFOLG_HS_%.2d")
     return true;
 }
 

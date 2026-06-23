@@ -5,6 +5,7 @@
 // dialog target. The Form/GameLogic/Text/Command helpers the originals call live
 // in other modules and are NOT exercised here (the menus are pure data).
 #include "test.h"
+#include "world/location.h"
 #include "world/location2.h"
 
 using namespace guild::world;
@@ -159,6 +160,56 @@ TEST(LocationFsmGuard, RaidMenuOrder) {
     CHECK_EQ(clickDialog(m, 3), target(LocationDialog::SpyBuildingStart));
     CHECK_EQ(clickDialog(m, 4), target(LocationDialog::InformationDialog));
     CHECK_EQ(clickDialog(m, 5), target(LocationDialog::Transport));
+}
+
+// --- Wave-12 hardening: dispatch / classify boundary cases ------------------
+
+// ContactDispatch over an empty menu, with a zero "nothing clicked" id, and with
+// a slot id past the registered range, all return -1 without indexing OOB.
+TEST(LocationFsmBoundary, DispatchEmptyAndOutOfRange) {
+    std::vector<ContactMenuItem> empty;
+    ContactRegistration regE = ContactRegisterMenu(empty);
+    CHECK_EQ(regE.slotIds.size(), (std::size_t)0);
+    CHECK_EQ(ContactDispatch(empty, regE, 0), -1);    // nothing clicked
+    CHECK_EQ(ContactDispatch(empty, regE, 1), -1);    // click w/ no items
+    CHECK_EQ(ContactDispatch(empty, regE, 999), -1);
+
+    auto m = GuardRaidContactMenu(true);              // 6 items, slots 1..6
+    ContactRegistration reg = ContactRegisterMenu(m);
+    CHECK_EQ(ContactDispatch(m, reg, 0), -1);         // clickedSlot 0 -> nothing
+    CHECK_EQ(ContactDispatch(m, reg, 7), -1);         // past the highest slot id
+    CHECK_EQ(ContactDispatch(m, reg, -5), -1);        // negative id
+    CHECK_EQ(ContactDispatch(m, reg, 1000000), -1);
+}
+
+// A registration with FEWER slot ids than items (a malformed/short registration)
+// must not over-read the items vector — the dispatch loop bounds on both sizes.
+TEST(LocationFsmBoundary, DispatchShortRegistration) {
+    auto m = GuardRaidContactMenu(true);              // 6 items
+    ContactRegistration shortReg;                     // only 2 slot ids
+    shortReg.slotIds = {1, 2};
+    CHECK_EQ(ContactDispatch(m, shortReg, 2), m[1].target); // matches within range
+    CHECK_EQ(ContactDispatch(m, shortReg, 6), -1);          // slot only in items, not reg
+}
+
+// ClassifyLocationKind maps the REAL object-type codes from the binary-search
+// switch in gilde.exe 0x51defc VIBE_Building_EnterAndDispatch (ThiefGuild=84,
+// Church=229/230, Production=247, Tavern=288) and defaults everything else
+// (codes routing to non-modeled loops + unknown/out-of-range) to Idle.
+TEST(LocationFsmBoundary, ClassifyKnownAndUnknownCodes) {
+    CHECK(ClassifyLocationKind(84)  == LocationKind::ThiefGuild);  // 0x54
+    CHECK(ClassifyLocationKind(229) == LocationKind::Church);      // 0xE5
+    CHECK(ClassifyLocationKind(230) == LocationKind::Church);      // 0xE6
+    CHECK(ClassifyLocationKind(247) == LocationKind::Production);  // 0xF7
+    CHECK(ClassifyLocationKind(288) == LocationKind::Tavern);      // 0x120
+    // Old fabricated byte mapping must NOT classify any more.
+    CHECK(ClassifyLocationKind(6)  == LocationKind::Idle);
+    CHECK(ClassifyLocationKind(22) == LocationKind::Idle);
+    CHECK(ClassifyLocationKind(8)  == LocationKind::Idle);
+    CHECK(ClassifyLocationKind(0)   == LocationKind::Idle);
+    CHECK(ClassifyLocationKind(255) == LocationKind::Idle);
+    CHECK(ClassifyLocationKind(-1)  == LocationKind::Idle);
+    CHECK(ClassifyLocationKind(99999) == LocationKind::Idle);
 }
 
 TEST(LocationFsmGuard, TargetTrainingThreeItems) {

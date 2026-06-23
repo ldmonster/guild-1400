@@ -27,13 +27,26 @@ void FileTrace(FileSelRecord* rec, const char* tag) {
         rec->trace[rec->traceCount++] = tag;
 }
 
-// VIBE_Util_StripPathAndExt-style: the file-selector row label / committed token is the
-// bare name with everything from the first '.' dropped (matches savebrowser's StripExt).
-// SaveBrowser_EnumerateSaveFiles keeps the extension on `displayName`, so strip it here
-// the way the original file selector renders/commits the name field (v25+1).
-std::string BareName(const std::string& name) {
-    std::string::size_type dot = name.find('.');
-    return dot == std::string::npos ? name : name.substr(0, dot);
+// NOTE: the original file selector's row NAME field has its extension STRIPPED.
+// The enumerator (VIBE_SaveBrowser_EnumerateSaveFiles @0x569530) does, per matching file:
+//   1. ecx = a3+9 (the name field); copy the raw filename `*v6` into it via a 2-byte stride
+//      (0x5695bb copy loop), then
+//   2. Sprintf the SEPARATE full-path buffer ebx = a3+265 with "%s/%s" (dir,name)  (0x5695e7),
+//   3. eax = ecx (a3+9 — the NAME field, NOT the path buffer); StrChr(name,'.') and if a dot
+//      is found, *p = 0  (disasm 0x5695f4 `mov eax,ecx` -> 0x5695f6 StrChr -> 0x5695ff
+//      `mov byte ptr [eax],0`). So the NAME field is extension-STRIPPED; the path buffer
+//      (a3+265) keeps its extension and is unused by the selector.
+// The file-selector body @0x569668 uses that extension-stripped name field for BOTH the
+// AddTextLabel row (v12 = (char*)v25+1 == a3+9) and the commit
+// (v18 = (char*)&v25[v17]+1 == a3+9, Sprintf "%s\\%s%s" -> dir "\\" name ext, re-appending
+// the a5 extension; call site 0x52a64c passes a5=".INI"). The C++ enumerator sibling models
+// displayName WITH the extension, so we strip it here to match the binary's a3+9 name field.
+
+// VIBE_Util_StrChr(name,'.')-style truncation of the row name at the first '.' — exactly the
+// a3+9 strip the enumerator performs at 0x5695f4..0x5695ff.
+std::string StripRowNameExt(const std::string& s) {
+    std::string::size_type dot = s.find('.');
+    return dot == std::string::npos ? s : s.substr(0, dot);
 }
 
 } // namespace
@@ -221,7 +234,10 @@ int Menu_RunFileSelector(const std::string& dir, const std::string& ext,
     std::vector<std::string> rowNames(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
         int y = kFileSelRowStrideY * i;                       // LOWORD(v37) = 24*i
-        std::string name = BareName(entries[static_cast<size_t>(i)].displayName);
+        // The a3+9 name field the original uses for both the label and the commit is
+        // EXTENSION-STRIPPED (enumerator @0x5695f4..0x5695ff strips at the first '.'); the
+        // enumerator C++ sibling keeps the extension on displayName, so strip it here.
+        std::string name = StripRowNameExt(entries[static_cast<size_t>(i)].displayName);
         rowNames[static_cast<size_t>(i)] = name;
         int id = h->AddTextLabel(y, name);
         rowIds[static_cast<size_t>(i)] = id;

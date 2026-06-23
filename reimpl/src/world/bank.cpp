@@ -4,7 +4,7 @@ namespace guild::world {
 
 LoanDecision BankEvaluateLoan(const LoanAccount& acct, int lawSlot) {
     return AmtEvaluateLoan(lawSlot, acct.currency, acct.heldCurrency,
-                           acct.hasLender);
+                           acct.hasLender, acct.noCreditor);
 }
 
 i32 BankInterestBase(int lawSlot, u8 currency) {
@@ -21,7 +21,7 @@ i32 BankInterestBase(int lawSlot, u8 currency) {
 // We model the charge of `base` to the owner when in debt and not foreclosed.
 LoanDecision BankApplyLoanStep(const LoanAccount& acct, int lawSlot, bool commit) {
     LoanDecision d = AmtEvaluateLoan(lawSlot, acct.currency, acct.heldCurrency,
-                                     acct.hasLender);
+                                     acct.hasLender, acct.noCreditor);
     if (d.charge && commit) {
         // Original: QueueRequest16(officeStorage, ownerAccount, base, 0).
         // The bank/office storage is the -1 sink endpoint in our hook model.

@@ -59,8 +59,11 @@ TEST(MeshLoadUnit, BoundingExtentsCube) {
 
     ComputeBoundingExtents(m);
 
-    CHECK(feq(m.radius, std::sqrt(3.0f)));        // max |vertex|
-    CHECK(feq(m.radius2, 2.0f * std::sqrt(3.0f))); // AABB diagonal
+    // HARDEN (gilde.exe 0x5d1ff5 / 0x5d1bbe): +472 (m.radius) ends as the AABB
+    // diagonal length; +468 (m.radius2) holds the max-|vertex| value. The prior
+    // assertions had these two fields swapped vs the binary.
+    CHECK(feq(m.radius, 2.0f * std::sqrt(3.0f)));  // +472 = AABB diagonal
+    CHECK(feq(m.radius2, std::sqrt(3.0f)));        // +468 = max |vertex|
     CHECK(feq(m.centroid[0], 0.0f));
     CHECK(feq(m.centroid[1], 0.0f));
     CHECK(feq(m.centroid[2], 0.0f));

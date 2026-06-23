@@ -242,6 +242,33 @@ TEST(CombatDrivers, FormationModeOpcode) {
     CHECK_EQ(FormationModeOpcode(9), -1);
 }
 
+// --- Wave-12 hardening: formation-slot capacity / mode range ----------------
+
+// A full 16-entry slot list (no -1) returns -1 and never indexes past 16 or the
+// vector end (the kTeamSlotCount AND .size() guards both apply).
+TEST(CombatDrivers, FirstFreeFormationSlotFull16) {
+    std::vector<i32> full(kTeamSlotCount, 1);   // 16 occupied slots
+    CHECK_EQ(FindFirstFreeFormationSlot(full), -1);
+    // 16 occupied + a free 17th: the scan stops at kTeamSlotCount (16) -> -1,
+    // it must NOT report the out-of-band free slot.
+    std::vector<i32> oversize(kTeamSlotCount, 1);
+    oversize.push_back(-1);
+    CHECK_EQ(FindFirstFreeFormationSlot(oversize), -1);
+    // A list shorter than 16 with no free slot stops at .size() -> -1.
+    CHECK_EQ(FindFirstFreeFormationSlot(std::vector<i32>{1, 2}), -1);
+}
+
+// FormationModeOpcode over the full u8 range only ever yields the three known
+// opcodes or -1; the out-of-range modes (incl. 255) must hit the -1 default.
+TEST(CombatDrivers, FormationModeOpcodeFullByteRange) {
+    for (int m = 0; m <= 255; ++m) {
+        int op = FormationModeOpcode(static_cast<u8>(m));
+        if (m == 1)            CHECK_EQ(op, kFormOpLine);
+        else if (m == 2 || m == 3) CHECK_EQ(op, kFormOpA);
+        else                   CHECK_EQ(op, -1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UpdatePursuitTargets (0x48c400)
 // ---------------------------------------------------------------------------

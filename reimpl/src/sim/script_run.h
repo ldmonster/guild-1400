@@ -49,9 +49,10 @@ namespace guild::sim {
 
 // gilde.exe 0x441f30 — VIBE_Script_StripCommentsAndWhitespace.
 // Preprocess `source` in place-equivalent fashion:
-//   * every control char (< ' ') maps to a single space, EXCEPT it strips
-//     C-style /* ... */ comments entirely (replaced by spaces in the original;
-//     here removed), and
+//   * the control chars tab/LF/CR/0x10 map to a single space (bytes 0x0E/0x0F
+//     and <9 are kept verbatim, exactly as 0x441f30 does), it replaces C-style
+//     /* ... */ comments with a single separating space (the original blanks the
+//     span to spaces; pass 2 then collapses it — behavior-identical), and
 //   * collapses runs of two-or-more spaces down to one.
 // Returns the cleaned source. (The original also produces a per-line offset map
 // for debug strings; that map is not needed by the reimplemented compiler and is

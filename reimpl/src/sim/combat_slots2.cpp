@@ -6,11 +6,16 @@
 namespace guild::sim {
 
 // gilde.exe 0x57eb64 — VIBE_Combat_AccumulateThreatStats — cash -> tier rounding.
-// The original computes  v12 = (cash <= 0.0) ? 0.0 : min(cash, 7.0)  then converts
-// to an int via the x87 FPU (fld; <Coord_ConvertX, FPU-neutral>; fistp) which, in
-// the default control-word state, rounds to NEAREST, ties to EVEN. We reproduce
-// that with std::nearbyint (which honours the current rounding mode, FE_TONEAREST
-// == round-half-to-even by default).
+// Disasm @0x57ebcc..0x57ec45 (verified): GetCashAmount returns st0 (x87 80-bit), the
+// scale is applied with `fmul ds:flt_625994` (so cash*0.1f happens at 80-bit), the
+// clamp branches compare with `fcomp`, and the chosen value is spilled through a
+// 32-bit FLOAT slot (`fstp [esp+...var_C]`, var_C is `float`: v12/v14). Only THEN is
+// it converted to int via VIBE_Coord_ConvertX(); (int)v12. ConvertX @0x5c6b08 sets
+// the x87 CW high byte to 0x1F (RC=11 = round-toward-ZERO), frndint, restores — i.e.
+// it TRUNCATES toward zero. So the faithful path is: compute the clamp, round-trip the
+// clamped value through `float`, THEN truncate toward zero (a double->int truncation
+// could differ in the float-boundary edge cases the original collapses by spilling to
+// a 32-bit float first).
 int RoundTier(double cash) {
     double scaled = cash * static_cast<double>(kThreatCashScale);
     // Mirror the original's branch order: the < 7.0 / <= 0.0 cascade collapses to
@@ -22,7 +27,9 @@ int RoundTier(double cash) {
         clamped = 0.0;                                       // v12 = 0.0
     else
         clamped = scaled;                                    // v14 = cash
-    return static_cast<int>(std::nearbyint(clamped));
+    // The original spills the clamped value to a 32-bit float (var_C) before ConvertX.
+    float spilled = static_cast<float>(clamped);
+    return static_cast<int>(std::trunc(spilled));  // ConvertX = truncate toward zero
 }
 
 // gilde.exe 0x57eb64 — VIBE_Combat_AccumulateThreatStats.

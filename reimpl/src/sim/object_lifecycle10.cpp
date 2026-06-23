@@ -4,6 +4,8 @@
 // ===========================================================================
 #include "sim/object_lifecycle10.h"
 
+#include "render/mesh_attach_textures.h"  // render::frame:: shared draw-block LP64 layout
+
 #include <cstring>
 
 namespace guild::sim {
@@ -239,10 +241,22 @@ void* ObjectAttachToUniverseNode(void* parent, const float* pos, const char* mod
     if (g_hooks.meshAttachLods)                               // 0x5b3e7e
         g_hooks.meshAttachLods(n, model);
 
+    // RECONCILIATION (rule 1/3): the engine reads `*(v7 + 384*i + 260)` (the resident
+    // gate / "LOD-mesh"==a2[4] STOCK ptr) and `*(v11 + 264)` (a2[5] texSET array).
+    // Engine +260/+264 == LOD-frame_base(244)+16/+20 == a2[4]/a2[5]. AttachStockTextures
+    // (the WRITER, mesh_attach_textures.cpp) stores those two pointer slots at the LP64-
+    // relocated frame offsets render::frame::kStockSlot(24) / kTexSetSlot(32) so two
+    // 8-byte native pointers don't overlap. We read at the SAME relocated slots so the
+    // live writer/reader agree byte-for-byte (the shared render::frame contract). The
+    // texture count `*(v12+480)` is the stock object's material count (stock+480 ==
+    // render::stockrec::kMatCount). On a 32-bit build these collapse to the verbatim
+    // engine +260/+264/+480.
+    constexpr int kStockGate = render::frame::kLodFrameBase + render::frame::kStockSlot;
+    constexpr int kTexSet    = render::frame::kLodFrameBase + render::frame::kTexSetSlot;
     void* drawBlk = n->p(n10::kDrawData);                     // v7 = v19[123]
     bool resident = false;
     if (drawBlk)                                              // 0x5b3e95
-        resident = (BlockPtr(drawBlk, 260) != nullptr);       // *(v7+260)
+        resident = (BlockPtr(drawBlk, kStockGate) != nullptr);  // *(v7+260) == a2[4]
     if (!resident) {                                          // 0x5b3f46 path
         if (g_hooks.objDispose) g_hooks.objDispose(n);
         return nullptr;
@@ -252,18 +266,18 @@ void* ObjectAttachToUniverseNode(void* parent, const float* pos, const char* mod
     for (int i = 0;; ++i) {                                   // 0x5b3ea6
         u8* d10 = static_cast<u8*>(n->p(n10::kDrawData));     // v10 reload
         if (static_cast<unsigned>(i) >= d10[2316]) break;     // 0x5b3ebc count
-        void* v12 = BlockPtr(d10, v8 + 260);                  // 0x5b3ec1
+        void* v12 = BlockPtr(d10, v8 + kStockGate);           // 0x5b3ec1 ([ecx+104h]) stock
         if (v12) {
             i32 v13;
-            std::memcpy(&v13, static_cast<u8*>(v12) + 480, 4);  // texture count
-            u8* v14 = static_cast<u8*>(BlockPtr(d10, v8 + 264));  // surface array
+            std::memcpy(&v13, static_cast<u8*>(v12) + 480, 4);  // 0x5b3ee1 stock+480 matCount
+            u8* v14 = static_cast<u8*>(BlockPtr(d10, v8 + kTexSet));  // 0x5b3ee7 ([ecx+108h]) texSET
             for (int j = 0; j < v13; ++j, v14 += sizeof(void*)) {  // 0x5b3ef1
                 void* surf = BlockPtr(v14, 0);
                 if (surf && g_hooks.textureUploadToSurface)   // 0x5b3efd
                     g_hooks.textureUploadToSurface(surf, v14, i);
             }
         }
-        v8 += 384;                                            // 0x5b3ecc
+        v8 += render::frame::kLodFrameStride;                 // 0x5b3ecc (384)
     }
     if (g_hooks.objSetPosition) g_hooks.objSetPosition(n, pos);          // 0x5b3f14
     if (g_hooks.objSetWorldTranslation)                                  // 0x5b3f25

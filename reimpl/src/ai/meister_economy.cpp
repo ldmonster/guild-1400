@@ -8,12 +8,16 @@
 // the deeply entity/query/render-coupled leaf reads are injected via the
 // MeisterFaction synthetic model (so the pass runs without the entity arrays).
 //
-// Production-multiplier constants (gilde.exe, recovered byte-for-byte):
-//   flt_6198E8 = 1.5625000742147677e-05  (tier 3 stock scale)
-//   flt_6198EC = 7.812500371073838e-06   (tier 2)
-//   flt_6198F0 = 3.906250185536919e-06   (tier 1)
-//   flt_6198F4 = 0.5                      (ratio scale)
-//   flt_6198F8 = 0.25                     (ratio bias)
+// Production-multiplier constants (gilde.exe, recovered byte-for-byte via
+// get_bytes/get_global_value — confirmed bytes, see addresses):
+//   flt_6198E8 = 0x3683126f = 3.906250185536919e-06   (switch case 3 stock scale)
+//   flt_6198EC = 0x3703126f = 7.812500371073838e-06   (switch case 2)
+//   flt_6198F0 = 0x3783126f = 1.5625000742147677e-05  (switch case 1)
+//   flt_6198F4 = 0x3f000000 = 0.5                      (ratio scale)
+//   flt_6198F8 = 0x3e800000 = 0.25                     (ratio bias)
+// NOTE: the disasm switch maps case 1 -> flt_6198F0, case 2 -> flt_6198EC,
+// case 3 -> flt_6198E8 (0x4598a0/0x459996/0x4599ad). A prior reconstruction
+// had the case1/case3 constants swapped; corrected to match the binary.
 //
 // DEFERRED sub-passes (same module, deferred for deeper coupling — translated as
 // decision cores only or not at all; LISTed in the module report):
@@ -32,10 +36,11 @@
 namespace guild::ai {
 
 namespace {
-// PlanProduction stock-scale constants (flt_6198E8..F8).
-constexpr float kProdTier3 = 1.5625000742147677e-05f;  // flt_6198E8
-constexpr float kProdTier2 = 7.812500371073838e-06f;   // flt_6198EC
-constexpr float kProdTier1 = 3.906250185536919e-06f;   // flt_6198F0
+// PlanProduction stock-scale constants (flt_6198E8..F8). Named by switch case
+// (the disasm's case->address mapping), holding the exact byte-recovered value.
+constexpr float kProdCase1 = 1.5625000742147677e-05f;  // flt_6198F0 (case 1)
+constexpr float kProdCase2 = 7.812500371073838e-06f;   // flt_6198EC (case 2)
+constexpr float kProdCase3 = 3.906250185536919e-06f;   // flt_6198E8 (case 3)
 constexpr float kProdRatioScale = 0.5f;                // flt_6198F4
 constexpr float kProdRatioBias  = 0.25f;               // flt_6198F8
 
@@ -211,9 +216,9 @@ bool TrainStaffDecision(int threshold, bool busyFlag, bool hasTrainer,
 double PlanProductionRatio(u8 multiplierTier, int stockCount) {
     double scaled;
     switch (multiplierTier) {
-    case 1: scaled = static_cast<double>(stockCount) * kProdTier1; break;
-    case 2: scaled = static_cast<double>(stockCount) * kProdTier2; break;
-    case 3: scaled = static_cast<double>(stockCount) * kProdTier3; break;
+    case 1: scaled = static_cast<double>(stockCount) * kProdCase1; break; // flt_6198F0
+    case 2: scaled = static_cast<double>(stockCount) * kProdCase2; break; // flt_6198EC
+    case 3: scaled = static_cast<double>(stockCount) * kProdCase3; break; // flt_6198E8
     default:
         // The original leaves v22 uninitialized in the default case (the switch
         // falls through to LABEL_26 without setting v22); in practice the AI

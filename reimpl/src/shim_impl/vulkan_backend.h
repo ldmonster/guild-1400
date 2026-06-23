@@ -62,6 +62,12 @@ public:
     void present() override;
     void setPalette(const std::uint32_t* argb256) override;
 
+    // Real Vulkan 3D scene pipeline (rule 3): rasterise the draw list on the GPU
+    // (vertex/fragment SPIR-V reproducing the engine projection + MODULATE) into an
+    // offscreen colour+depth image, then read it back into `target`. Returns false
+    // if the scene pipeline could not be built (no embedded shaders) — CPU fallback.
+    bool renderScene3D(const render::Scene3DDrawList& dl, render::Surface* target) override;
+
     // --- swapchain (on-screen) present path ------------------------------
     // Opt in to presenting to a real VkSurfaceKHR (a window) instead of the
     // offscreen-only target. Call BEFORE init(). `surfaceFactory` receives the
@@ -116,6 +122,16 @@ private:
     std::int32_t findMemoryType(std::uint32_t typeBits, VkMemoryPropertyFlags want) const;
     void destroyAll();
 
+    // --- 3D scene GPU pipeline (renderScene3D) ---------------------------
+    bool ensureScenePipeline();  // lazily build the render pass + pipeline + depth
+    void destroyScenePipeline();
+    void destroySceneFrameResources();  // free the cached per-geometry uploads
+    // Create a sampled texture image (BGRA8) from w*h ARGB texels plus its mip chain
+    // (`mips`[k] = level k+1; null/empty = single level), uploading every level.
+    bool createSceneTexture(int w, int h, const std::uint32_t* argb,
+                            const std::vector<std::vector<std::uint32_t>>* mips,
+                            VkImage& img, VkDeviceMemory& mem, VkImageView& view);
+
     // config
     int width_ = 0;
     int height_ = 0;
@@ -165,6 +181,52 @@ private:
 
     std::string deviceName_;
     std::string apiVersion_;
+    float maxAnisotropy_ = 1.0f;     // enabled sampler anisotropy (1 = unsupported/off)
+
+    // 3D scene pipeline objects (built lazily on the first renderScene3D).
+    bool sceneReady_ = false;
+    bool sceneFailed_ = false;
+    VkRenderPass scenePass_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout sceneDescLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout scenePipeLayout_ = VK_NULL_HANDLE;
+    VkPipeline scenePipeline_ = VK_NULL_HANDLE;
+    VkPipeline scenePipelineShadow_ = VK_NULL_HANDLE;  // blend (dst*=src) for shadow batches
+    VkPipeline scenePipelineAdditive_ = VK_NULL_HANDLE;  // additive (dst+=src*opacity) — light shaft/flame
+    VkPipeline scenePipelineAlpha_ = VK_NULL_HANDLE;     // src-alpha lerp — mode-1 alpha materials
+    VkSampler sceneSampler_ = VK_NULL_HANDLE;        // NEAREST + REPEAT
+    VkSampler sceneSamplerLinear_ = VK_NULL_HANDLE;  // LINEAR + REPEAT (bilinear)
+    // Scene render target (its own colour image at the draw-list resolution, which may
+    // be supersampled above the device size; readback downsamples it to the target).
+    VkImage sceneColor_ = VK_NULL_HANDLE;
+    VkDeviceMemory sceneColorMem_ = VK_NULL_HANDLE;
+    VkImageView sceneColorView_ = VK_NULL_HANDLE;
+    VkImage sceneDepth_ = VK_NULL_HANDLE;
+    VkDeviceMemory sceneDepthMem_ = VK_NULL_HANDLE;
+    VkImageView sceneDepthView_ = VK_NULL_HANDLE;
+    VkFramebuffer sceneFb_ = VK_NULL_HANDLE;
+    VkFormat sceneDepthFormat_ = VK_FORMAT_UNDEFINED;
+    int sceneRW_ = 0, sceneRH_ = 0;               // current scene render resolution
+    VkBuffer sceneStaging_ = VK_NULL_HANDLE;      // readback staging (scene-res sized)
+    VkDeviceMemory sceneStagingMem_ = VK_NULL_HANDLE;
+    VkDeviceSize sceneStagingSize_ = 0;
+    bool ensureSceneTargets(int rW, int rH);      // (re)create colour+depth+fb at rW x rH
+    int scenePipelineCull_ = -1;     // backfaceCull the live scenePipeline_ was built for
+
+    // Cached per-geometry GPU uploads (vertex buffer + textures + descriptors), reused
+    // across frames while Scene3DDrawList::geometryId is unchanged (FPS: a camera-only
+    // frame re-records with new push constants and skips all uploads). id 0 = nothing
+    // cached / always re-upload.
+    unsigned sceneGeomId_ = 0;
+    VkBuffer sceneVbuf_ = VK_NULL_HANDLE;
+    VkDeviceMemory sceneVmem_ = VK_NULL_HANDLE;
+    std::vector<VkImage> sceneTexImg_;
+    std::vector<VkDeviceMemory> sceneTexMem_;
+    std::vector<VkImageView> sceneTexView_;
+    VkImage sceneWhiteImg_ = VK_NULL_HANDLE;
+    VkDeviceMemory sceneWhiteMem_ = VK_NULL_HANDLE;
+    VkImageView sceneWhiteView_ = VK_NULL_HANDLE;
+    VkDescriptorPool sceneDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> sceneSets_;
 };
 
 } // namespace guild::shim

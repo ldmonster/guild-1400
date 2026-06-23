@@ -72,8 +72,17 @@ const AccusationMessage* StraftatAccusationLog(int* outCount);
 // crime owner (a1 high dword), passes (mask & flagField) == 0, and has an evidence
 // pair (owner==recipientOwnerId, crimeId==a1). Returns the number delivered.
 //   crimeId   = low dword of a1   ownerId = high dword of a1   mask = a2
+//
+// SIDE EFFECT (faithful to the binary, 0x4c382b): after delivering to a recipient
+// the original executes `dword_12CEAF4[134 * v8] &= v12`, where v8 is the number
+// of evidence-pair SLOTS scanned to find the matching pair (i.e. v8 == matching
+// pair index e/2) — so it masks the flagField of the recipient at table index v8,
+// NOT the delivering recipient j. This is reproduced bug-for-bug: it writes
+// `recipients[v8].flagField &= mask` (guarded to v8 < recipientCount on the
+// abstracted recipient view so it cannot run off the supplied array; on the real
+// 768-stride table v8 is always in range). `recipients` is therefore mutable.
 int StraftatBroadcastAccusation(i32 crimeId, i32 ownerId, i32 mask,
-                                const AccusationRecipient* recipients,
+                                AccusationRecipient* recipients,
                                 int recipientCount, i32 perpetratorId,
                                 bool perpetratorResolves);
 

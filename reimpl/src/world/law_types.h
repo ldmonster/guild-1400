@@ -30,14 +30,15 @@ constexpr int kLawCount  = 26;
 constexpr int kLawStride = 36;
 
 // Comparison operator codes (LOBYTE(v21[5])) used by EvaluateViolation.
+// gilde.exe 0x4c2cd8: the roll/"violation" path (loc_4C2CE9) is taken when:
 enum LawOp : guild::u8 {
     kLawOpEqual        = 1,  // value == threshold -> violation
     kLawOpNotEqual     = 2,  // value != threshold -> violation
-    kLawOpLess         = 3,  // value <  threshold -> OK, else violation
-    kLawOpLessEqual    = 4,  // value <= threshold -> OK, else violation
-    kLawOpGreater      = 5,  // value >  threshold -> OK, else violation
-    kLawOpGreaterEqual = 6,  // value >= threshold -> OK, else violation
-    kLawOpSpecial      = 7,  // value==threshold || threshold==2 -> OK; else violation
+    kLawOpLess         = 3,  // value <  threshold -> violation (jge -> no match)
+    kLawOpLessEqual    = 4,  // value <= threshold -> violation (jg  -> no match)
+    kLawOpGreater      = 5,  // value >  threshold -> violation (jle -> no match)
+    kLawOpGreaterEqual = 6,  // value >= threshold -> violation (jl  -> no match)
+    kLawOpSpecial      = 7,  // value!=threshold && threshold!=2 -> violation
 };
 
 GUILD_PACKED_BEGIN

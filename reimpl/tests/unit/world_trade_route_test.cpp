@@ -253,13 +253,15 @@ TEST(WorldExchange, ApplyFees) {
 // ===========================================================================
 // location: classifier + contact-dispatch resolution
 // ===========================================================================
+// Real object-type codes from gilde.exe 0x51defc VIBE_Building_EnterAndDispatch
+// (binary-search switch on the object's 16-bit type word, `mov ax,[esi]`):
+// Production=247, Church=229/230, ThiefGuild=84, Tavern=288; all else -> Idle.
 TEST(WorldLocation, ClassifyKind) {
-    CHECK(ClassifyLocationKind(19) == LocationKind::Production);
-    CHECK(ClassifyLocationKind(10) == LocationKind::Production);
-    CHECK(ClassifyLocationKind(6) == LocationKind::Church);
-    CHECK(ClassifyLocationKind(22) == LocationKind::ThiefGuild);
-    CHECK(ClassifyLocationKind(7) == LocationKind::Tavern);
-    CHECK(ClassifyLocationKind(14) == LocationKind::Residence);
+    CHECK(ClassifyLocationKind(247) == LocationKind::Production);
+    CHECK(ClassifyLocationKind(229) == LocationKind::Church);
+    CHECK(ClassifyLocationKind(230) == LocationKind::Church);
+    CHECK(ClassifyLocationKind(84) == LocationKind::ThiefGuild);
+    CHECK(ClassifyLocationKind(288) == LocationKind::Tavern);
     CHECK(ClassifyLocationKind(99) == LocationKind::Idle);
 }
 
@@ -316,4 +318,64 @@ TEST(WorldLocation, ThiefGuildGatedDispatch) {
     CHECK_EQ(reg3.slotIds[6], 2); // MasterCert
     CHECK_EQ(ContactDispatch(items3, reg3, 2),
              (int)ThiefGuildTarget::MasterCertificate);
+}
+
+// ---------------------------------------------------------------------------
+// Boundary: exchange rate-table index. ExchangePriceByRate guards
+// `currency < table.size()` -> currencies past the (empty/short) table return 0.
+// ---------------------------------------------------------------------------
+TEST(WorldExchange, PriceByRateEmptyAndOversizeIndex) {
+    ExchangeSetRateTable({});                 // empty order/rate book
+    CHECK_EQ(ExchangePriceByRate(10, 0), 0);  // index past empty table -> 0
+    CHECK_EQ(ExchangePriceByRate(10, 65535), 0);
+
+    ExchangeSetRateTable({3, 5});             // two-entry book
+    CHECK_EQ(ExchangePriceByRate(4, 0), 12);  // 3*4
+    CHECK_EQ(ExchangePriceByRate(4, 1), 20);  // 5*4
+    CHECK_EQ(ExchangePriceByRate(4, 2), 0);   // == size -> guard -> 0
+    CHECK_EQ(ExchangePriceByRate(4, 9999), 0);
+    ExchangeSetRateTable({});                 // restore
+}
+
+// ---------------------------------------------------------------------------
+// Boundary: route panel with 0 stops and with many stops (the cargoValues list).
+// RoutePanelStep iterates cargoValues; 0 entries must still transition, a large
+// list must process every entry without OOB.
+// ---------------------------------------------------------------------------
+TEST(WorldTradeRoute, PanelAssignCartZeroAndManyStops) {
+    g_routeCmds.clear();
+    RouteSetCmdHook(RouteRec, nullptr);
+
+    // Zero stops: valid target, empty cargoValues -> CartAssigned, no per-cart
+    // commands (only the loop body emits, and the loop runs zero times).
+    {
+        PanelStep st; st.button = PanelButton::AssignCart;
+        st.routeTargetValid = true; st.mode = RouteMode::Medium;
+        st.ownerAccount = 1; st.cart = 9; st.cargoValues = {};
+        PanelState s = RoutePanelStep(PanelState::Open, st);
+        CHECK(s == PanelState::CartAssigned);
+    }
+
+    // Many stops: 64 carts, each emits a ResetCart + (route packet [+ charge]).
+    g_routeCmds.clear();
+    {
+        PanelStep st; st.button = PanelButton::AssignCart;
+        st.routeTargetValid = true; st.mode = RouteMode::Medium;
+        st.ownerAccount = 1; st.cart = 9;
+        st.cargoValues.assign(64, 100000);
+        PanelState s = RoutePanelStep(PanelState::Open, st);
+        CHECK(s == PanelState::CartAssigned);
+        // Each iteration: ResetCart (1) + RouteAssign route packet (1) + charge
+        // (1, since cost!=0 for Medium/100000) == 3 commands per cart.
+        CHECK_EQ((int)g_routeCmds.size(), 64 * 3);
+    }
+    RouteSetCmdHook(nullptr, nullptr);
+}
+
+// FindOwnerChain over an empty chain and a chain terminated immediately by -1.
+TEST(WorldTradeRoute, FindOwnerChainEmptyAndTerminator) {
+    CHECK_EQ(RouteFindOwnerChain(7, {}, false), false);       // empty, no tolerance
+    CHECK_EQ(RouteFindOwnerChain(7, {}, true), true);         // tolerance short-circuit
+    CHECK_EQ(RouteFindOwnerChain(7, {-1, 7}, false), false);  // -1 terminates first
+    CHECK_EQ(RouteFindOwnerChain(7, {3, 7, 9}, false), true); // 7 present
 }

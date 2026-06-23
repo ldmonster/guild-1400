@@ -40,4 +40,37 @@ namespace guild::render {
 bool BuildSilhouettePoints(i32 count, u8* conn, i32* outCount,
                            float* const* points, const float** outPairs);
 
+// =============================================================================
+// gilde.exe 0x5F58FC — VIBE_Mirror_CreateOutline
+//   __usercall al = fn(points@eax, count@edx, outArray@ecx, outCount@ebx)
+//
+// Chains the silhouette edges produced by BuildSilhouettePoints into ONE ordered
+// boundary loop (the reflection clip outline). Given `count` unique points, it:
+//   1. allocates the silhouette pair buffer (32*count bytes) and the connectivity
+//      matrix (count*(count+8) bytes), runs BuildSilhouettePoints to fill them and
+//      set `pairCount` (= 2 * number of edges),
+//   2. walks the edge set, starting at edge 0, repeatedly choosing the next edge
+//      that shares the current endpoint AND whose direction is collinear (within
+//      0.001 per component, either orientation) with the running edge direction —
+//      i.e. it merges colinear edges and follows the boundary — emitting each
+//      distinct (a,b) point pair into the output array (dedup'd against pairs
+//      already emitted in either orientation),
+//   3. when a chain closes (no unvisited edge continues it), it restarts from the
+//      first not-yet-taken connectivity entry, until all are consumed.
+//
+// On success returns true and writes:
+//   *outArray = the allocated ordered outline pointer array (caller frees),
+//   *outCount = the number of POINTERS written (2 per emitted edge).
+// Returns false (writes nothing) when count < 3.
+//
+// `points`   : `count` vec3 pointers (the deduplicated reflected mirror corners).
+// `outArray` : receives the allocated ordered (a0,b0,a1,b1,...) pointer array.
+// `outCount` : receives the pointer count (always even).
+//
+// The connectivity/pair scratch and the output array are obtained from the
+// module allocator hook (see SetMirrorAllocHook in mirror_project.h) so this is
+// link-clean and standalone-testable; the arithmetic is 1:1 with the decompile.
+bool CreateOutline(float* const* points, u32 count,
+                   const float*** outArray, u32* outCount);
+
 } // namespace guild::render

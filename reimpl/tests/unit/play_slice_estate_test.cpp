@@ -57,6 +57,22 @@ Seeded SeedEstateWorld(i16 startOwner, i16 buyerCash) {
 
 } // namespace
 
+// --- golden: pin the QueueRequestQuad56 (@0x495098) opcode-56 packet-staging byte
+// offsets + the bought-object owner/parent field offsets + the buyer cash field.
+// Recovered constants traced to slice_estate.h's recovered-value comments. ---
+TEST(PlaySliceEstateUnit, QueueRequestQuad56OffsetsGolden) {
+    CHECK_EQ((int)kEstateCmdOpcode, 56);      // VIBE_Command_QueueRequestQuad56
+    // Field ROLES recovered from the builder EnqueueBuyBuilding @0x588798 and the
+    // apply ExSetObjectParent @0x49ae60: +0x10 is the bought OBJECT id (a1), +0x14
+    // sources the +37 parent handle (a2), +0x18 sources the +39 owner id (a4).
+    CHECK_EQ((int)kEstateObjectOff,   0x10);  // v6 = a1 (the bought object id)
+    CHECK_EQ((int)kEstateParentOff,   0x14);  // v7 = a2 (parent-handle source rec)
+    CHECK_EQ((int)kEstateNewOwnerOff, 0x18);  // v8 = a4 (owner-id source rec)
+    CHECK_EQ((int)kEstateOwnerFieldOff,  39); // *(_WORD*)(obj+39) = owner id
+    CHECK_EQ((int)kEstateParentFieldOff, 37); // *(_WORD*)(obj+37) = parent handle
+    CHECK_EQ((int)kEstateCashFieldOff, 0x0A); // Person.cash (GetCashAmount)
+}
+
 // --- classifier golden: a BUY on a kind-4 building -> opcode-56 command. ---------
 TEST(PlaySliceEstateUnit, ClassifyBuyCommandGolden) {
     Seeded s = SeedEstateWorld(/*startOwner=*/7, /*buyerCash=*/2000);

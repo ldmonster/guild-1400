@@ -99,17 +99,19 @@ TEST(GuiDlg2E2E, FamilyTreeWindowAndRecentre) {
     CHECK(std::strcmp(l.form, kFormStammbaum) == 0);
     CHECK_EQ(l.center, 300);
     CHECK_EQ(l.self.entity, 1000);
-    CHECK_EQ(l.self.x, 300 - (50 + 90)); // 160
+    // node x = anchor + nw/2 (= +25).
+    CHECK_EQ(l.self.x, 300 - (50 + 90) + 25); // 185
     CHECK(!l.spouse.empty);
-    CHECK_EQ(l.spouse.x, 300 + 90);      // 390
+    CHECK_EQ(l.spouse.x, 300 + 90 + 25);      // 415
     CHECK_EQ((int)l.parents.size(), 2);
-    CHECK_EQ(l.parents[0].x, 300 - (50 + 16)); // 234
-    CHECK_EQ(l.parents[1].x, 300 + 16);        // 316
+    CHECK_EQ(l.parents[0].x, 300 - (50 + 16) + 25); // 259
+    CHECK_EQ(l.parents[1].x, 300 + 16 + 25);        // 341
     CHECK_EQ((int)l.children.size(), 3);
-    // odd children anchors: c0 = center-25 = 275; c1 = 50+275+40 = 365; c2 = 275-40-50 = 185.
-    CHECK_EQ(l.children[0].x, 275);
-    CHECK_EQ(l.children[1].x, 365);
-    CHECK_EQ(l.children[2].x, 185);
+    // odd children anchors v103,v104,v105 in memory order, each + nw/2 (25):
+    //   c0 a103=center-25=275 -> 300; c1 a104=275-40-50=185 -> 210; c2 a105=50+275+40=365 -> 390.
+    CHECK_EQ(l.children[0].x, 300);
+    CHECK_EQ(l.children[1].x, 210);
+    CHECK_EQ(l.children[2].x, 390);
 
     // Each node carries its person and a distinct clickable object.
     CHECK(l.children[0].objectId != l.children[1].objectId);

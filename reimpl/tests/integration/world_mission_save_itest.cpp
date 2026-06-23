@@ -55,7 +55,7 @@ TEST(MissionSaveItest, RegisterScanResolveRoundTrip) {
     MissionRewardInfo info{};
     CHECK(MissionResolveReward(g_missionSlots[1].type, &info));
     CHECK_EQ(info.descriptorIndex, 3);
-    CHECK_EQ(info.voiceIndex, g_eventTable[3].paramB);  // rec+0x0C
+    CHECK_EQ(info.specialVoiceIndex, g_eventTable[3].paramB);  // rec+0x0C
 
     // Give-dialog seed derives from the matched descriptor's category (+5).
     CHECK_EQ(MissionGiveHistorySeed(g_eventTable[3].category),

@@ -36,6 +36,7 @@ bool SdlVulkanPlatform::createMainWindow(const char* title, int w, int h,
     // Under the dummy/offscreen video drivers a SDL_WINDOW_VULKAN window cannot
     // be realized; SDL returns null. That is the documented headless behavior:
     // return false, no crash.
+    if (window_) SDL_StartTextInput();   // enable SDL_TEXTINPUT for the name-entry pages
     return window_ != nullptr;
 }
 
@@ -48,8 +49,25 @@ bool SdlVulkanPlatform::pumpMessages() {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT)
             quit_ = true;
+        else if (e.type == SDL_TEXTINPUT)
+            textBuf_ += e.text.text;   // UTF-8 typed chars (the WM_CHAR stream)
+        else if (e.type == SDL_MOUSEWHEEL) {
+            // SDL_MOUSEWHEEL -> MouseState::wheel notches (the WM_MOUSEWHEEL
+            // stream the original fed into the dword_672254 wheel accumulator
+            // consumed by VIBE_Camera_UpdateMovement @0x4b41a8's zoom branch).
+            int n = e.wheel.y;
+            if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
+                n = -n;
+            wheelAccum_ += n;
+        }
     }
     return !quit_;
+}
+
+std::string SdlVulkanPlatform::pollText() {
+    std::string s;
+    s.swap(textBuf_);
+    return s;
 }
 
 std::uint32_t SdlVulkanPlatform::timeMs() {
@@ -70,6 +88,12 @@ void SdlVulkanPlatform::getMouse(MouseState& out) {
     out.left = (b & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
     out.right = (b & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
     out.middle = (b & SDL_BUTTON(SDL_BUTTON_MIDDLE)) != 0;
+    out.wheel = wheelAccum_;     // notches since the previous getMouse()
+    wheelAccum_ = 0;
+}
+
+void SdlVulkanPlatform::showSystemCursor(bool show) {
+    SDL_ShowCursor(show ? SDL_ENABLE : SDL_DISABLE);
 }
 
 // Map a Win32 virtual-key code to an SDL_Scancode for the common keys the

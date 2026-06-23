@@ -177,6 +177,63 @@ TEST(SimRemaining, FlaggedSlotsAndSalePrice) {
     CHECK_EQ(Building_ComputeSalePrice(4, 14), goldenSale14);
 }
 
+// --- Wave-12 hardening: bad type / out-of-range factor index -------------
+// ComputeProductionWorth sweeps output slots 0..5 / input slots 0..1, calling
+// ComputeItemBaseValue, whose type table holds only a 2-wide factor array. The
+// out-of-range slots must read 0 (bounded), not past the array. SumFlaggedSlots
+// / ComputeSalePrice on an unloaded or out-of-range type must return 0 cleanly.
+TEST(SimRemainingHarden, ProductionWorthBadAndGoodType) {
+    ResetBuildings();
+    ResetProductionTables();
+    ResetStockHooks();
+    g_buildingTypesLoaded = true;
+
+    // A loaded type with only the 2 real factor slots populated.
+    BuildingTypeDef& td = g_buildingTypes[3];
+    std::memset(&td, 0, sizeof(td));
+    td.outputFactor[0] = 1;
+    td.outputFactor[1] = 2;
+    td.inputFactor[0]  = 4;
+
+    // Drive ComputeProductionWorth: the 0..5 output sweep exercises slots 2..5
+    // which must contribute 0 (no OOB). Use objectKind 0 (kind byte +2 == 0) so
+    // ComputeItemBaseValue takes the plain factor path (896*factor) with NO sale
+    // discount and the aggregator's per-kind worth columns stay untouched.
+    SetBuildingPriceMode(0);
+    BuildingSaleRec b;
+    std::memset(&b, 0, sizeof(b));
+    b.kind = 0;                  // objectKind 0 -> no discount, no kind 5/7/22 path
+    b.quality = 100;             // +61 -> qScale = 1.0
+    ProductionWorth w = BuildingValue_ComputeProductionWorth(&b, /*typeIndex*/3);
+    // WAVE-16 1:1 mapping (worth loop @0x58fe68): the 0..5 output sweep reads the
+    // 6-wide +553 array (inputFactor[0..5] = {4,0,0,0,0,0}) -> 896*4 = 3584; the
+    // 0..1 input sweep reads the 2-wide +563 array (outputFactor[0..1] = {1,2}) ->
+    // 896 + 1792 = 2688. production total v5 (col[3]) = 3584 + 2688 = 6272.
+    CHECK_EQ(w.col[3], 6272);
+    // Column targets verified against disasm @0x58fe68: the 0..5 OUTPUT sweep
+    // (a4 path) writes a2[6] ([edx+18h]); the 0..1 INPUT sweep (a3 path) writes
+    // a2[4] ([edx+10h]).
+    CHECK_EQ(w.col[6], 3584);          // 0..5 sweep -> inputFactor[0]=4 (slots 1..5 add 0)
+    CHECK_EQ(w.col[4], 896 + 1792);    // 0..1 sweep -> outputFactor[0..1]={1,2}
+
+    // null record -> zeroed frame, no deref.
+    ProductionWorth z = BuildingValue_ComputeProductionWorth(nullptr, 3);
+    CHECK_EQ(z.col[3], 0);
+    CHECK(!z.nonZero);
+}
+
+TEST(SimRemainingHarden, FlaggedAndSalePriceUnloadedType) {
+    ResetBuildings();
+    ResetProductionTables();
+    ResetStockHooks();
+    // Type table NOT loaded -> BuildingTypeDefAt returns null -> worth 0.
+    g_buildingTypesLoaded = false;
+    CHECK_EQ(Building_SumFlaggedSlotsWorth(7), 0);
+    // sale price = (...) * 0 = 0, no OOB on the unloaded type.
+    CHECK_EQ(Building_ComputeSalePrice(7, 0), 0);
+    CHECK_EQ(Building_SumWorkstationCount(7, 1), 0);
+}
+
 // --- AdjustStockAndNotify 0x57d5b4 (math + gates) ------------------------
 TEST(SimRemaining, AdjustStock) {
     ResetStockHooks();

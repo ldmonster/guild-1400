@@ -24,12 +24,45 @@ struct SeqPlatform : shim::IPlatform {
     const Step& at() const { static Step z; if (steps.empty()) return z;
         int i = iter < (int)steps.size() ? iter : (int)steps.size() - 1; return steps[i < 0 ? 0 : i]; }
 };
-constexpr int kRowY0 = 90, kRowH = 30, kValueX = 360;
-SeqPlatform::Step OnRow(int i, bool left) {
-    SeqPlatform::Step s; s.x = kValueX + 20; s.y = kRowY0 + i * kRowH + 4; s.left = left; return s;
+// Geometry mirrors OptGeomFor in sdl_options_screen.cpp (real form objects in row
+// order: objX=208, per-page track length `range`, per-row objY).
+constexpr int kDesignW = 800, kDesignH = 600;
+struct Geom { int win0X, win0Y, win0W, win0H, win1X, win1Y, sliderX, range; const int* rowY; int rowCount; };
+const int kGfxRowY[9]   = { 16, 48, 96, 160, 128, 192, 240, 272, 304 };
+const int kSfxRowY[5]   = { 32, 120, 160, 200, 280 };
+const int kGameRowY[11] = { 8, 72, 96, 120, 144, 208, 232, 168, 256, 280, 304 };
+Geom GeomFor(play::OptionsPage p) {
+    switch (p) {
+        case play::OptionsPage::kGfx:  return { 112,120,452,574, 146,171, 208, 160, kGfxRowY,  9 };
+        case play::OptionsPage::kSfx:  return { 112,120,449,575, 144,168, 208, 140, kSfxRowY,  5 };
+        case play::OptionsPage::kGame: default: return { 104,120,449,575, 136,168, 208, 140, kGameRowY, 11 };
+    }
 }
-SeqPlatform::Step OnBack(int rc, bool left) {
-    SeqPlatform::Step s; s.x = 60 + 10; s.y = kRowY0 + rc * kRowH + 16 + 8; s.left = left; return s;
+constexpr int kBtnW = 110, kBtnH = 33;
+// The slider end-cap (+/-) widths the screen uses asset-less (sCapL/sCapR).
+constexpr int kCapL = 68, kCapR = 67;
+play::OptionsPage gPage = play::OptionsPage::kSfx;
+int gFbW = 640, gFbH = 480;
+// Click row i: part 0 = MINUS (left cap), 1 = track centre, 2 = PLUS (right cap) —
+// the screen's +/- button / drag hit regions. For a bool row any part toggles.
+SeqPlatform::Step OnPart(int i, int part, bool left) {
+    const Geom g = GeomFor(gPage);
+    const int ox = (gFbW - kDesignW) / 2, oy = (gFbH - kDesignH) / 2;
+    const int sx = ox + g.win1X + g.sliderX;
+    int px = (part == 0) ? sx + kCapL / 2
+           : (part == 2) ? sx + kCapL + g.range + kCapR / 2
+                         : sx + kCapL + g.range / 2;
+    SeqPlatform::Step s; s.x = px; s.y = oy + g.win1Y + g.rowY[i]; s.left = left; return s;
+}
+SeqPlatform::Step OnRow(int i, bool left)   { return OnPart(i, 2, left); }  // default: plus
+SeqPlatform::Step OnPlus(int i, bool left)  { return OnPart(i, 2, left); }
+SeqPlatform::Step OnMinus(int i, bool left) { return OnPart(i, 0, left); }
+SeqPlatform::Step OnBack(int /*rc*/, bool left) {
+    const Geom g = GeomFor(gPage);
+    const int ox = (gFbW - kDesignW) / 2, oy = (gFbH - kDesignH) / 2;
+    const int btnY = oy + g.win0Y + g.win0H - kBtnH - 24;
+    const int totalW = kBtnW * 2 + 24, firstX = ox + g.win0X + (g.win0W - totalW) / 2;
+    SeqPlatform::Step s; s.x = firstX + kBtnW / 2; s.y = btnY + kBtnH / 2; s.left = left; return s;
 }
 // Count non-zero pixels in the presented 32bpp framebuffer.
 int NonClear(const shim::MemoryGraphicsDevice& dev, int w, int h) {
@@ -42,6 +75,7 @@ int NonClear(const shim::MemoryGraphicsDevice& dev, int w, int h) {
 play::OptionsConfig BaseCfg(play::OptionsPage p) {
     play::OptionsConfig c; c.page = p; c.fbW = 640; c.fbH = 480;
     c.frameCapMs = 0; c.maxFrames = 30;
+    gPage = p; gFbW = c.fbW; gFbH = c.fbH;
     return c;
 }
 } // namespace
@@ -81,22 +115,35 @@ TEST(OptionsItest, TogglePersistsAcrossAllSfxRows) {
     CHECK(r.sound.msxFreq == 1);   // cycle 0 -> 1
 }
 
-TEST(OptionsItest, GameStepWrapAndDeterministicRerun) {
+TEST(OptionsItest, GameStepPlusMinusAndDeterministicRerun) {
     auto cfg = BaseCfg(play::OptionsPage::kGame);
-    cfg.game.speed = 160;   // at max -> a step wraps back to min (0)
+    cfg.game.speed = 0;     // pressing PLUS steps +16 (the slider's step); clamps at max
     auto run = [&]() {
         shim::MemoryGraphicsDevice dev; dev.init(640, 480, 32, false);
         SeqPlatform plat;
-        plat.steps = { OnRow(0, false), OnRow(0, true), OnRow(0, false),
+        plat.steps = { OnPlus(0, false), OnPlus(0, true), OnPlus(0, false),
                        OnBack(11, false), OnBack(11, true) };
         return play::RunOptionsScreen(dev, plat, cfg);
     };
     play::OptionsResult a = run();
     play::OptionsResult b = run();
-    CHECK(a.game.speed == 0);          // wrapped
+    CHECK(a.game.speed == 16);          // +1 step on the plus button (0 -> 16)
     CHECK(a.changed);
     CHECK(a.game.speed == b.game.speed);
     CHECK(a.framesPresented == b.framesPresented);
+}
+
+TEST(OptionsItest, GameMinusButtonClampsAtZero) {
+    // Pressing MINUS at the floor clamps (does not wrap) — the engine's +/- buttons.
+    auto cfg = BaseCfg(play::OptionsPage::kGame);
+    cfg.game.scrollSpeed = 10;   // child 2, step 10
+    shim::MemoryGraphicsDevice dev; dev.init(640, 480, 32, false);
+    SeqPlatform plat;
+    plat.steps = { OnMinus(2, false), OnMinus(2, true), OnMinus(2, false),
+                   OnMinus(2, true), OnMinus(2, false),
+                   OnBack(11, false), OnBack(11, true) };
+    play::OptionsResult r = play::RunOptionsScreen(dev, plat, cfg);
+    CHECK(r.game.scrollSpeed == 0);     // 10 -> 0, then clamps at 0 (no wrap)
 }
 
 TEST(OptionsItest, GfxPanelFrameChangesWhenValueToggled) {

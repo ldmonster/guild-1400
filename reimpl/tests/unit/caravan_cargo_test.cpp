@@ -50,7 +50,10 @@ TEST(CaravanCargo, GoodIdHighWordDecode) {
 }
 
 // Golden vector A: ownerIsMarket=true, ctx default(0); empty/obj=-1 slots skipped.
-//   total = 968.0000000000002 (computed with python f64 oracle).
+//   gilde.exe 0x53ff3c stores the unit price (var_24) and accumulator (var_2C) as
+//   32-bit floats, so 50*1.1, 90*1.1, 110*1.1 each round to exactly 55/99/121 and
+//   the sum is float-exact 968.0 (NOT the f64 968.0000000000002 a pure-double
+//   accumulation would give).
 TEST(CaravanCargo, ComputeCargoValue_OwnerMarket) {
     CaravanSetPriceHook(&GoldenPrice);
     CaravanCargoTables t;
@@ -60,7 +63,7 @@ TEST(CaravanCargo, ComputeCargoValue_OwnerMarket) {
                                         /*priceMul=*/0.5f,
                                         /*sourceKind71=*/false, /*ctx101=*/9,
                                         /*mode=*/1);
-    CHECK(deq(v, 968.0000000000002, 1e-6));
+    CHECK(deq(v, 968.0, 1e-6));
     CaravanSetPriceHook(nullptr);
 }
 

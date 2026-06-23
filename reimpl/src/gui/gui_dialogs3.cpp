@@ -115,7 +115,9 @@ int Gui_ClipRectToBuffers(int flags, int y, int h, int x) {
 
     if (flags & 1) {                 // 0x40e95f
         x += 2;                      // 0x40e9d0  a4 += 2
-        x = x & 0xFFFE;              // 0x40e9d4  LOWORD(a4) &= 0xFFFE  (snap even)
+        // 0x40e9d4: LOWORD(a4) &= 0xFFFE  — the AND touches ONLY the low word; the
+        // high 16 bits of a4 are preserved (the field at +8 is a full DWORD store).
+        x = (x & ~0xFFFF) | (x & 0xFFFE); // keep HIWORD, snap LOWORD even
         outX = flags - 1;            // 0x40e9d8  v10 = a1 - 1 (drop the flag bit)
     }
     if (y + h > g_drawClipBottom)    // 0x40e96c  a2 + a3 > dword_64A1C0
@@ -344,16 +346,19 @@ int Widget_BlitClippedRows(int widgetIdx, int dstStridePx, unsigned char* dst) {
     // hold a 64-bit pointer on the host, so we keep the pixel buffer in the parallel
     // data table (SetWidgetData/WidgetData). v3[30] (==+120) is that base in the orig.
     const unsigned char* base = reinterpret_cast<const unsigned char*>(WidgetData(widgetIdx));
-    int lastRowBytes = 2 * rowPixels;            // result = 2*(word@+20)
+    // The original keeps the incoming widgetIdx in eax across the loop and only
+    // overwrites it (with 2*w) inside the body (0x412702 `mov eax,ecx`). So if the
+    // loop never runs, the return value is the original widgetIdx, NOT 2*w.
+    int result = widgetIdx;                       // result@<eax> = widgetIdx on entry
     if (base && dst) {
         for (int i = rowStart; i < rows; ++i) {              // 0x4126c5
             const unsigned char* srcRow = base + 2 * i * rowPixels; // v3[30] + 2*i*w
             int dstByteOff = 2 * (w.x() + dstStridePx * (i + top)); // 2*(x + stride*(i+y))
-            lastRowBytes = 2 * rowPixels;                    // result = 2*w
-            std::memcpy(dst + dstByteOff, srcRow, static_cast<std::size_t>(lastRowBytes));
+            result = 2 * rowPixels;                          // result = 2*w  (0x412702)
+            std::memcpy(dst + dstByteOff, srcRow, static_cast<std::size_t>(result));
         }
     }
-    return lastRowBytes; // 0x412718  return result
+    return result; // 0x412718  return result (eax)
 }
 
 // ===========================================================================

@@ -22,7 +22,9 @@ TEST(WorldLocChurch, DonationCostAndReputation) {
     CHECK_EQ(r.wealthCombined, 800000);
     CHECK_EQ(r.suggestedCost, 7999);
     CHECK_EQ(r.reputDelta, 1);
-    CHECK(r.reputSpread > 0.199f && r.reputSpread < 0.201f);
+    // 0x521939/0x52195f: reputSpread = (float)(255*paid/combined) * 0.2 using the
+    // UN-truncated quotient 1.275, NOT the (int) reputDelta. 1.275*0.2 = 0.255.
+    CHECK(r.reputSpread > 0.254f && r.reputSpread < 0.256f);
 }
 
 TEST(WorldLocChurch, DonationWealthGuardClampsToOne) {
@@ -40,34 +42,45 @@ TEST(WorldLocChurch, DonationWealthGuardClampsToOne) {
 // Church indulgence (gilde.exe 0x521bac).
 // ---------------------------------------------------------------------------
 TEST(WorldLocChurch, IndulgenceNotOfferedWithoutCrime) {
-    auto r = ChurchComputeIndulgence(/*hasCrime*/false, 1000000, false, 50);
+    // crimeHandlerSum == 0 -> not offered (0x521c1a jnz test eax,eax fails).
+    auto r = ChurchComputeIndulgence(/*crimeHandlerSum*/0, 1000000, false, 50);
     CHECK(!r.offered);
     CHECK_EQ(r.cost, 0);
 }
 
 TEST(WorldLocChurch, IndulgenceFavorabilityFactorAndFloor) {
-    // wealth=1e6, npc!=player, fav=0 -> factor=(200-0)*0.01=2.0, raw=9999? no:
-    // base=1e6*0.005=4999.99..; raw=int(4999.99*2.0)=9999; t=999.9 -> floor 3200.
-    auto r = ChurchComputeIndulgence(true, 1000000, /*npcIsPlayer*/false, 0);
+    // wealth=1e6, npc!=player, fav=0 -> factor=(200-0)*0.01=2.0, handlerSum=1.
+    // 0x521d5c stores base to a 32-bit FLOAT (var_20): float(1e6*0.005)=5000.0f;
+    // raw=int(5000.0*2.0)=10000; t=1000 -> floor 3200.
+    auto r = ChurchComputeIndulgence(/*crimeHandlerSum*/1, 1000000, /*npcIsPlayer*/false, 0);
     CHECK(r.offered);
     CHECK(r.factor > 1.99f && r.factor < 2.01f);
-    CHECK_EQ(r.rawCost, 9999);
+    CHECK_EQ(r.rawCost, 10000);
     CHECK_EQ(r.cost, 3200); // floored at kIndulgenceMinClamp
 }
 
 TEST(WorldLocChurch, IndulgenceSelfFixedFactor) {
-    // npc==player -> factor fixed 1.5; wealth=1e6 -> raw=7499 -> floor 3200.
-    auto r = ChurchComputeIndulgence(true, 1000000, /*npcIsPlayer*/true, 999);
+    // npc==player -> factor fixed 1.5; handlerSum=1; base=float(5000.0) -> raw=7500 -> 3200.
+    auto r = ChurchComputeIndulgence(/*crimeHandlerSum*/1, 1000000, /*npcIsPlayer*/true, 999);
     CHECK(r.factor > 1.49f && r.factor < 1.51f);
-    CHECK_EQ(r.rawCost, 7499);
+    CHECK_EQ(r.rawCost, 7500);
     CHECK_EQ(r.cost, 3200);
 }
 
 TEST(WorldLocChurch, IndulgenceCeilingClamp) {
-    // wealth=1e9, fav=0 -> factor=2.0, raw=9999999, t=999999.9 >= 320000 -> max.
-    auto r = ChurchComputeIndulgence(true, 1000000000, false, 0);
-    CHECK_EQ(r.rawCost, 9999999);
+    // wealth=1e9, fav=0 -> factor=2.0, handlerSum=1, raw=10000000, t=1e6 >= 320000 -> max.
+    auto r = ChurchComputeIndulgence(/*crimeHandlerSum*/1, 1000000000, false, 0);
+    CHECK_EQ(r.rawCost, 10000000);
     CHECK_EQ(r.cost, 320000);
+}
+
+TEST(WorldLocChurch, IndulgenceHandlerSumScalesCost) {
+    // 0x521d8b: factor *= (double)crimeHandlerSum (the ecx leftover from
+    // He_SumPlayerHandlerValues).  handlerSum=3, fav=0 -> factorEff=2.0*3=6.0;
+    // base=float(5000.0); raw=int(5000.0*6.0)=30000.
+    auto r = ChurchComputeIndulgence(/*crimeHandlerSum*/3, 1000000, /*npcIsPlayer*/false, 0);
+    CHECK(r.offered);
+    CHECK_EQ(r.rawCost, 30000);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,27 +143,29 @@ TEST(WorldLocThief, RansomCutByState) {
 }
 
 TEST(WorldLocThief, RansomPriceWealthCapped) {
-    // state2, wealth=500000, rngRoll=1.6e6: wealth<=roll -> base=500000, cut .04
-    auto r = ThiefComputeRansom(true, true, false, 2, 500000, 1600000.0, true);
+    // state2, wealth=500000, firstRoll=1.6e6: wealth<=firstRoll -> base=wealth=500000,
+    // cut .04 (the secondRoll is unused on this branch).
+    auto r = ThiefComputeRansom(true, true, false, 2, 500000, 1600000.0, 9.0e9, true);
     CHECK(r.offered);
     CHECK_EQ(r.baseValue, 500000);
-    CHECK_EQ(r.ransom, 19999); // golden
+    CHECK_EQ(r.ransom, 19999); // golden: (int)(500000 * 0.039999999f)
     CHECK(r.emit.cmd == ThiefCommand::PayRansom);
     CHECK_EQ(r.emit.arg, 19999);
 }
 
 TEST(WorldLocThief, RansomPriceRollCapped) {
-    // state3, wealth=5e6, rngRoll=1.4e6: wealth>roll -> base=1.4e6, cut .06
-    auto r = ThiefComputeRansom(true, true, false, 3, 5000000, 1400000.0, false);
+    // state3, wealth=5e6, firstRoll=1.0e6 (< wealth) -> else branch -> base=secondRoll,
+    // secondRoll=1.4e6, cut .06.
+    auto r = ThiefComputeRansom(true, true, false, 3, 5000000, 1000000.0, 1400000.0, false);
     CHECK_EQ(r.baseValue, 1400000);
-    CHECK_EQ(r.ransom, 83999); // golden
+    CHECK_EQ(r.ransom, 83999); // golden: (int)(1400000 * 0.059999999f)
     CHECK(r.emit.cmd == ThiefCommand::None); // declined -> no emit
 }
 
 TEST(WorldLocThief, RansomNotOfferedGates) {
-    CHECK(!ThiefComputeRansom(false, true, false, 2, 1, 1.0, true).offered);  // no hostage
-    CHECK(!ThiefComputeRansom(true, false, false, 2, 1, 1.0, true).offered);  // no kidnap cmd
-    CHECK(!ThiefComputeRansom(true, true, true, 2, 1, 1.0, true).offered);    // pending
+    CHECK(!ThiefComputeRansom(false, true, false, 2, 1, 1.0, 1.0, true).offered);  // no hostage
+    CHECK(!ThiefComputeRansom(true, false, false, 2, 1, 1.0, 1.0, true).offered);  // no kidnap cmd
+    CHECK(!ThiefComputeRansom(true, true, true, 2, 1, 1.0, 1.0, true).offered);    // pending
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +258,20 @@ TEST(WorldLocResidence, MistressEligibilityAndCooldown) {
     auto noConfirm = ResidenceComputeMistress(true, true, 100, 500, true, false);
     CHECK(noConfirm.affairEnabled);
     CHECK(noConfirm.emit.cmd == ResidenceCommand::None);
+}
+
+TEST(WorldLocResidence, MistressCooldownIsLow32SignedCompare) {
+    // 0x5152df: cmp eax, ebx compares only the LOW 32 bits, signed.  last has high
+    // dword set but low dword 0x00000000; now low dword 0x00000064 (100).  Full
+    // 64-bit compare would say last(>2^32) >= now -> not elapsed; the binary's low-32
+    // signed compare says 0 < 100 -> elapsed.
+    const i64 last = (i64)0x0000000100000000LL; // low32 = 0
+    const i64 now  = 100;                        // low32 = 100
+    auto d = ResidenceComputeMistress(true, true, last, now, true, false);
+    CHECK(d.cooldownElapsed);
+    // and a low-32 that is negative-as-signed beats a small positive: 0x80000000 < 1.
+    auto neg = ResidenceComputeMistress(true, true, (i64)0x0000000080000000LL, 1, true, false);
+    CHECK(neg.cooldownElapsed);
 }
 
 // ---------------------------------------------------------------------------

@@ -50,14 +50,23 @@ float ThiefRansomCut(int captivityState) {
 
 // gilde.exe 0x5259f8 — VIBE_Location_ThiefRansomDialog price + outcome core.
 //   v40 = cut(state);
-//   v7  = ComputeTotalWealth(hostage);
-//   roll = (rand01*dbl_622848 + dbl_622850)*dbl_622858;
-//   if ((double)v7 <= roll) base = v7; else base = (fresh roll);
-//   ransom = (int)((double)(int)base * v40);
+//   v6  = ComputeTotalWealth(hostage);                       // wealth int
+//   v7  = RandomFloatScaled();                               // FIRST draw
+//   if ((double)v6 <= (v7*dbl_622848 + dbl_622850)*dbl_622858)
+//        v8 = (double)v6;                                    // base = wealth
+//   else v8 = (RandomFloatScaled()*dbl_622848 + dbl_622850)*dbl_622858; // SECOND draw
+//   VIBE_Coord_ConvertX(); v43 = (int)v8;                    // trunc toward zero
+//   v42 = (int)((double)(int)v8 * v40);
 //   accept -> RequestBuildOp91(hostage, -state) + QueueRequestSlotReset28
+//
+// The binary draws the RNG TWICE: the comparison uses the first roll, and the
+// value-when-exceeded is an INDEPENDENT second roll. Both pre-evaluated rolls are
+// passed in (firstRoll for the compare, secondRoll for the else branch) so the
+// helper reproduces the exact draw order/select without conflating them.
 RansomDecision ThiefComputeRansom(bool hostageExists, bool hasKidnapCmd,
                                   bool ransomPending, int captivityState,
-                                  int wealth, double rngRoll, bool accept) {
+                                  int wealth, double firstRoll, double secondRoll,
+                                  bool accept) {
     RansomDecision d{};
     d.offered = hostageExists && hasKidnapCmd && !ransomPending;
     if (!d.offered) {
@@ -67,14 +76,10 @@ RansomDecision ThiefComputeRansom(bool hostageExists, bool hasKidnapCmd,
         return d;
     }
     d.cut = ThiefRansomCut(captivityState);
-    // base = min(wealth, roll). The original re-rolls when wealth exceeds the
-    // first roll; the caller pre-computes `rngRoll` for the comparison branch and
-    // we mirror its select: the comparison roll is also the value used (the
-    // re-roll in the binary draws a fresh number, surfaced by the caller passing
-    // that re-rolled value as rngRoll when wealth > firstRoll). Faithful select:
-    double base = ((double)wealth <= rngRoll) ? (double)wealth : rngRoll;
-    d.baseValue = (int)base;
-    d.ransom = (int)((double)d.baseValue * (double)d.cut);
+    // if (wealth <= firstRoll) base = wealth; else base = secondRoll (fresh draw).
+    double v8 = ((double)wealth <= firstRoll) ? (double)wealth : secondRoll;
+    d.baseValue = (int)v8;                                 // (int) trunc toward zero
+    d.ransom = (int)((double)d.baseValue * (double)d.cut); // (int) trunc toward zero
     if (accept) {
         d.emit = {ThiefCommand::PayRansom, d.ransom};
     }

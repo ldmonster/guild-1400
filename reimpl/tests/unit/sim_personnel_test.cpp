@@ -6,6 +6,7 @@
 //   src/sim/personnel.{h,cpp}     (wage formula) + recruit.{h,cpp} (proximity)
 #include "sim/recruit_cost.h"
 #include "sim/animal.h"
+#include "sim/animal_wander.h"   // SpawnBuildingCollector + Animal_CollectSpawnBuilding (W10-SIM)
 #include "sim/plant.h"
 #include "sim/avatar.h"
 #include "sim/personnel.h"
@@ -301,6 +302,104 @@ TEST(SimAnimal, UpdateSpawnThrottle) {
     g_weatherState = 2;
     Animal_Update(0);
     CHECK_EQ(w.spawns, 0);              // throttled
+}
+
+// ---------------------------------------------------------------------------
+// W10-SIM hardening edges: degenerate pool / animal-count / season inputs.
+// These drive the real Animal_* entries so ASAN+UBSAN exercises the bounds.
+// ---------------------------------------------------------------------------
+
+// Pool not allocated: every entry is a safe no-op (no null deref, no count drift).
+TEST(SimAnimal, NullPoolOperationsAreSafe) {
+    ResetAnimalPool();                  // g_animalPool == nullptr
+    CHECK(g_animalPool == nullptr);
+    CHECK(Animal_AllocSlot() == nullptr);   // guarded null-pool path
+    Animal_Update(0);                       // guarded null-pool early-out
+    Animal_Update(3);                       // winter, still null
+    Animal_FreeSlot(nullptr);               // null record -> no-op
+    Animal_FreePool();                      // free with no pool -> no-op
+    CHECK_EQ(g_animalCount, 0);
+}
+
+// Animal_Update over a freshly allocated EMPTY pool: the round-robin cursor walks
+// without touching any (zeroed/free) slot; the cursor advances and wraps cleanly.
+TEST(SimAnimal, UpdateEmptyPoolWalksCursorSafely) {
+    ResetAnimalPool();
+    Animal_AllocPool();
+    MockAnimalWorld w;
+    SetAnimalWorld(&w);
+    g_gameTick = 1;
+    g_animalLastSpawnTick = g_gameTick;   // suppress the spawn gate (no roll)
+    g_weatherState = 0;                   // cap basis 0
+    // Walk every slot plus a wrap so the cursor visits index 0..cap-1 and resets.
+    for (int i = 0; i < kAnimalPoolCapacity + 3; ++i)
+        Animal_Update(0);
+    CHECK_EQ(w.updates, 0);              // no live actor was ever updated
+    CHECK_EQ(w.destroys, 0);
+    CHECK_EQ(g_animalCount, 0);
+    CHECK(g_animalCursor >= 0 && g_animalCursor < kAnimalPoolCapacity);
+    Animal_FreePool();
+}
+
+// Season WRAPAROUND: a degenerate negative `day`-derived season (the value a
+// caller would pass after GetSeasonFromDay on a negative day) must NOT index the
+// internal tables out of bounds. Animal_Update takes the season directly; large /
+// negative seasons drive the winter-vs-non-winter branch without OOB. (UBSAN/ASAN
+// would trip on a bad index here.)
+TEST(SimAnimal, UpdateExtremeSeasonNoOOB) {
+    ResetAnimalPool();
+    Animal_AllocPool();
+    MockAnimalWorld w;
+    SetAnimalWorld(&w);
+    g_gameTick = 99999;
+    g_animalLastSpawnTick = g_gameTick;   // no spawn roll
+    // A live aged animal so the lifetime-decay path runs (division + RNG).
+    AnimalRec* a = Animal_AllocSlot();
+    a->actor = 5; a->kind = kAnimalSheep; a->spawnTick = 1; a->despawn = 0;
+    g_animalCursor = 0;
+    guild::crt::Srand(1);
+    // season values far outside [0,3] — only season==3 is "winter"; anything else
+    // is "not winter". The decay math and the despawn gate must stay in bounds.
+    Animal_Update(-1);
+    Animal_Update(7);
+    Animal_Update(1000003);
+    CHECK(g_animalCount >= 0);           // no underflow / corruption
+    Animal_FreePool();
+}
+
+// Despawn DURING the round-robin: an aged, already-flagged animal at the cursor is
+// destroyed and its slot cleared in the same Animal_Update; the live count drops
+// exactly once and the cleared slot reads back as free.
+TEST(SimAnimal, DespawnDuringIterateClearsSlot) {
+    ResetAnimalPool();
+    Animal_AllocPool();
+    MockAnimalWorld w;
+    w.culled = true;                    // force the despawn gate when flagged
+    SetAnimalWorld(&w);
+    g_gameTick = 10000;
+    g_animalLastSpawnTick = g_gameTick; // no spawn roll
+    AnimalRec* a = Animal_AllocSlot();  // slot 0
+    a->actor = 12; a->kind = kAnimalCow; a->spawnTick = 1; a->despawn = 1;
+    g_animalCursor = 0;
+    const int before = g_animalCount;
+    Animal_Update(0);                   // not winter; culled+flagged -> despawn
+    CHECK_EQ(w.destroys, 1);
+    CHECK_EQ(g_animalCount, before - 1);
+    CHECK_EQ(a->actor, 0);              // slot cleared in-place
+    Animal_FreePool();
+}
+
+// CollectSpawnBuilding at the 32-cap: a direct call with count already at the cap
+// must not write past records[31] (the hardened guard). The in-bounds fill path
+// (count 0..31) is unchanged.
+TEST(SimAnimal, CollectSpawnBuildingCapNoOverflow) {
+    SpawnBuildingCollector col;
+    col.wantedName = "dummy_X";
+    col.count = 32;                     // already full
+    int dummy = 7;
+    bool keep = Animal_CollectSpawnBuilding(&col, "dummy_X", &dummy);
+    CHECK(!keep);                       // count == 32 -> stop walking
+    CHECK_EQ(col.count, 32);            // not incremented past the cap (no OOB)
 }
 
 // ===========================================================================

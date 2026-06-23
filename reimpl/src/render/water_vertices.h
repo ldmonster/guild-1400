@@ -29,7 +29,7 @@
 //   float[78..81](+0x138..+0x144) phase[0..3]    (phase accumulators; READ by the
 //                                                  wave grid, ADVANCED by the prop loop)
 //   float[82]  (+0x148)  texAccumA  (Fmod(rateA*dt + texAccumA, 1.0))
-//   float[83]  (+0x14C)  texAccumB  (Fmod(1.0, texAccumA))
+//   float[83]  (+0x14C)  texAccumB  (Fmod(rateB*dt + texAccumB, 1.0))
 //   float[84]  (+0x150)  lastTime   (time of the previous animated frame; gate)
 //   byte +0x70 (within texPtr)  memberCount;  byte +0x72  speedSel nibble
 //
@@ -63,7 +63,8 @@ struct WaterMesh {
     float waveSpeed[4];   // float[6..9]   (+0x18..+0x24)
     float amp[4];         // float[10..13] (+0x28..+0x34)
     float phase[4];       // float[78..81] (+0x138..+0x144)  (in/out accumulators)
-    float phaseOut[4];    // float[77..80] (+0x134..+0x140)  (propagation scratch)
+    float phaseOut[4];    // mirror of phase[] post-propagation (test observability;
+                          // the binary has no separate +0x134 scratch — see .cpp)
     float waveOut[64];    // float[14..77] (+0x38) 16 vec4 wave displacement grid
 
     i32   lastTime;       // float[84] (+0x150) latch
@@ -82,11 +83,13 @@ using FindGroupMemberFn = u32 (*)(i32 groupId, u8 frameByte, void* ctx);
 //   2. GATE: only animate when (time - lastTime) > 0 (dt > 0).
 //   3. TEX ACCUM: dt=(float)(time-lastTime);
 //        texAccumA = Fmod(texRateA*dt + texAccumA, 1.0);
-//        texAccumB = Fmod(1.0, texAccumA);
-//   4. PHASE PROPAGATION (4 elements):
-//        phaseOut[k] = Fmod(waveSpeed[k]*dt + phase[k], 2π);   k=0..3
-//      then the wave grid reads phase[k] (the original's +0x138 read overlaps the
-//      +0x134 write by one float; reproduced exactly via PropagatePhases below).
+//        texAccumB = Fmod(texRateB*dt + texAccumB, 1.0);
+//   4. PHASE PROPAGATION (4 elements, IN PLACE):
+//        phase[k] = Fmod(waveSpeed[k]*dt + phase[k], 2π);   k=0..3
+//      (The 0x5be428 loop's post-increment store target [edx+0x134] resolves to
+//      the SAME byte +0x138+4k it just read — an in-place update of all four
+//      accumulators, NOT a one-float overlap shift.) The wave grid then reads the
+//      freshly-advanced phase[0..3].
 //   5. WAVE GRID: AnimateWaterWaveGrid(waveOut, amp, phase, 2π).
 //   6. lastTime = time.
 // Meshes whose dt <= 0 keep their previous wave grid and accumulators (only the

@@ -360,22 +360,42 @@ ProductionWorth BuildingValue_ComputeProductionWorth(const BuildingSaleRec* b,
     {
         const BuildingRec* asBld = reinterpret_cast<const BuildingRec*>(b);
         double qScale = static_cast<double>(b->quality) * kQualityScale; // +61
-        // output slots 0..5, input slots 0..1 — mirrors the two inner do-loops.
+        // WAVE-16 1:1 FIX (worth loop @0x58fe68 vs ComputeItemBaseValue @0x58f328):
+        //   output loop  v10 = 0..5: ComputeItemBaseValue(td, kind, -1, v10)
+        //                -> a4 = v10 -> the 6-wide +553 array (inputFactor[v10]);
+        //   input  loop  v14 = 0..1: ComputeItemBaseValue(td, kind, v14, -1)
+        //                -> a3 = v14 -> the 2-wide +563 array (outputFactor[v14]);
+        //   fallback (no slot matched): ComputeItemBaseValue(td, kind, 0, -1)
+        //                -> a3 = 0   -> +563[0].
+        // The original adds every matching slot UNCONDITIONALLY (v5 += (int)v12;
+        // v9 = 1) — no contrib>0 gate. The match gate in the binary is the worker
+        // profession join (v45[547+v10] != 0 && == worker prof); that join lives
+        // in the entity/worker module (dword_12CEA7C, 768x536), consulted here as
+        // a hook. For the single-self-worker default we treat every slot with a
+        // non-zero factor as a match (factor 0 => no output good in that slot).
+        // Column targets verified against disasm @0x58fe68:
+        //   output sweep (a4 path) writes a2[6]  -> [edx+18h]  (col[6])
+        //   input  sweep (a3 path) writes a2[4]  -> [edx+10h]  (col[4])
+        //   fallback     (a3==0)   writes a2[4]  -> [edx+10h]  (col[4])
         bool any = false;
-        for (int o = 0; o < 6; ++o) {
-            float iv = Building_ComputeItemBaseValue(asBld, selfTypeIndex, o, -1);
-            int contrib = truncToZero(iv * qScale);
-            if (contrib > 0) { v5 += contrib; out.col[4] += contrib; any = true; }
+        for (int o = 0; o < 6; ++o) {                         // a4 = o -> +553[o]
+            float iv = Building_ComputeItemBaseValue(asBld, selfTypeIndex, -1, o);
+            if (iv != 0.0f) {
+                int contrib = truncToZero(iv * qScale);
+                v5 += contrib; out.col[6] += contrib; any = true;
+            }
         }
-        for (int in = 0; in < 2; ++in) {
-            float iv = Building_ComputeItemBaseValue(asBld, selfTypeIndex, -1, in);
-            int contrib = truncToZero(iv * qScale);
-            if (contrib > 0) { v5 += contrib; out.col[6] += contrib; any = true; }
+        for (int in = 0; in < 2; ++in) {                      // a3 = in -> +563[in]
+            float iv = Building_ComputeItemBaseValue(asBld, selfTypeIndex, in, -1);
+            if (iv != 0.0f) {
+                int contrib = truncToZero(iv * qScale);
+                v5 += contrib; out.col[4] += contrib; any = true;
+            }
         }
-        if (!any) {
+        if (!any) {                                           // a3 = 0 -> +563[0]
             float iv = Building_ComputeItemBaseValue(asBld, selfTypeIndex, 0, -1);
             int contrib = truncToZero(iv * qScale);
-            v5 += contrib; out.col[6] += contrib;
+            v5 += contrib; out.col[4] += contrib;
         }
     }
 
@@ -383,9 +403,11 @@ ProductionWorth BuildingValue_ComputeProductionWorth(const BuildingSaleRec* b,
     out.col[18] = b->worth77; // a2[18] = *(DWORD)(a1+77)
     v38 = v5;
 
-    // per-kind worth columns (the building's +0 kind byte — modelled via marker's
-    // low byte; the orig reads *v40 (the type record kind)).  We use kind:
-    u8 kind = b->kind;
+    // per-kind worth columns.  The binary reads *v40 (the TYPE-DEF +0 kind byte,
+    // v40 = 589*selfTypeIndex + dword_13CE294), NOT the building record's +2 object
+    // kind.  Verified @0x5900d4/0x5900ef/0x5901de (cmp byte ptr [v40], 5/7/22).
+    const BuildingTypeDef* selfTd = BuildingTypeDefAt(selfTypeIndex);
+    u8 kind = selfTd ? selfTd->kind : 0;
     if (kind == 5) {
         out.col[10] = b->worth85;   // a2[10] = *(DWORD)(a1+85)
         v39 = b->worth85;

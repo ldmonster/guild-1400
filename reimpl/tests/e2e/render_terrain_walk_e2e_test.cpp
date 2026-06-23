@@ -116,11 +116,12 @@ TEST(TerrainWalkE2E, FullWalkRasterizeAndVerify) {
     st.axisH[0]=0.f;  st.axisH[1]=0.f;  st.axisH[2]=0.05f; // height -> depth
 
     // Projection: screenX = projXScale * x/z + projXOff (with z ~ 10, scale 10 keeps
-    // x roughly identity). The Y axis is flipped (negative scale + a +96 offset) so the
-    // terrain winds FRONT-facing for the engine's signed-area cull (area <= 0 keeps the
-    // poly) while staying on-screen (screenY positive).
+    // x roughly identity). WINDING (wave-5): with the @0x5bf22c winding reconstructed
+    // 1:1, the from-above view (col -> +X screen, row -> +Y screen, NO Y-flip) is
+    // FRONT-facing for the engine's signed-area cull (area <= 0 keeps the poly). The
+    // earlier -10 Y-flip was tuned to the OLD (inverted) winding; +10 is correct now.
     st.projXScale = 10.f; st.projXOff = 0.f;
-    st.projYScale = -10.f; st.projYOff = 96.f;
+    st.projYScale = 10.f; st.projYOff = 4.f;
 
     // ---- 2. Draw list + texture-cache + hooks -----------------------------------
     std::vector<DrawListEntry> dl(8192);
@@ -165,9 +166,10 @@ TEST(TerrainWalkE2E, FullWalkRasterizeAndVerify) {
     for (i32 i=0;i<out.count;++i) FillTri(fb, *out.entries[i].poly);
 
     // ---- 6. Reference pixel checks ----------------------------------------------
-    // The projected terrain fills the band x[4..54], y[36..92]; its centre is filled.
+    // The projected terrain fills the band x[4..54], y[7..63] (wave-5: the true
+    // from-above winding, no Y-flip); its centre (29,35) is filled.
     u8 px[3];
-    SurfaceGetPixelRgb(fb, 29, 64, px);
+    SurfaceGetPixelRgb(fb, 29, 35, px);
     CHECK(px[2] == 200);     // blue terrain fill present at the band centre
 
     // A far corner well outside the projected terrain band stays black.
@@ -199,7 +201,7 @@ TEST(TerrainWalkE2E, MixedLodWalk) {
     float sScale[3]={1,1,1}, sAmb[3]={50,50,50}, sBias[3]={0,0,0};
     SetupTerrainLight(st,false,sScale,sAmb,sBias);
     st.originView[2]=10.f; st.axisU[0]=2.f; st.axisV[1]=2.f; st.axisH[2]=0.05f;
-    st.projXScale=10.f; st.projYScale=-10.f; st.projYOff=96.f;  // front-facing winding
+    st.projXScale=10.f; st.projYScale=10.f; st.projYOff=4.f;  // wave-5: true winding (no Y-flip)
 
     std::vector<DrawListEntry> dl(8192);
     DrawList out{dl.data(),0,(i32)dl.size()}; st.drawList=&out;

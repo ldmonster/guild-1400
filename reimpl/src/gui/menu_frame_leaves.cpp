@@ -205,7 +205,7 @@ int Object_CreateTextLabel(i16 x, i16 y, const char* text) {
     // VIBE_Memory_AllocDebug(0x101, "d2:ShowTxt") — a 257-byte owned text buffer kept in
     // the parallel data table (the +116 field cannot hold a 64-bit ptr on the host).
     char* buf = static_cast<char*>(std::calloc(0x101, 1));
-    SetWidgetData(slot, buf);        // *(+116) = block (held in the data table)
+    SetWidgetDataOwned(slot, buf);   // *(+116) = owned block (freed on slot recycle/reset)
     if (!buf)
         return -1;                   // if (!v3) return -1
 
@@ -216,7 +216,7 @@ int Object_CreateTextLabel(i16 x, i16 y, const char* text) {
     w.at<u16>(112) = static_cast<u16>(g_defaultFont); // +112 = dword_62D2B0 (colour/font)
     w.at<i16>(16)  = x;                                // +16 = a1
     w.at<i16>(18)  = y;                                // +18 = a2
-    int prop = w.at<i32>(110) >> 16;                   // *(+110) >> 16
+    int prop = w.ld<i32>(110) >> 16;                   // *(+110) >> 16
     w.type()       = kTypeLabel;                       // +24 = 67 ('C')
     i16 v13 = Property_Get(text, prop);                // VIBE_Property_Get(a3, *(+110)>>16)
     w.at<u16>(26)  = 2;                                // +26 = 2
@@ -246,25 +246,33 @@ int Object_CreateTextLabel(i16 x, i16 y, const char* text) {
 // ===========================================================================
 u8 Object_SetColor(i32 idx, i32 color) {
     Widget& w = g_widgets[idx];                        // v3 = 740*a1 + dword_69FFB4
-    u8 type = w.type();                                // *(v3+24)
+    u8 type = w.type();                                // LOBYTE(a1) = *(v3+24)
+    // The return register (al) starts as the type byte and is only overwritten in the
+    // type==0x40 branch (LOBYTE(a1) = 16*v4). All other branches return the type byte.
+    u8 ret = type;
     w.at<u16>(112) = static_cast<u16>(color);          // *(WORD*)(v3+112) = a2
 
     if (type >= kTypeWindow) {                          // >= 0x40
         i32 owner = w.ownerWindow();                    // *(v3+116)
         if (type <= kTypeWindow) {                       // == 64 ('@')
+            // v4 = 56 * owner ; word_67EDFC[17*v4/2] = a2 ; LOBYTE(a1) = 16*v4.
             // word_67EDFC[17*(56*owner)/2] — the owning window's title-colour word. The
             // 56*owner index resolves into the per-window colour-word table; on the live
             // model that table is keyed by the owning window slot, so we write the colour
             // into the Window record's title-colour word.
+            i32 v4 = 56 * owner;
             if (owner >= 0 && owner < kMaxWindows)
                 g_windows[owner].at<u16>(636) = static_cast<u16>(color); // word @ +636
+            ret = static_cast<u8>(16 * v4);             // LOBYTE(a1) = 16*v4
         } else if (type == kTypeAnim) {                  // == 65 ('A')
-            // dword_6951B4[(348*owner)/4] — the object's colour dword. Keyed the same way.
+            // a1 = 348*owner ; dword_6951B4[a1/4] = a2. al == LOBYTE(348*owner).
             if (owner >= 0 && owner < kMaxWindows)
                 g_windows[owner].at<i32>(904) = color;   // object colour dword @ +904
+            ret = static_cast<u8>(348 * owner);          // a1 = 348*owner -> al
         }
+        // type > 0x41 (and >= 0x40): al stays the type byte.
     }
-    return static_cast<u8>(color & 0xFF);               // al (resolved value byte)
+    return ret;                                          // al (resolved value byte)
 }
 
 // ===========================================================================
@@ -356,7 +364,12 @@ int InitStateReader(int group) {
             v6 = g.count - 1;                              // wrap to last
         v3 = (g.count != 0) ? (v6 % g.count) : v6;         // v3 = v6 % count
         if (s.upHeld) {                                    // if (dword_672254) warp cursor
-            // VIBE_Coord_ConvertX/Y of the new button's centre, then warp.
+            // gilde.exe 0x412ab8-0x412aec: warp to the button centre. The original
+            // builds X = trunc(x + dbl_610E84*w), Y = trunc(y + dbl_610E84*h) on the
+            // x87 stack (dbl_610E84 == 0.5, get_bytes 0x610E84,8), each truncated via
+            // VIBE_Coord_ConvertX @0x5c6b08, then ConvertY(X,Y). Since x/y are integers
+            // and w/h are non-negative, trunc(x + 0.5*w) == x + w/2 (integer div toward
+            // zero) exactly, so the integer centre below is value-identical. VERIFIED 1:1.
             if (v3 >= 0 && v3 < g.count) {
                 Widget& b = g_widgets[g.button[v3]];
                 g_hooks->coordWarp(b.x() + b.w() / 2, b.y() + b.h() / 2);

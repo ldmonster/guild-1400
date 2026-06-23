@@ -15,10 +15,11 @@ using namespace guild::gui;
 TEST(GuiStatistics, GeneralHeaderSweep) {
     StatGeneralSummary s{};
     StatGeneralPlan plan = Statistics_BuildGeneralPlan(s, {}, {});
-    // The header sweep renders 2096..2123 inclusive (28 ids).
-    CHECK_EQ((int)plan.headerIds.size(), 28);
+    // The header sweep renders 2096..2122 (27 ids) — the inc precedes the loop test so
+    // 2123 (the exit sentinel) is never rendered.
+    CHECK_EQ((int)plan.headerIds.size(), 27);
     CHECK_EQ(plan.headerIds.front(), kStatGenHeaderFirst); // 2096
-    CHECK_EQ(plan.headerIds.back(), kStatGenHeaderLast);   // 2123
+    CHECK_EQ(plan.headerIds.back(), kStatGenHeaderLast - 1); // 2122
     CHECK_EQ(plan.headerIds[1], 2097);
 }
 
@@ -49,25 +50,27 @@ TEST(GuiStatistics, GeneralSummaryLines) {
 TEST(GuiStatistics, GeneralRatioZeroIndustry) {
     StatGeneralSummary s{};
     s.residential = 5.0f;
-    s.industry = 0.0f;        // division guard -> ratio 0
+    s.industry = 0.0f;        // 0x57a733 fdiv is UNCONDITIONAL -> 5/0 = +inf -> "inf"
     StatGeneralPlan plan = Statistics_BuildGeneralPlan(s, {}, {});
-    CHECK(plan.headerLines[2] == "Geb Ratio: 0.000");
+    CHECK(plan.headerLines[2] == "Geb Ratio: inf");
 }
 
 TEST(GuiStatistics, GeneralColumns) {
     StatGeneralSummary s{};
-    std::vector<float> left = {1.5f, 2.25f};
-    std::vector<float> right = {9.0f};
+    // The byte loop starts at offset 16 (stride-element 1): element 0 is SKIPPED and the
+    // 27 emitted entries read stride-elements 1..27 -> colLeft[i] == left[i+1].
+    std::vector<float> left = {0.0f, 1.5f, 2.25f};  // left[0] skipped
+    std::vector<float> right = {0.0f, 9.0f};        // right[0] skipped
     StatGeneralPlan plan = Statistics_BuildGeneralPlan(s, left, right);
-    // Always 28 entries per column (the do/while v6!=448 loop); missing -> 0.000.
-    CHECK_EQ((int)plan.colLeft.size(), 28);
-    CHECK_EQ((int)plan.colRight.size(), 28);
-    CHECK(plan.colLeft[0] == "1.500");
-    CHECK(plan.colLeft[1] == "2.250");
-    CHECK(plan.colLeft[2] == "0.000");
-    CHECK(plan.colRight[0] == "9.000");
+    // 27 entries per column (the do/while v6=16..448 loop); missing -> 0.000.
+    CHECK_EQ((int)plan.colLeft.size(), 27);
+    CHECK_EQ((int)plan.colRight.size(), 27);
+    CHECK(plan.colLeft[0] == "1.500");   // == left[1]
+    CHECK(plan.colLeft[1] == "2.250");   // == left[2]
+    CHECK(plan.colLeft[2] == "0.000");   // left[3] missing
+    CHECK(plan.colRight[0] == "9.000");  // == right[1]
     CHECK(plan.colRight[1] == "0.000");
-    CHECK(plan.colLeft[27] == "0.000");
+    CHECK(plan.colLeft[26] == "0.000");
 }
 
 // --- tax window (0x57a900) -------------------------------------------------

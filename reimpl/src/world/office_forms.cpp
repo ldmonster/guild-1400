@@ -30,7 +30,10 @@ void VotePanel::Init() {
         VotePanelObject o{};
         o.kind = VotePanelObject::kHeader;
         o.column = c;
-        o.x = kVotePanelColumnX[c];
+        // gilde.exe 0x49dc72/ca4/cd6: AddTextLabel(0, v3, win, text) — all 3 headers are
+        // placed at x=0 (the column x {32,62,47} is the MARKER x, not the header x). The
+        // y operand (v3=dx) is the leftover edx from RenderFormattedMessage (modeled 0).
+        o.x = 0;
         o.y = 0;                       // AddTextLabel(0, y, ...) header row
         o.textIdOrIcon = kVotePanelHeaderText[c];
         o.color = kVotePanelHeaderColor;
@@ -84,10 +87,19 @@ ElectionFormLayout Office_BuildElectionForm(const std::vector<ElectionSeat>& sea
         return l;
     }
 
-    // Success path: one speech line per "speaking" seat (role 6 or 7). Seats 0..2
-    // and 5 emit a BuildSpeechPacket line; seats 3,4 send the shared body via the
-    // He message channel (1418). The matched speaker seat is skipped for the He
-    // sends (v5 != seat guard) but still produces its packet line.
+    // Success path (gilde.exe LABEL_82, v15==0, returns 1): every "speaking" seat
+    // (role 6 or 7) emits a VIBE_Cutscene_BuildSpeechPacket line — INCLUDING seats 3,4.
+    //   seat0 -> RenderFormattedMessage(3634) -> BuildSpeechPacket(v61)   0x4a0b33/b6d
+    //   seat1 -> 3635 -> BuildSpeechPacket(v60)                           0x4a0ba7/be1
+    //   seat2 -> 3636 -> BuildSpeechPacket(v56)                           0x4a0c28/c62
+    //   (shared body) RenderFormattedMessage(3637) into v54              0x4a0c8b
+    //   seat3 -> BuildSpeechPacket(v57, v54)  [the 3637 body]            0x4a0ce1
+    //   seat4 -> BuildSpeechPacket(v58, v54)  [the 3637 body]            0x4a0d09
+    //   seat5 -> 3639 -> BuildSpeechPacket(v59)                          0x4a0d54/d8e
+    // The He_SendEntityMessage(...,1418) broadcast is the FAILURE path (LABEL_16),
+    // NOT the success path — so on success ALL lines are viaSpeechPacket=true.
+    // (seat5 special: if v59 present but role not 6/7 the original returns 1 early;
+    //  the loop's role-skip + no-trailing-seat makes that equivalent here.)
     for (int i = 0; i < kElectionSeatCount && i < static_cast<int>(seats.size()); ++i) {
         const ElectionSeat& s = seats[i];
         if (s.personHandle == -1 && s.textId == 0 && !s.present)
@@ -99,9 +111,7 @@ ElectionFormLayout Office_BuildElectionForm(const std::vector<ElectionSeat>& sea
         line.seat    = i;
         line.textId  = kElectionSeatText[i];      // 3634/3635/3636/3637/3637/3639
         line.speaker = s.personHandle;
-        // Seats 0,1,2,5 go through BuildSpeechPacket; seats 3,4 share the body and
-        // are sent via He_SendEntityMessage when they are not the matched speaker.
-        line.viaSpeechPacket = (i == 0 || i == 1 || i == 2 || i == 5);
+        line.viaSpeechPacket = true;              // success path: all via BuildSpeechPacket
         l.lines.push_back(line);
     }
     return l;
@@ -201,26 +211,30 @@ TortureChoiceForm Office_BuildTortureChoiceForm(int crimeCase, int winW,
         f.built = true;
         break;
 
-    case 2: { // folterwahl: header 4352 + 7 instrument buttons (text 4353), cost
-              // = wealthTier * costByte; RandInt(3) preselects one of first 3.
+    case 2: { // folterwahl: header 4352 + 3 instrument buttons (text 4353), cost
+              // = wealthTier * costByte; RandInt(3) preselects one of the 3.
         f.scene = kSceneFolterwahl;
         f.headerText = kTortureCase2Header;   // 4352
         f.isYesNo = false;
         f.built = true;
-        // VIBE_Util_InitAndShuffleDwordArray(7, v74); then 7 buttons in shuffled
-        // order. The button payload IS the instrument index (a1+148 = v74[idx]).
-        for (int k = 0; k < kTortureCostCount; ++k) {
+        // gilde.exe 0x4a40a5: InitAndShuffleDwordArray(7, v75) shuffles 7 instruments,
+        // but the button loop (0x4a410a: add ecx,4; cmp ecx,0Ch; jnz) runs ONLY 3 times
+        // (ecx=0,4,8) -> exactly kTortureCase2Buttons buttons, stored at v74[0..2]. The
+        // click match loop (0x4a41fc / while ++v35 < 3) also tests only those 3. The
+        // button payload IS the shuffled instrument index (a1+148 = v75[idx]); button
+        // text arg = 2*instrument + 2527; cost = wealthTier * costByte[instrument].
+        for (int k = 0; k < kTortureCase2Buttons; ++k) {
             int instrument = shuffledOrder ? shuffledOrder[k] : k;
             TortureButton b{};
-            b.objectId = kButtonObjBase + k;  // GetChildObjectId per row
+            b.objectId = kButtonObjBase + k;  // GetChildObjectId per row (v74[k])
             b.textId   = kTortureCase2Button; // 4353
             // cost = wealthTier * dword_49D7C4[instrument]  (the byte cost table).
             b.cost     = wealthTier * static_cast<int>(kTortureCostTable[instrument]);
-            b.payload  = instrument;          // a1+148 = v74[idx]
+            b.payload  = instrument;          // a1+148 = v75[idx]
             b.enabled  = true;
             f.buttons.push_back(b);
         }
-        // RandInt(3) default: a1+148 = v74[rand%3]; modeled as first shuffled.
+        // RandInt(3) default: a1+148 = v75[rand%3]; modeled as first shuffled.
         f.defaultResult = f.buttons.empty() ? 0 : f.buttons[0].payload;
         break;
     }
@@ -256,7 +270,10 @@ TortureChoiceForm Office_BuildTortureChoiceForm(int crimeCase, int winW,
             b.enabled  = !(tierDisabled && tierDisabled[i]);
             f.buttons.push_back(b);
         }
-        f.defaultResult = wealthTierIdx;      // a1+148 default = v57
+        // gilde.exe 0x4a46da: default a1+148 = (v77 != -1) ? v58+1 : (RandInt(2) ? v58+2 :
+        // v58). v77 holds button[1]'s GetChildObjectId (always a valid, non-(-1) id), so
+        // the default is the MIDDLE tier = wealthTierIdx + 1 (prior source used +0).
+        f.defaultResult = wealthTierIdx + 1;
         break;
     }
 
@@ -281,17 +298,23 @@ int Office_DispatchTortureChoice(const TortureChoiceForm& f, int clickedObj) {
         return f.defaultResult;
 
     if (f.isYesNo) {
-        // dword_75BF38 == 1155 / 1210 paths. The yes(1210)/no(1155) value depends
-        // on the case: cases 0,1,3 -> 1155->0,1210->1 ; case 4 -> 1155->1 ; case 6 ->
-        // 1155->1. We use the recovered per-case mapping:
+        // dword_75BF38 == 1210(=0x4BA, OK) / 1155(=0x483, Cancel). Per-case a1+148:
+        //   case 0 (0x4a3f3e/4e): 1155->0, 1210->1
+        //   case 1 (0x4a4063/73): 1155->0, 1210->1
+        //   case 3 (0x4a4322/35): 1155->0, 1210->1 (+QueueRequestCoord27 op-35; deferred)
+        //   case 4 (0x4a4596/a8): 1155->1 (ebx=1), 1210-> ecx  [BOUNDARY: ecx is a latent
+        //                         loop-carried register from RunFrameLoop, not a defined
+        //                         value; modeled as defaultResult(=1)].
+        //   case 6 (0x4a445b/6d): 1155->1 (ebx=1), 1210-> ecx  [same latent-junk; a1+148
+        //                         was init 0, so 1210 modeled as 0].
         if (clickedObj == kClickOk) {          // 1210
-            if (f.crimeCase == 4)              // case 4: 1210 -> tier value (v54); model as default
+            if (f.crimeCase == 4)              // case 4: 1210 -> ecx junk; model as default
                 return f.defaultResult;
-            return (f.crimeCase == 6) ? 0 : 1; // cases 0,1,3 -> 1 ; case 6 -> 0
+            return (f.crimeCase == 6) ? 0 : 1; // cases 0,1,3 -> 1 ; case 6 -> 0 (junk-modeled)
         }
         if (clickedObj == kClickCancel) {      // 1155
             if (f.crimeCase == 4 || f.crimeCase == 6)
-                return 1;                      // case 4/6: 1155 -> 1
+                return 1;                      // case 4/6: 1155 -> 1 (ebx=1)
             return 0;                          // cases 0,1,3 -> 0
         }
         return f.defaultResult;

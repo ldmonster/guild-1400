@@ -91,8 +91,8 @@ TEST(CourtCouncil2E2E, ElectionThenTrialFlow) {
     MakePerson(4, 4,   5, 7);  g_favor[4] = 88.0f;    // different band, far favor
 
     // 1) Tally categories — at least the reference's band is represented.
-    int hist[256];
-    OfficeTallyCategoryCounts(hist);
+    //    (0x47fdfc returns the module global histogram; the tally lands there.)
+    int* hist = OfficeTallyCategoryCounts();
     int totalTallied = 0;
     for (int b = 0; b < 40; ++b) totalTallied += hist[b];
     CHECK(totalTallied >= 1);

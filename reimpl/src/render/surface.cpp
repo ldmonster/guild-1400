@@ -57,12 +57,24 @@ Surface* SurfaceClone(const Surface* s) {
     return d;
 }
 
-// gilde.exe 0x423620 — VIBE_Surface_GetCaps (software path: copy caps).
+// gilde.exe 0x423620 — VIBE_Surface_GetCaps.
+// The original ONLY succeeds through the DDraw surface vtable: it tests the
+// vendor surface ptr at +0x20 (ddSurface) and returns 0 (false) immediately if
+// it is null — only when present does it write 0x7C into *outCaps and invoke
+// GetCaps via the COM vtable (offset +0x58), returning 1 on success. In this
+// software reconstruction ddSurface is always null (DDraw is the boundary, see
+// rules 3-5), so the faithful result is always false and *outCaps is untouched.
+// (The original has no null check on the surface ptr; we keep a defensive one
+// for the headless build.)
 bool SurfaceGetCaps(const Surface* s, u32* outCaps) {
-    if (!s || !outCaps)
+    (void)outCaps;
+    if (!s)
         return false;
-    *outCaps = s->caps;
-    return true;
+    if (!s->ddSurface)
+        return false;
+    // DDraw vtable GetCaps path — boundary (rules 3-5). Not reachable in the
+    // software-only model; would write *outCaps=0x7C and call vtable[+0x58].
+    return false;
 }
 
 // gilde.exe 0x423e5c — VIBE_Surface_SetPixelRgb.
@@ -102,9 +114,16 @@ int SurfaceSetPixelRgb(Surface* s, int x, int y, u8 r, u8 g, u8 b) {
         ((u32*)s->pixels)[x + row] = packed; // 32 bpp
         return 1;
     }
-    // 24 bpp: store R,G,B
+    // 24 bpp: store R,G,B. gilde.exe 0x423f32-0x423f70 addresses the pixel as
+    // pixels + (widthPx*y) + (bytespp*x) — the ROW term (widthPx*y) is NOT scaled
+    // by bytespp here (asm: imul edx,esi where edx=[+0x10]=widthPx, esi=y). This
+    // asymmetric address differs from VIBE_Surface_GetPixelRgb @0x423e11, whose
+    // 24bpp read scales the row by bytespp (imul eax,edx then imul eax,ecx). The
+    // original code is genuinely inconsistent across the 24bpp Set/Get pair; we
+    // reproduce both verbatim (so a 24bpp Set/Get at the same coord does NOT
+    // round-trip — a 1:1 quirk of the binary).
     int col = bytespp * x;
-    u8* p = s->pixels + row * bytespp + col;
+    u8* p = s->pixels + row + col;
     p[0] = r;
     p[1] = g;
     p[2] = b;
@@ -121,8 +140,13 @@ void SurfaceGetPixelRgb(const Surface* s, int x, int y, u8 out[3]) {
         if (bppv == 15) {
             UnpackColor(s->fmt, ((u16*)s->pixels)[x + row], out[0], out[1], out[2]);
         } else {
-            // 8 bpp: original returns the raw byte in all three slots via the
-            // luma path's stored value (no palette lookup in this helper).
+            // 8 bpp (and any bpp <15 or 17..23): gilde.exe @0x423d91 copies the
+            // three output bytes from UNINITIALISED stack locals (var_10/var_18/
+            // var_14 are never written for these bpp — the prologue only does
+            // `sub esp,0Ch`, no zero-init). So the original returns indeterminate
+            // garbage here. We cannot reproduce stack garbage deterministically;
+            // as a defined stand-in we return the raw stored byte in all three
+            // slots. (Not byte-1:1 — it CANNOT be; the original is non-deterministic.)
             u8 v = s->pixels[row + x];
             out[0] = out[1] = out[2] = v;
         }

@@ -8,6 +8,7 @@
 #include "sim/person_create.h"
 #include "sim/entity.h"
 #include "sim/types.h"
+#include "crt/rand.h"            // crt::Srand (seed the create RNG for replay)
 #include "test.h"
 
 #include <cstring>
@@ -43,6 +44,10 @@ void SeedWorld() {
     Apply5_SetStandalone(true);
     g_buildingNextId = 1000; // deterministic id allocation base
     g_personNextId   = 2000;
+    // VIBE_Person_CreateAndSpawn @0x58da70 draws from the shared CRT LCG for the
+    // stat/appearance/relation init; a fresh world re-seeds it (the original
+    // seeds the generator at session init) so the lockstep replay is byte-stable.
+    crt::Srand(0);
 
     // One owner person (id 909) at slot 7, marker index 7.
     g_persons[7].marker = 7;

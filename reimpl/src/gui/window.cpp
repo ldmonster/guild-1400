@@ -83,8 +83,15 @@ int Window_Create(i16 x, i16 y, i16 w, i16 h, i32 flags) {
     if (flags & kWinFlagPalette)
         win.at<i32>(632) = g_defaultPalette; // v8[158]
 
-    // Allocate the backing widget (type '@'), wire it to this window.
+    // Allocate the backing widget (type '@'), wire it to this window. The original
+    // assumes a slot is always available; on a malformed/oversized form the widget
+    // array can fill up and AllocSlot returns -1 — guard so we never dereference
+    // g_widgets[-1] (OOB write). Roll back the half-initialised slot and fail.
     int wIdx = Widget_AllocSlot();
+    if (wIdx < 0) {
+        win.enabled() = 0; // leave the slot free again
+        return -1;
+    }
     Widget& bw = g_widgets[wIdx];
     bw.type()        = kTypeWindow;           // +24 = 0x40 '@'
     bw.x()           = win.x();               // +16
@@ -137,7 +144,10 @@ int Window_Create(i16 x, i16 y, i16 w, i16 h, i32 flags) {
 
 // gilde.exe 0x41a90c — VIBE_Window_Destroy (data-model core)
 int Window_Destroy(int slot) {
-    if (slot > kMaxWindows)
+    // Valid slots are [0, kMaxWindows). The original's bound was an unsigned
+    // `slot > 95`-style test; `slot > kMaxWindows` let slot==96 through and indexed
+    // g_windows[96] (OOB). Also reject negatives. (kMaxWindows == 96; last slot 95.)
+    if (slot < 0 || slot >= kMaxWindows)
         return 0;
     Window& win = g_windows[slot];
     if (!win.enabled())
@@ -195,16 +205,24 @@ int Object_AddToWindow(int winSlot, i16 y, i16 x, i32 gfxId) {
     i32* list = ChildList(win);
     list[win.objCount()] = idx; // *(w[6] + 4*count) = idx
 
-    // Copy parent clip/render pointers + geometry (mirrors the +52/+60 inheritance).
+    // 0x41ae70: GameLogic_Objects(x', y', gfx) creates the widget at the scroll-adjusted
+    //   x' = win.x(+2 word) + a3(x) - scrollX_lowword(+600 word@300)
+    //   y' = a2(y) + win.y(+3 word) - scrollY_lowword(+584 word@292)
+    extern i32 g_screenClipExt; // dword_69FFBC (defined in widget_create.cpp)
     Widget& backing = g_widgets[win.backWidget()];
-    child.clipY0()     = 0;                 // +32
-    child.clipX0()     = 0;                 // +28
-    child.groupLink()  = win.backWidget();  // +44 (parent link)
-    child.parentClip() = backing.parentClip();
-    child.renderPtr()  = backing.renderPtr();
+    i16 scrollXLo = static_cast<i16>(win.at<i32>(600)); // *((WORD*)v5+300)
+    i16 scrollYLo = static_cast<i16>(win.at<i32>(584)); // *((WORD*)v5+292)
+    child.x()          = static_cast<i16>(win.x() + x - scrollXLo); // +16
+    child.y()          = static_cast<i16>(y + win.y() - scrollYLo); // +18
+    // Post-create stamps (0x41aeb6..0x41af23).
+    child.clipY0()     = 0;                 // +32 = 0
+    child.clipX0()     = 0;                 // +28 = 0
+    child.groupLink()  = win.backWidget();  // +44 (parent link; original stores the window ptr)
+    child.clipY1()     = static_cast<i16>(g_screenClipExt);        // +34 = LOWORD(dword_69FFBC)
+    child.clipX1()     = static_cast<i16>(g_screenClipExt >> 16);  // +30 = HIWORD(dword_69FFBC)
+    child.parentClip() = backing.parentClip();  // +60 inherited
+    child.renderPtr()  = backing.renderPtr();   // +52 inherited
     child.ownerWindow()= winSlot;           // +116
-    child.x()          = static_cast<i16>(win.x() + x);
-    child.y()          = static_cast<i16>(win.y() + y);
     child.dataPtr()    = gfxId;             // +12
 
     ++win.objCount();   // bump child count

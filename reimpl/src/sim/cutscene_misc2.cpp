@@ -127,9 +127,12 @@ i32 CutsceneRunTimedScript(i32 frames, i32 a2, i32 (*skipCb)()) {
             v5 = skipCb ? skipCb() : 1;
             g_state.forceQuit = 1;                 // dword_631614 = 1
         } else {
-            // if ((double)dword_62EB38 >= (double)frames * scale + start)
+            // if ((double)(unsigned)dword_62EB38 >= (double)(int)frames*scale + (double)(int)start)
+            // gilde.exe 0x4aa8ab: LHS is (double)(unsigned int)dword_62EB38, but the
+            // start snapshot v4 is an `int` -> (double)v4 is a SIGNED conversion.
             if (static_cast<double>(g_state.gameTick) >=
-                static_cast<double>(frames) * kFrameMsScale + static_cast<double>(start))
+                static_cast<double>(frames) * kFrameMsScale
+                    + static_cast<double>(static_cast<i32>(start)))
                 g_state.forceQuit = 1;             // dword_631614 = 1
         }
         if (h.combatUpdateDamageNumbers) h.combatUpdateDamageNumbers();
@@ -149,8 +152,11 @@ i32 CutsceneRunDelayedScript(i32 frames, i32 dialogSlot) {
             v3 = Pump(FrameFlagsWithHiBit(), static_cast<i32>(start),
                       reinterpret_cast<void*>(static_cast<intptr_t>(1)));
             if (!v3) break;                        // if (!v3) break;
+            // gilde.exe 0x4aa91f: (double)(unsigned)dword_62EB38 >= (double)v4*scale
+            // + (double)v1, where v1 (start) is an `int` -> SIGNED to-double.
             if (static_cast<double>(g_state.gameTick) >=
-                static_cast<double>(frames) * kFrameMsScale + static_cast<double>(start))
+                static_cast<double>(frames) * kFrameMsScale
+                    + static_cast<double>(static_cast<i32>(start)))
                 g_state.forceQuit = 1;             // dword_631614 = 1
             if (h.combatUpdateDamageNumbers) h.combatUpdateDamageNumbers();
             if (h.showParticipantDialog) h.showParticipantDialog(dialogSlot);
@@ -203,6 +209,7 @@ void CutsceneSetupSky(unsigned int* /*a1*/) {
     if (g_state.replayGate) return;                // if (dword_6315BC) return;
     const Cutscene2Hooks& h = GetCutscene2Hooks();
     g_sky.sky = h.skyCreate ? h.skyCreate() : nullptr;       // dword_6315F0
+    g_sky.mirror = g_sky.sky;                                // dword_64A7C8 = dword_6315F0
     g_sky.layer = h.skyCreateLayer ? h.skyCreateLayer(g_sky.sky) : nullptr; // dword_6315EC
     if (h.skyConfigLayer) h.skyConfigLayer(g_sky.sky, g_sky.layer);  // scroll + fade
 }
@@ -216,9 +223,11 @@ i32 CutsceneDestroySky() {
         const Cutscene2Hooks& h = GetCutscene2Hooks();
         if (g_sky.layer && h.skyRemoveLayer)       // if (dword_6315EC)
             h.skyRemoveLayer(g_sky.sky, g_sky.layer);
-        if (h.skyDestroy) h.skyDestroy(g_sky.sky); // Sky_Destroy
-        g_sky.sky = nullptr;                       // dword_64A7C8 = 0
-        g_sky.layer = nullptr;
+        if (h.skyDestroy) h.skyDestroy(g_sky.sky); // Sky_Destroy(dword_6315F0)
+        g_sky.mirror = nullptr;                    // dword_64A7C8 = 0  (ONLY the mirror)
+        // NB: the binary does NOT clear dword_6315F0 / dword_6315EC here — the sky
+        // and layer handles are left intact (0x4aa740). A second DestroySky would
+        // re-RemoveLayer/Destroy the same handles, exactly as the original.
     }
     return result;
 }

@@ -159,9 +159,13 @@ int SceneFlagGateObject(bool matched, u8* loByte, i32* flag536);
 
 // gilde.exe 0x504ce0 — VIBE_Scene_SyncMeisterBuildings record scan core. Walks
 // the object record array `kinds[0..count)` (stride is conceptual here) and
-// classifies the two anchors the original picks: the FIRST class-A (12) record
-// with sub-state 0 -> anchorA; the FIRST class-A record with sub-state 1 ->
-// anchorB; collects the indices of all class-B (11) records into `outB`.
+// classifies the two anchors the original picks with OVERWRITE-until-both-found
+// semantics: every class-A (12) record with sub-state 0 overwrites anchorA
+// (v4 = rec; v5 |= 1) and every class-A record with sub-state 1 overwrites
+// anchorB (v3 = rec; v5 |= 2) — unconditionally; the scan stops only once BOTH
+// anchors have been seen (the `while (.. && v5 != 3)` guard), so the LAST
+// qualifying match before that point wins and records after it never update an
+// anchor. Then collects the indices of all class-B (11) records into `outB`.
 // `subState[i]` is HIBYTE(dword_12CE919[i]) in the original.
 // Returns the number of class-B records collected (>=0); writes the two anchor
 // indices (or -1) into *anchorA / *anchorB.

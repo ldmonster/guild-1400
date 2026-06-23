@@ -227,4 +227,53 @@ enum class RefreshMode { kItem, kSell, kRebuild };
 // slots that hold a live value (>=1 => the original's "1" return).
 int TradePanel_RefreshColumns(RefreshMode mode, const std::vector<RefreshObject>& objects);
 
+// ===========================================================================
+// Faithful 1:1 reconstruction of the two refreshers (wave-22 reconcile).
+//
+// The wave-20 TradePanel_RefreshColumns above is a single-pass abstraction; the real
+// 0x50b1c4 / 0x50bf08 run a TWO-PASS scan with a distinct visible-column scratch fill
+// and a typed final scan.  These functions reproduce the decompile's exact structure
+// and side effects on the grid model + a 16-entry scratch column buffer.
+//
+// Pass-0 (visible-column scratch):  dword_122EDF0[5*(i+1)] = colTable[4*page + i], i=0..3.
+//   (`v3 += 5` BEFORE the write, so the four selectors land at scratch[5],[10],[15],[20].)
+// Pass-1 (object enumeration, QueryFind type 5):  for each live object, scan the 16-slot
+//   grid for its prototype id; if found (idx<16): Item zeroes the slot stock, Sell sets
+//   the effective stock; if NOT found: append to the first free slot (id==0, idx<16) —
+//   Sell, for buildings 475/476, first drops it unless FindSlotByProt(prot)[1] != 0.
+// Pass-2 (grid re-query, k=0..896 step 56):  re-query each occupied grid slot's object;
+//   if present, refresh effective stock + slot capacity; the Sell variant applies the
+//   same 475/476 slot guard before refreshing; absent objects clear the slot id.
+// Final scan (idx 0..15):  return 1 if any column widget is a type-65 ('A') object with a
+//   live data ptr (modelled as: any occupied slot with a positive stock).
+// ===========================================================================
+
+// One live object seen by the QueryFind type-5 enumeration (pass-1 input).
+struct RefreshScanObject {
+    i16 protId = 0;       // *i  (the enumerated object's prototype id)
+    i32 stock = 0;        // VIBE_Inventory_GetEffectiveStock(panel, obj)
+    i32 capacity = 0;     // VIBE_Inventory_GetSlotCapacity(panel)
+    bool slotGuardPass = true; // FindSlotByProt(prot)[1] != 0 (Sell 475/476 guard)
+};
+
+// The building context for the Sell guard: when buildingType is 475 or 476, the sell
+// variant consults the per-object slot guard; for any other type the guard is bypassed.
+struct RefreshBuildingCtx {
+    i16 buildingType = 0;       // *(_WORD*)a2  (the panel/building type word)
+    bool isSlotGuarded() const { return buildingType == 475 || buildingType == 476; }
+};
+
+// gilde.exe 0x50b1c4 — VIBE_TradePanel_RefreshItemColumns (faithful).
+// Fills `colScratch` (16 dwords, the dword_122EDF0 window) and mutates `g_buySlots`.
+// Returns the typed-final-scan result (1 if any occupied slot holds positive stock).
+int TradePanel_RefreshItemColumns(int page,
+                                  const std::vector<RefreshScanObject>& objects,
+                                  i32 colScratch[16]);
+
+// gilde.exe 0x50bf08 — VIBE_TradePanel_RefreshSellColumns (faithful).
+// Same shape; applies the 475/476 slot-eligibility guard from `ctx`.
+int TradePanel_RefreshSellColumns(int page, const RefreshBuildingCtx& ctx,
+                                  const std::vector<RefreshScanObject>& objects,
+                                  i32 colScratch[16]);
+
 } // namespace guild::gui

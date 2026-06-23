@@ -138,6 +138,33 @@ TEST(WorldAmtLoan, EvaluateThresholds) {
     CHECK(!d.charge);
 }
 
+// W16 (0x57b304/0x57b411): the binary foreclosure gate also requires the
+// creditor marker dword_12CE96C[i]==-1 (noCreditor). A debtor over the overdraft
+// limit with no lender but WITH a creditor on record is not foreclosed — it
+// falls through to the interest charge. And a debtor with a lender is "dunned"
+// (-10 relation penalty, modeled by dunLender) while still being charged.
+TEST(WorldAmtLoan, ForeclosureGateRequiresNoCreditorMarker) {
+    AmtSetRateHook(nullptr);  // identity rate => base = 14 at slot 0
+    // No lender, no creditor on record, |debt| > 28 -> foreclose.
+    LoanDecision d = AmtEvaluateLoan(0, 0, -100, /*hasLender=*/false,
+                                     /*noCreditor=*/true);
+    CHECK(d.foreclose);
+    CHECK(!d.charge);
+    CHECK(!d.dunLender);
+
+    // No lender, but a creditor IS on record -> NO foreclose, charge instead.
+    d = AmtEvaluateLoan(0, 0, -100, /*hasLender=*/false, /*noCreditor=*/false);
+    CHECK(!d.foreclose);
+    CHECK(d.charge);
+    CHECK(!d.dunLender);
+
+    // Lender present -> dun (-10 relation) and charge; never foreclose.
+    d = AmtEvaluateLoan(0, 0, -100, /*hasLender=*/true, /*noCreditor=*/true);
+    CHECK(!d.foreclose);
+    CHECK(d.charge);
+    CHECK(d.dunLender);
+}
+
 TEST(WorldAmtLoan, RateHookScalesBase) {
     AmtSetRateHook([](i32 amt, guild::u8) -> i32 { return amt * 100; });
     i32 base = BankInterestBase(0, 0);

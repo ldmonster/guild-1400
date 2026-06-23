@@ -56,8 +56,7 @@ TEST(PSpawnEmitterI, IsTriggerBitSurvivesCopy) {
     CHECK_EQ(s->flagByte0 & 0x80u, 0x80u);
     CHECK_EQ(s->flagByte1 & 1u, 0u);
     CHECK_EQ(s->spawnedCount, 0u);
-    delete[] static_cast<unsigned char*>(s->particles);
-    delete[] reinterpret_cast<unsigned char*>(s);
+    FreeAllSpawnAllocations(); // wave-10: reclaim all four AllocSystem blocks
 }
 
 // SetTriggerOnce (emitter_setup) sets flagByte1 bit0 — the SAME bit the spawn's
@@ -86,8 +85,7 @@ TEST(PSpawnEmitterI, TriggerOnceDrivesSpawnPrime) {
     CHECK_EQ(s->flagByte1 & 2u, 2u);   // spawn raised the pending bit
     CHECK_EQ(s->spawnedCount, 0u);
     CHECK(s->position[0] == 7.0f && s->position[2] == 9.0f);
-    delete[] static_cast<unsigned char*>(s->particles);
-    delete[] reinterpret_cast<unsigned char*>(s);
+    FreeAllSpawnAllocations(); // wave-10: reclaim all four AllocSystem blocks
 }
 
 // SetFlags (emitter_setup) packs textureMode + init/rebirth/trigger bits into
@@ -114,6 +112,5 @@ TEST(PSpawnEmitterI, SetFlagsPropagates) {
     ParticleSystem* s = SpawnSystemByType(0, pos, np, 1, 0, 1.0f, tmpl, 2, 0);
     CHECK(s != nullptr);
     CHECK_EQ(s->flagByte0, authored);  // exact byte copy through the spawn path
-    delete[] static_cast<unsigned char*>(s->particles);
-    delete[] reinterpret_cast<unsigned char*>(s);
+    FreeAllSpawnAllocations(); // wave-10: reclaim all four AllocSystem blocks
 }

@@ -1,7 +1,9 @@
 #include "sim/command_apply4.h"
 
 #include "sim/command_apply.h" // shared g_last* remap tokens
+#include "sim/building.h"          // BuildingTypeDefAt (dword_13CE294 class byte)
 #include "sim/entity.h"
+#include "sim/person_personnel2.h" // PersonFindActiveByEntity @0x5920b0
 
 #include <cstring>
 #include <cstdint>
@@ -114,7 +116,82 @@ void DefaultScriptFinish(i32 handle) {
     g_charLog.lastScriptHandle = handle;
 }
 void DefaultBuildingRemove(i32 /*marker*/, i32 /*arg*/) { ++g_charLog.buildingRemoveCount; }
-void DefaultSetObjectParent(i32, i32, i32) { ++g_charLog.setParentCount; }
+// gilde.exe 0x58820c — VIBE_Building_SetObjectParent, the RECORD/COLUMN slice
+// (disasm-verified 2026-06-11). This is the dword_12CEA80 (+368 workBld)
+// column POPULATER for building-ownership changes:
+//   *(WORD*)(bld+0x25) = a2 (the new-parent person's marker word)   @0x588240
+//   if (a3 != 0xFFFF) {
+//     old = *(WORD*)(bld+0x27);
+//     if (old != 0xFFFF && dword_12CEA80[old] == bld)
+//         dword_12CEA80[old] = 0;                                   @0x58827c
+//     *(WORD*)(bld+0x27) = a3;                                      @0x588289
+//     if (typeclass(bld) == 2) {        // *(u8*)(dword_13CE294 + 589*bld->type)
+//       cur = dword_12CEA80[a3];        // the new owner's column
+//       if (!cur || (i8)cur->type <= (i8)bld->type)   // movsx cmp @0x5884b5
+//           dword_12CEA80[a3] = bld;                                @0x5882df
+//     }
+//     if (byte_12CE912[536*a3] == 6 || == 7) {        // new owner kind
+//       staff = Person_FindActiveByEntity(bld);                     @0x58830b
+//       if (staff) { staff+357 = 0; staff+436 &= 0xFE;              @0x5884dc
+//                    if (typeclass(bld) == 5 || == 9)
+//                        staff+364 = 0; }                           @0x5884f3
+//     }
+//   }
+// The render-coupled remainder (AttachStorageRooms @0x588554, the 0x2000
+// scene-node loop with SelectTextureSet @0x5b3f54, the flag-node refresh
+// @0x4b62fc/0x4b5ef8, the slot switches) stays behind this leaf boundary —
+// the established named gap of this hook. The column model stores building
+// IDS (the tree's pointer-as-id convention, sim/npc_daily.h).
+void DefaultSetObjectParent(i32 ownerId, i32 newParentMarker, i32 childMarker) {
+    ++g_charLog.setParentCount;
+    ObjectRec* bld = BuildingFindById(ownerId);
+    if (!bld)
+        return;
+    u8* braw = reinterpret_cast<u8*>(bld);
+    const u16 a2 = static_cast<u16>(newParentMarker);
+    std::memcpy(braw + 0x25, &a2, 2);                       // bld word +37 = a2
+    const u16 a3 = static_cast<u16>(childMarker);
+    if (a3 == 0xFFFF)
+        return;
+    auto col368 = [](u16 slot) -> u8* {
+        return reinterpret_cast<u8*>(&g_persons[slot]) + 368;
+    };
+    u16 old = 0;
+    std::memcpy(&old, braw + 0x27, 2);
+    if (old != 0xFFFF && old < (u16)kPersonCapacity) {
+        i32 cur;
+        std::memcpy(&cur, col368(old), 4);
+        if (cur == bld->id) {
+            const i32 zero = 0;
+            std::memcpy(col368(old), &zero, 4);             // @0x58827c
+        }
+    }
+    std::memcpy(braw + 0x27, &a3, 2);                       // @0x588289
+    if (a3 >= (u16)kPersonCapacity)
+        return;
+    const BuildingTypeDef* def = BuildingTypeDefAt(bld->alive);
+    if (def && def->kind == 2) {
+        i32 cur;
+        std::memcpy(&cur, col368(a3), 4);
+        ObjectRec* curBld = cur ? BuildingFindById(cur) : nullptr;
+        if (!curBld ||
+            static_cast<i8>(curBld->alive) <= static_cast<i8>(bld->alive))
+            std::memcpy(col368(a3), &bld->id, 4);           // @0x5882df
+    }
+    const u8 kind = reinterpret_cast<const u8*>(&g_persons[a3])[2];
+    if (kind == 6 || kind == 7) {
+        Person* staff = PersonFindActiveByEntity(bld->id);  // @0x58830b
+        if (staff) {
+            u8* sraw = reinterpret_cast<u8*>(staff);
+            sraw[357] = 0;                                  // @0x5884dc
+            sraw[436] &= 0xFE;                              // @0x5884e6
+            if (def && (def->kind == 5 || def->kind == 9)) {
+                const i32 zero = 0;
+                std::memcpy(sraw + 364, &zero, 4);          // @0x5884f3
+            }
+        }
+    }
+}
 void DefaultChimneySmoke(i32 /*marker*/) { ++g_charLog.chimneyCount; }
 int  DefaultIsProduction(i32 /*marker*/) { return 0; }
 void DefaultCharDestroy(i32 /*charPtr*/) { ++g_charLog.charDestroyCount; }
@@ -335,7 +412,9 @@ int ExSetObjectTransform(CommandPacket& pkt, AckEntry* ack) {
     // v7 = a1+22; v7 += 28 => a1+50: word -> obj+56, byte -> obj+58
     std::memcpy(obj + 56, pkt.bytes + 50, 2);
     obj[58] = pkt.bytes[52];
-    AckSet(ack, 1, 3, 0);
+    // gilde.exe 0x497bdd: `if (a2) *(BYTE*)a2 = 1;` — ONLY the status byte is
+    // written; the +1 (slot) and +6 (seq) fields are left untouched.
+    if (ack) ack->status = 1;
     return 0;
 }
 
@@ -383,7 +462,7 @@ int ExAdjustObjectTransform(CommandPacket& pkt, AckEntry* ack) {
     addFloat(9,  0x23);
     addFloat(11, 0x27);
     addFloat(14, 0x2B);
-    if (ack) ack->status = 1;
+    if (ack) { ack->status = 1; ack->slot = 0; ack->seq = 0; } // +0=1,+1=0,+6=0
     return 0;
 }
 

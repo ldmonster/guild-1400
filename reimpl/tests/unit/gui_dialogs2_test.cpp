@@ -270,19 +270,21 @@ TEST(GuiDlg2Talent, StatusSelectionAndTrain) {
     TalSink sink; TalentDialog_SetCommandSink(&sink);
     TalentState s{};
     s.talent = 3; s.points = 0x60 /* -> level 3 */; s.building = 42;
-    s.availableLevel = 5; s.hasTrainingFlag = true;
+    // 0x5471c0: the 4803/4804 discriminator is the debug-adjust term v37 (debugAdjust != 0),
+    // not hasTrainingFlag. debugAdjust=-1 -> requiredLevel = 3 + (-1) = 2, status 4803.
+    s.availableLevel = 5; s.debugAdjust = -1;
     TalentLayout l = TalentDialog_Build(s);
     CHECK(std::strcmp(l.form, kFormTalent) == 0);
     CHECK_EQ(l.nameTextId, 4810 + 3);
     CHECK_EQ(l.descTextId, 4822 + 3);
-    CHECK_EQ(l.requiredLevel, 3);
+    CHECK_EQ(l.requiredLevel, 2);
     CHECK_EQ(l.statusText, kTextTalCanTrain); // 4803
     CHECK(l.canTrain);
     sink.reset();
     CHECK(TalentDialog_Dispatch(l, s, kTalClickOK));
     CHECK_EQ(sink.trained, 1);
     CHECK_EQ(sink.building, 42);
-    CHECK_EQ(sink.level, 3);
+    CHECK_EQ(sink.level, 2);
     // Cancel.
     sink.reset();
     CHECK(TalentDialog_Dispatch(l, s, kTalClickCancel));
@@ -500,20 +502,21 @@ TEST(GuiDlg2Stammbaum, NodePlacementMath) {
     CHECK(std::strcmp(l.form, kFormStammbaum) == 0);
     CHECK_EQ(l.titleText, kStammTitleDefault);
     CHECK_EQ(l.center, 200);
-    // self at center-(nw+90) = 200-130 = 70; portrait +2.
-    CHECK_EQ(l.self.x, 70);
+    // Node x = anchor + nw/2 (the AddCenteredLabel x, 0x55ae32). portraitX = anchor + 2.
+    // self: anchor center-(nw+90)=70 -> x = 70+20 = 90; portrait = 70+2 = 72.
+    CHECK_EQ(l.self.x, 90);
     CHECK_EQ(l.self.portraitX, 72);
-    // spouse at center+90 = 290.
-    CHECK_EQ(l.spouse.x, 290);
+    // spouse: anchor center+90=290 -> x = 290+20 = 310.
+    CHECK_EQ(l.spouse.x, 310);
     CHECK(!l.spouse.empty);
-    // two parents: father center-(nw+16)=144, mother center+16=216.
+    // two parents: father anchor center-(nw+16)=144 -> 164; mother center+16=216 -> 236.
     CHECK_EQ((int)l.parents.size(), 2);
-    CHECK_EQ(l.parents[0].x, 144);
-    CHECK_EQ(l.parents[1].x, 216);
-    // even children: child0 = center-nw-20 = 140; child1 = center+20 = 220.
+    CHECK_EQ(l.parents[0].x, 164);
+    CHECK_EQ(l.parents[1].x, 236);
+    // even children: child0 anchor center-nw-20=140 -> 160; child1 center+20=220 -> 240.
     CHECK_EQ((int)l.children.size(), 2);
-    CHECK_EQ(l.children[0].x, 140);
-    CHECK_EQ(l.children[1].x, 220);
+    CHECK_EQ(l.children[0].x, 160);
+    CHECK_EQ(l.children[1].x, 240);
 }
 
 TEST(GuiDlg2Stammbaum, SingleParentOddChildrenAndClicks) {
@@ -525,15 +528,17 @@ TEST(GuiDlg2Stammbaum, SingleParentOddChildrenAndClicks) {
     FamilyTreeLayout l = Stammbaum_BuildLayout(fam, 400, 40, /*title=*/42);
     CHECK_EQ(l.titleText, 42); // explicit title arg used
     CHECK(l.spouse.empty);
-    // single parent centred at center-half = 200-20 = 180.
+    // single parent: anchor center-half=180 -> x = 180+20 = 200 (== center).
     CHECK_EQ((int)l.parents.size(), 1);
-    CHECK_EQ(l.parents[0].x, 180);
-    // odd children: child0 = center-half = 180; child1 = nw+center-half+40 = 40+180+40=260;
-    //               child2 = center-half-40-nw = 180-40-40 = 100.
+    CHECK_EQ(l.parents[0].x, 200);
+    // odd children read anchors v103,v104,v105 in memory order, each + nw/2:
+    //   child0 a103=center-half=180     -> 200
+    //   child1 a104=center-half-40-nw=100 -> 120
+    //   child2 a105=nw+center-half+40=260 -> 280
     CHECK_EQ((int)l.children.size(), 3);
-    CHECK_EQ(l.children[0].x, 180);
-    CHECK_EQ(l.children[1].x, 260);
-    CHECK_EQ(l.children[2].x, 100);
+    CHECK_EQ(l.children[0].x, 200);
+    CHECK_EQ(l.children[1].x, 120);
+    CHECK_EQ(l.children[2].x, 280);
     // Click resolution: clicking child1's object returns entity 6.
     CHECK_EQ(Stammbaum_DispatchClick(l, l.children[1].objectId), 6);
     CHECK_EQ(Stammbaum_DispatchClick(l, l.self.objectId), 1);

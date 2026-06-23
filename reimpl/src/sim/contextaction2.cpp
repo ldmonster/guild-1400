@@ -24,20 +24,27 @@ void SetGesetzFindRecordHook(GesetzFindRecordFn fn) {
 // ===========================================================================
 // Rank-train tier variants.
 // ---------------------------------------------------------------------------
-// Shared body. `exact`: the ==N tiers return 4 when above, 1 when below.
-// Otherwise (>=N tiers) return 1 when below. TrainRank4Plus is the odd one: it
-// returns 4 only when rank == 6 and rejects (1) when rank < 4, so it is expressed
-// with an explicit (overRank, underRank) pair below.
+// Shared body. The binary distinguishes three over-rank predicates BEFORE the
+// `rank < underRank -> 1` reject:
+//   kOverGreater (TrainRank4B):  `rank > overRank -> 4`  (0x56f52e `cmp v4,4 / ja`)
+//   kOverEqual   (TrainRank4Plus): `rank == overRank -> 4` (0x56f5da `cmp v4,6 / jz`)
+//   kOverNone    (5B/6A/6B):     no over-check at all     (pure `>= underRank`)
+// CRITICAL: the over-check must NOT use overRank==0 as a "none" sentinel — a
+// rank-0 actor would then hit `rank == 0 -> 4`, but the binary rejects it via
+// `rank < underRank -> 1` (5B/6A/6B at 0x56f727/0x56f873/0x56f917 do
+// `a1[13] < N -> return 1`). kOverNone makes the >=N variants reject rank 0.
 // ===========================================================================
 namespace {
+enum class OverKind { kNone, kGreater, kEqual };
+
 char TrainTier(ContextActor* actor, InteractionEventRec* ev,
-               u8 overRank, bool hasOver, u8 underRank, int tooltipId) {
+               OverKind over, u8 overRank, u8 underRank, int tooltipId) {
     if (ev->mode != 3 && ev->mode != 1)
         return 1;
     u8 r = actor->rank;
-    if (hasOver && r > overRank)   // pure >N (TrainRank4B uses overRank=4)
+    if (over == OverKind::kGreater && r > overRank)   // 4B: rank > 4 -> 4
         return 4;
-    if (r == overRank && !hasOver) // exact "==6 -> 4" (TrainRank4Plus)
+    if (over == OverKind::kEqual && r == overRank)    // 4Plus: rank == 6 -> 4
         return 4;
     if (r < underRank)
         return 1;
@@ -54,24 +61,24 @@ char TrainTier(ContextActor* actor, InteractionEventRec* ev,
 // gilde.exe 0x56f514 — VIBE_ContextAction_TrainRank4B (rank == 4 exact).
 //   v4 > 4 -> 4 ; v4 < 4 -> 1.
 char ContextTrainRank4B(ContextActor* actor, InteractionEventRec* ev) {
-    return TrainTier(actor, ev, /*overRank*/4, /*hasOver*/true, /*underRank*/4, 0x1986);
+    return TrainTier(actor, ev, OverKind::kGreater, /*overRank*/4, /*underRank*/4, 0x1986);
 }
 // gilde.exe 0x56f5c0 — VIBE_ContextAction_TrainRank4Plus.
 //   v4 == 6 -> 4 ; v4 < 4 -> 1 (4 and 5 fall through to the dialog).
 char ContextTrainRank4Plus(ContextActor* actor, InteractionEventRec* ev) {
-    return TrainTier(actor, ev, /*overRank*/6, /*hasOver*/false, /*underRank*/4, 0x1988);
+    return TrainTier(actor, ev, OverKind::kEqual, /*overRank*/6, /*underRank*/4, 0x1988);
 }
 // gilde.exe 0x56f710 — VIBE_ContextAction_TrainRank5B (rank >= 5).
 char ContextTrainRank5B(ContextActor* actor, InteractionEventRec* ev) {
-    return TrainTier(actor, ev, /*overRank*/0, /*hasOver*/false, /*underRank*/5, 0x198C);
+    return TrainTier(actor, ev, OverKind::kNone, /*overRank*/0, /*underRank*/5, 0x198C);
 }
 // gilde.exe 0x56f85c — VIBE_ContextAction_TrainRank6A (rank >= 6).
 char ContextTrainRank6A(ContextActor* actor, InteractionEventRec* ev) {
-    return TrainTier(actor, ev, /*overRank*/0, /*hasOver*/false, /*underRank*/6, 0x1992);
+    return TrainTier(actor, ev, OverKind::kNone, /*overRank*/0, /*underRank*/6, 0x1992);
 }
 // gilde.exe 0x56f900 — VIBE_ContextAction_TrainRank6B (rank >= 6).
 char ContextTrainRank6B(ContextActor* actor, InteractionEventRec* ev) {
-    return TrainTier(actor, ev, /*overRank*/0, /*hasOver*/false, /*underRank*/6, 0x1994);
+    return TrainTier(actor, ev, OverKind::kNone, /*overRank*/0, /*underRank*/6, 0x1994);
 }
 
 // ===========================================================================

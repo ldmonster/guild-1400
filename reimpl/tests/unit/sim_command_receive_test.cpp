@@ -112,14 +112,79 @@ TEST(SimCmdRecv, ReassembleRoundTrip) {
     g_walk_list = &recv;
 
     PendingState reasm;
-    int consumed = ReassembleReceived(reasm, hp, &recv[0], &WalkNext);
-    CHECK_EQ(consumed, 4);
+    // ReassembleReceived returns dword_11AA478 (the reassembled length) on success
+    // (gilde.exe 0x49377c LABEL_19), NOT a fragment count.
+    int ret = ReassembleReceived(reasm, hp, &recv[0], &WalkNext);
+    CHECK_EQ(ret, 400);
     CHECK_EQ(reasm.reasm_len, 400u);
     // reasm[0..399] must equal the original data.
     bool ok = true;
     for (int i = 0; i < 400; ++i)
         if (reasm.reasm[i] != data[i]) { ok = false; break; }
     CHECK(ok);
+}
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-11): malformed reassembly — a first fragment that declares a
+// huge reasm_len (+16, up to 65535) followed by a long fragment chain would drive
+// the 128-byte-per-chunk copy far past the fixed 1536-byte reasm buffer (heap/
+// buffer overflow). The end-of-buffer bound must stop the copy. A valid block is
+// capped at kPendingMaxBlock so it never reaches this bound (round-trip unchanged).
+// ---------------------------------------------------------------------------
+TEST(SimCmdRecv, Malformed_Reassemble_HugeReasmLen) {
+    // Hand-build a header + a long chain of fragment packets with a bogus huge
+    // declared length. Fragments are matched by (flag byte +3, Count +8).
+    const u8 kFlag = 0x42;
+    const u32 kFirst = 100;
+    const int kNumFrags = 40;  // 40*128 == 5120 bytes >> 1536-byte reasm buffer
+
+    std::vector<CommandPacket> frags;
+    frags.reserve(kNumFrags + 1);
+    // Slot 0 is the header (owns the block; +12 -> first fragment Count).
+    CommandPacket header{};
+    header.opcode() = 0x20;
+    header.bytes[3] = kFlag;
+    header.put32(12, kFirst);
+    frags.push_back(header);
+
+    for (int k = 0; k < kNumFrags; ++k) {
+        CommandPacket f{};
+        f.opcode() = 7;                 // fragment marker
+        f.bytes[3] = kFlag;
+        f.set_count(kFirst + static_cast<u32>(k));
+        // +12 -> next fragment's Count (last one chains to a missing Count).
+        f.put32(12, kFirst + static_cast<u32>(k) + 1);
+        if (k == 0)
+            f.put16(16, 0xFFFF);        // bogus huge reasm_len on the FIRST fragment
+        frags.push_back(f);
+    }
+
+    g_walk_list = &frags;
+    PendingState reasm;
+    int ret = ReassembleReceived(reasm, frags[0], &frags[0], &WalkNext);
+    // Must not overrun the reasm buffer (ASAN gate). The safety bound stops the
+    // copy well before all 40 fragments are consumed, then returns reasm_len
+    // (== dword_11AA478, here the bogus 0xFFFF). Faithful completion paths return
+    // reasm_len too; the property under test is "no overrun".
+    CHECK_EQ(ret, 0xFFFF);
+    CHECK_EQ(reasm.reasm_len, 0xFFFFu);
+}
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-11): StagePendingBlock rejects an over-cap length faithfully
+// (the original's own len > 0x3FE guard). A huge len never copies past block[].
+// ---------------------------------------------------------------------------
+TEST(SimCmdRecv, Malformed_StagePendingBlock_OverCapLength) {
+    PendingState st;
+    u8 data[8] = {1,2,3,4,5,6,7,8};
+    // len just over the cap (1023 > 1022) -> rejected, nothing staged.
+    CHECK_EQ(StagePendingBlock(st, 1023, data), 0);
+    CHECK_EQ(st.staged, 0u);
+    // The maximum legal length is accepted (boundary).
+    u8 big[1022];
+    for (int i = 0; i < 1022; ++i) big[i] = static_cast<u8>(i);
+    CHECK_EQ(StagePendingBlock(st, 1022, big), 1);
+    CHECK_EQ(st.staged, 1024u);
 }
 
 // ---------------------------------------------------------------------------

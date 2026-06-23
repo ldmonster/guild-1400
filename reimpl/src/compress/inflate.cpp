@@ -1089,6 +1089,12 @@ Inflater::Inflater(int windowBits) {
     Reset();
 }
 
+// inflate_blocks_free @0x5ffa80 / inflateEnd — release the owned Blocks (whose
+// own ~Blocks frees its codes). Defined here where Blocks is a complete type.
+Inflater::~Inflater() {
+    delete b_;
+}
+
 void Inflater::NewBlocks() {
     delete b_;
     b_ = new Blocks();

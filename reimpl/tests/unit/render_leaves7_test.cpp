@@ -139,6 +139,20 @@ TEST(RenderLeaves7_Light, DirectionalFalloffSelectsIndex) {
     CHECK(approx(render::DirectionalFalloffScale(0.25f, 2.0f, lut), 0.0f));
 }
 
+// wave-12 boundary: NdotL == -1 (a normalised back-facing dot) gives the LARGEST
+// valid index, idx = (int)(-1 * -1023) = 1023, which is exactly the last entry of
+// the documented 1024-entry falloff LUT — must NOT overrun (ASAN-clean read).
+TEST(RenderLeaves7_Light, DirectionalFalloffMaxIndexInBounds) {
+    static float lut[1024];
+    for (int i = 0; i < 1024; ++i) lut[i] = static_cast<float>(i);
+    float s = render::DirectionalFalloffScale(-1.0f, 3.0f, lut);
+    CHECK(approx(s, 3.0f * 1023.0f));   // lut[1023], the final valid entry
+    // The smallest negative just past 0 -> idx 0.
+    CHECK(approx(render::DirectionalFalloffScale(-0.0009f, 1.0f, lut), 0.0f)); // lut[0]==0
+    // NdotL exactly 0 (not < 0) -> early 0 branch, LUT not touched.
+    CHECK(approx(render::DirectionalFalloffScale(0.0f, 9.0f, lut), 0.0f));
+}
+
 // ---------------------------------------------------------------------------
 // 0x5ef19c — ComputeSkyFlarePositions kernels.
 // ---------------------------------------------------------------------------

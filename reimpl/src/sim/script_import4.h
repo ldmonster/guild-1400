@@ -66,6 +66,7 @@ struct ScriptEngineTables {
     void* scratchB4 = nullptr;  // dword_62E8B4
     void* eventToks = nullptr;  // dword_767944 (event token table base)
     void* logRing   = nullptr;  // dword_767950 ("Run script: %s" ring)
+    i32   logRingIdx= 0;        // dword_62E8C0 (ring write cursor, wraps at >30)
     i32   runResult = 0;        // dword_62E8DC (RunByHandle's last result)
 };
 ScriptEngineTables& ScriptTables();

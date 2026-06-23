@@ -237,20 +237,37 @@ bool MissionReqCheckStatCombo(const ObjectiveRecord* objective) {
 // gilde.exe 0x539534 — VIBE_MissionReq_CheckCumulativeStats (edx=row).
 bool MissionReqCheckCumulativeStats(const ReqTableRow* row) {
     MemberCount c{};
+    // The original keeps a running register accumulator (ecx) that is xor'd to 0
+    // right after the FIRST CountGuildMembers(21) call (0x53954e) and then, before
+    // each subsequent gate, ADDS the *previous* state's out->sum field (var_20):
+    //   ecx += sum(21)  (0x53957c, edi=[esp+var_20] read at 0x539570)
+    //   ecx += sum(20)  (0x539594)
+    //   ecx += sum(18)  (0x5395c1)
+    //   ecx += sum(22)  (0x5395e4)
+    //   ecx += sum(8)   (0x5395fd)
+    //   ecx += sum(9)   (0x539624)
+    // then `cmp ecx, [row+0x10]; setnl` => total >= threshold. The accumulator is
+    // therefore the SUM OF out->sum OVER ALL SIX STATES, not just state 9.
+    int sumTotal = 0;
     MissionReqCountGuildMembers(21, &c);
     if (c.count > 0 && FloatBits(c.average) < kOneBits) return false;
+    sumTotal += c.sum;                                          // ecx += sum(21)
     MissionReqCountGuildMembers(20, &c);
     if (c.count > 0 && FloatBits(c.average) < kOneBits) return false;
+    sumTotal += c.sum;                                          // ecx += sum(20)
     MissionReqCountGuildMembers(18, &c);
     if (c.count > 0 && FloatBits(c.average) < kOneBits) return false;
+    sumTotal += c.sum;                                          // ecx += sum(18)
     MissionReqCountGuildMembers(22, &c);
     if (c.count > 0 && FloatBits(c.average) < kOneBits) return false;
+    sumTotal += c.sum;                                          // ecx += sum(22)
     MissionReqCountGuildMembers(8, &c);
     if (c.count > 0 && FloatBits(c.average) < kOneBits) return false;
+    sumTotal += c.sum;                                          // ecx += sum(8)
     MissionReqCountGuildMembers(9, &c);
-    // (sum + count) for state 9 must reach the threshold (last gate AND-ed in).
+    sumTotal += c.sum;                                          // ecx += sum(9)
     return (c.count <= 0 || FloatBits(c.average) >= kOneBits) &&
-           (c.sum + c.count) >= row->threshold;
+           sumTotal >= row->threshold;
 }
 
 // gilde.exe 0x53963c — VIBE_MissionReq_CheckMemberStats (ebx=row).

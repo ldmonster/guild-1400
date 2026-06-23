@@ -11,6 +11,7 @@
 #include "test.h"
 #include "sim/command.h"
 #include "sim/command_apply.h"   // g_lastObjectId / g_lastSceneId / g_lastTradeId
+#include "sim/entity.h"          // g_persons — the live table the 0x1B handler scans
 #include "sim/trade_sell.h"
 
 using namespace guild;
@@ -43,10 +44,25 @@ void TradeSpy(const TradeCommand& c) {
 
 void FullReset() {
     ResetApply6State();
+    ResetEntityArrays();          // the 0x1B handler scans the live g_persons table
+    for (int i = 0; i < kPersonCapacity; ++i) { // scrub stale ids / slot keys too
+        std::memset(&g_persons[i], 0, sizeof(Person));
+        g_persons[i].marker = -1; // free
+    }
     g_lastObjectId = -1; g_lastSceneId = -1; g_lastTradeId = -1;
     g_trade.Reset();
     TradeSetCmdHook(&TradeSpy);
     TradeSetMarketPriceHook(nullptr);
+}
+
+// Seed a live Person slot the way the binary's columns look: marker word @+0
+// (word_12CE910[268*idx], != -1 == live), id dword @+4 (dword_12CE914[134*idx])
+// and the case-3 exclusion key dword @+0x20C (dword_12CEB1C[134*idx]).
+void SeedPerson(int idx, i32 id, i16 marker = 0, i32 slotId = 0) {
+    g_persons[idx].marker = marker;
+    g_persons[idx].id = id;
+    std::memcpy(reinterpret_cast<u8*>(&g_persons[idx]) + kRelPersonSlotIdOff,
+                &slotId, sizeof(slotId));
 }
 
 } // namespace
@@ -73,6 +89,7 @@ TEST(SimApply6, SellObjektTransfersAndAcks) {
     p.put32(35, 0);             // raw-material multiplier 0 (plain)
 
     AckEntry ack{};
+    g_lastTradeId = 0x5151;              // sentinel: the handler must NOT touch it
     int rc = ExSellObjekt(p, &ack);
     CHECK_EQ(rc, 0);
     CHECK_EQ((int)ack.status, 1);
@@ -82,7 +99,53 @@ TEST(SimApply6, SellObjektTransfersAndAcks) {
     CHECK_EQ(g_trade.adds, 1);
     CHECK_EQ(g_trade.lastRemoveQty, 5);
     CHECK_EQ(Apply6_GetLog().sellCommitCount, 1);
-    CHECK_EQ(g_lastTradeId, 5);          // dword_631290 set on success
+    // dword_631290's ONLY store in the binary is the LABEL_58 latch
+    // `dword_631290 = *(v55+2)` (the dest stock NODE id) inside the dest
+    // STORAGE phase (buildingtype_callers' Sell_EnsureDestStorageNode — pinned
+    // by buildingtype_callers_test). With the inert storage phase here the
+    // handler must leave g_lastTradeId untouched (it used to overwrite it with
+    // the modeled moved qty — a divergence, closed in fixups wave 2).
+    CHECK_EQ(g_lastTradeId, 0x5151);
+}
+
+// The LABEL_58 latch reaches g_lastTradeId only through the installed storage
+// phase, never through the handler body: a phase that latches a node id must
+// see its value survive the rest of ExSellObjekt.
+namespace {
+struct LatchingPhase : SellStoragePhase {
+    bool SourcePhase(SellResolve&, i32) override { return true; }
+    bool DestPhase(SellResolve& r, i32) override {
+        r.lastDestNodeId = 616;          // *(v55+2)
+        g_lastTradeId = 616;             // LABEL_58: dword_631290 = *(v55+2)
+        return true;
+    }
+};
+} // namespace
+
+TEST(SimApply6, SellObjektKeepsStoragePhaseTradeIdLatch) {
+    FullReset();
+    SetSellResolveHook([](const SellDecoded& d, SellResolve& r) -> bool {
+        r.proto = d.proto; r.qty = d.qty;
+        r.srcResolved = true; r.destResolved = true;
+        r.srcHasStock = true; r.srcRawCount = 100; r.srcIsReserveGood = false;
+        r.destStorage = false; r.destCarried = false;
+        return true;
+    });
+    LatchingPhase phase;
+    TradeSetStoragePhase(&phase);
+
+    CommandPacket p = MakePacket(kOp6SellObjekt);
+    p.put32(16, 50);
+    p.put32(20, 60);
+    p.put16(24, 42);
+    p.put32(31, 5);
+    p.put32(35, 0);
+
+    AckEntry ack{};
+    CHECK_EQ(ExSellObjekt(p, &ack), 0);
+    CHECK_EQ(g_lastTradeId, 616);        // the phase latch survives the handler
+    CHECK_EQ(ack.seq, 5);                // the ack still carries the moved qty
+    TradeSetStoragePhase(nullptr);
 }
 
 TEST(SimApply6, SellObjektRejectsWhenSourceShort) {
@@ -157,13 +220,17 @@ TEST(SimApply6, SellableAmountProducesAndCredits) {
     CHECK_EQ(rc, 0);
     CHECK_EQ((int)ack.status, 1);
     CHECK_EQ((int)ack.slot, 3);
-    // produced = min(4, 10) clamped by cap => 4; proceeds = 3.0 * (2*4) = 24.
+    // produced = min(4, 10) clamped by cap => 4. proceeds = trunc(price * v15)
+    // where v15 is the CRAFT count, NOT outCount*v15 (gilde.exe 0x4976d5:
+    // `v21 = ComputeMarketPrice(...) * (double)v15`). So proceeds = 3.0 * 4 = 12.
+    // The output goods ADDED are outCount*produced (= 8), but the credit is
+    // per-craft (= 12), exactly as the binary does it.
     CHECK_EQ(Apply6_GetLog().lastSellableProduced, 4);
-    CHECK_EQ(Apply6_GetLog().lastSellableProceeds, 24);
+    CHECK_EQ(Apply6_GetLog().lastSellableProceeds, 12);
     CHECK_EQ(g_trade.adds, 1);
     CHECK_EQ(g_trade.lastAddQty, 8);      // outputCount * produced
     CHECK_EQ(g_trade.credits, 1);
-    CHECK_EQ(g_trade.lastCredit, 24);
+    CHECK_EQ(g_trade.lastCredit, 12);
 }
 
 TEST(SimApply6, SellableAmountRejectsWhenNothingProducible) {
@@ -192,9 +259,9 @@ TEST(SimApply6, SellableAmountRejectsWhenNothingProducible) {
 TEST(SimApply6, RelationMode0AddsDelta) {
     FullReset();
     RelationState& rel = Apply6_Relations();
-    // Two persons: index 0 id=100 (col), index 1 id=200 (row). Both alive.
-    rel.personId[0] = 100; rel.aliveMarker[0] = 0;
-    rel.personId[1] = 200; rel.aliveMarker[1] = 0;
+    // Two persons in the LIVE table: index 0 id=100 (col), index 1 id=200 (row).
+    SeedPerson(0, 100);
+    SeedPerson(1, 200);
     rel.A(1, 0) = 10;                     // existing A[row=1][col=0]
 
     CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
@@ -213,8 +280,8 @@ TEST(SimApply6, RelationMode0AddsDelta) {
 TEST(SimApply6, RelationMode0ClampsHigh) {
     FullReset();
     RelationState& rel = Apply6_Relations();
-    rel.personId[0] = 100; rel.aliveMarker[0] = 0;
-    rel.personId[1] = 200; rel.aliveMarker[1] = 0;
+    SeedPerson(0, 100);
+    SeedPerson(1, 200);
     rel.A(1, 0) = 120;
     CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
     p.put32(16, 200); p.put32(20, 100); p.put32(24, 50); p.put32(28, 0);
@@ -225,8 +292,8 @@ TEST(SimApply6, RelationMode0ClampsHigh) {
 TEST(SimApply6, RelationMode1AlsoAdjustsSecondary) {
     FullReset();
     RelationState& rel = Apply6_Relations();
-    rel.personId[0] = 100; rel.aliveMarker[0] = 0;
-    rel.personId[1] = 200; rel.aliveMarker[1] = 0;
+    SeedPerson(0, 100);
+    SeedPerson(1, 200);
     rel.A(1, 0) = 0; rel.B(1, 0) = 0;
     CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
     p.put32(16, 200); p.put32(20, 100);
@@ -241,8 +308,8 @@ TEST(SimApply6, RelationMode1AlsoAdjustsSecondary) {
 TEST(SimApply6, RelationMode2ZeroesSecondary) {
     FullReset();
     RelationState& rel = Apply6_Relations();
-    rel.personId[0] = 100; rel.aliveMarker[0] = 0;
-    rel.personId[1] = 200; rel.aliveMarker[1] = 0;
+    SeedPerson(0, 100);
+    SeedPerson(1, 200);
     rel.A(1, 0) = 5; rel.B(1, 0) = 99;
     CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
     p.put32(16, 200); p.put32(20, 100); p.put32(24, 3); p.put32(28, 2);
@@ -254,8 +321,8 @@ TEST(SimApply6, RelationMode2ZeroesSecondary) {
 TEST(SimApply6, RelationMode4BandDecay) {
     FullReset();
     RelationState& rel = Apply6_Relations();
-    rel.personId[0] = 1; rel.aliveMarker[0] = 0;
-    rel.personId[1] = 2; rel.aliveMarker[1] = 0;
+    SeedPerson(0, 1);
+    SeedPerson(1, 2);
     // off-diagonal cell above threshold -> highDelta applied.
     rel.A(0, 1) = 120;                    // band 0: threshold 100 -> v>100 => +(-4)
     rel.A(1, 0) = 50;                     // <=100, not < -75 => unchanged
@@ -277,6 +344,94 @@ TEST(SimApply6, RelationRejectsUnknownPerson) {
     p.put32(16, 200); p.put32(20, 100); p.put32(24, 5); p.put32(28, 0);
     int rc = ExComputeObjectCoords(p, nullptr);
     CHECK_EQ(rc, 1);
+}
+
+// The original scan (0x498407/0x4984d5) takes the FIRST id match without
+// consulting the marker word and only THEN gates on it — a dead slot earlier
+// in the table shadows a live one with the same id, and the packet rejects.
+TEST(SimApply6, RelationFirstIdMatchWinsEvenWhenDead) {
+    FullReset();
+    SeedPerson(0, 100);
+    SeedPerson(1, 200, /*marker=*/-1);   // dead slot, id 200
+    SeedPerson(2, 200);                  // live slot with the same id, later
+    CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
+    p.put32(16, 200); p.put32(20, 100); p.put32(24, 5); p.put32(28, 0);
+    CHECK_EQ(ExComputeObjectCoords(p, nullptr), 1);  // word_12CE910[...] == -1
+}
+
+// gilde.exe 0x498460..0x4984ac — mode 3 scales the matrix-B column of the +20
+// person by the float at +32 (fild signed byte * float, frndint with RC=chop ==
+// trunc toward zero), skipping every row person whose id equals the target's
+// +0x20C slot id (dword_12CEB1C).
+TEST(SimApply6, RelationMode3ScalesSecondaryColumn) {
+    FullReset();
+    RelationState& rel = Apply6_Relations();
+    SeedPerson(0, 100, /*marker=*/0, /*slotId=*/300);  // target col, key 300
+    SeedPerson(1, 200);
+    SeedPerson(2, 300);                                // id == key -> excluded
+    rel.B(0, 0) = -7;    // self row: id 100 != 300 -> scaled
+    rel.B(1, 0) = 9;     // scaled
+    rel.B(2, 0) = 50;    // row person id 300 == slot key -> untouched
+    CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
+    p.put32(16, 0);                       // +16 unused by mode 3
+    p.put32(20, 100);                     // target person
+    p.put32(28, 3);                       // mode 3
+    float scale = 0.5f;
+    std::memcpy(&p.bytes[32], &scale, sizeof(scale));
+    AckEntry ack{};
+    int rc = ExComputeObjectCoords(p, &ack);
+    CHECK_EQ(rc, 0);
+    CHECK_EQ((int)ack.status, 1);
+    CHECK_EQ((int)rel.B(0, 0), -3);       // trunc(-3.5) toward zero == -3
+    CHECK_EQ((int)rel.B(1, 0), 4);        // trunc(4.5)  == 4
+    CHECK_EQ((int)rel.B(2, 0), 50);       // excluded by the +0x20C key
+}
+
+// gilde.exe 0x498640 `test ebp,ebp; jnz loc_49856C` — a mode outside 0..4
+// resolves both persons, stamps the ACK and returns 0 WITHOUT touching either
+// grid.
+TEST(SimApply6, RelationUnknownModeAcksWithoutMutating) {
+    FullReset();
+    RelationState& rel = Apply6_Relations();
+    SeedPerson(0, 100);
+    SeedPerson(1, 200);
+    rel.A(1, 0) = 33; rel.B(1, 0) = -5;
+    CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
+    p.put32(16, 200); p.put32(20, 100); p.put32(24, 50);
+    p.put32(28, 7);                       // not a real mode
+    AckEntry ack{};
+    int rc = ExComputeObjectCoords(p, &ack);
+    CHECK_EQ(rc, 0);
+    CHECK_EQ((int)ack.status, 1);
+    CHECK_EQ((int)rel.A(1, 0), 33);       // untouched
+    CHECK_EQ((int)rel.B(1, 0), -5);       // untouched
+    // ...but an unknown person still rejects first (the resolves run).
+    CommandPacket q = MakePacket(kOp6ComputeObjectCoords);
+    q.put32(16, 999); q.put32(20, 100); q.put32(28, 7);
+    CHECK_EQ(ExComputeObjectCoords(q, nullptr), 1);
+}
+
+// The six new-game relation packets (VIBE_Command_EnqueueInheritanceTransfer
+// @0x533930..0x5339ae): QueueRequestCoord27(a, b, 127) with ecx=0 -> mode 0,
+// delta 127 -> A[a][b] saturates to 127 for all six directed player/father/
+// mother pairs; matrix B stays untouched by mode 0.
+TEST(SimApply6, RelationNewGameSixPairImage) {
+    FullReset();
+    RelationState& rel = Apply6_Relations();
+    const i32 P = 11, F = 22, M = 33;
+    SeedPerson(0, P); SeedPerson(1, F); SeedPerson(2, M);
+    const i32 pairs[6][2] = {{P,F},{F,P},{P,M},{M,P},{F,M},{M,F}};
+    for (auto& pr : pairs) {
+        CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
+        p.put32(16, (u32)pr[0]); p.put32(20, (u32)pr[1]);
+        p.put32(24, 127); p.put32(28, 0);
+        CHECK_EQ(ExComputeObjectCoords(p, nullptr), 0);
+    }
+    CHECK_EQ((int)rel.A(0, 1), 127); CHECK_EQ((int)rel.A(1, 0), 127);
+    CHECK_EQ((int)rel.A(0, 2), 127); CHECK_EQ((int)rel.A(2, 0), 127);
+    CHECK_EQ((int)rel.A(1, 2), 127); CHECK_EQ((int)rel.A(2, 1), 127);
+    CHECK_EQ((int)rel.B(0, 1), 0);   // mode 0 never touches B
+    CHECK_EQ((int)rel.A(1, 1), 0);   // diagonal untouched
 }
 
 // ===========================================================================
@@ -509,8 +664,8 @@ TEST(SimApply6, ApplyPacket6IgnoresUnknownOpcode) {
 TEST(SimApply6, ApplyPacket6RoutesOwnedOpcodes) {
     FullReset();
     RelationState& rel = Apply6_Relations();
-    rel.personId[0] = 1; rel.aliveMarker[0] = 0;
-    rel.personId[1] = 2; rel.aliveMarker[1] = 0;
+    SeedPerson(0, 1);
+    SeedPerson(1, 2);
     rel.A(1, 0) = 0;
     CommandPacket p = MakePacket(kOp6ComputeObjectCoords);
     p.put32(16, 2); p.put32(20, 1); p.put32(24, 7); p.put32(28, 0);

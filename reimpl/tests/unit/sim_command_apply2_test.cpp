@@ -248,12 +248,14 @@ TEST(SimCmdApply2, SwapOfficeHolders_StatusOnSuccess) {
     CommandPacket p{}; p.opcode() = 0x5C;
     AckEntry ack{};
     CHECK_EQ(ExSwapOfficeHolders(p, &ack), 1);
-    CHECK_EQ(ack.status, 1); // *v3 = 1 on success
+    // 0x49d1dd: `test eax,eax; jnz loc_49D1ED` -> `mov [edx],1` runs ONLY when
+    // SwapHolders result != 0. result==0 keeps the entry stamp +0=2. Return (result==0).
+    CHECK_EQ(ack.status, 2); // result==0 -> [edx]=1 NOT taken, stays at entry stamp 2
 
     SetOfficeSwapHook([](const i32*) -> i32 { return 3; });
     AckEntry ack2{};
     CHECK_EQ(ExSwapOfficeHolders(p, &ack2), 0);
-    CHECK_EQ(ack2.status, 2); // left at the +0=2 entry stamp on failure
+    CHECK_EQ(ack2.status, 1); // result!=0 -> mov [edx],1
     SetOfficeSwapHook(nullptr);
 }
 

@@ -15,7 +15,10 @@ i32 SelectTileMeshLod(float scaleX) {
     // v51 = 50.0 / scaleX ; v53 = v51 + 0.5 ; t = (int)v53 (trunc toward 0,
     // VIBE_Coord_ConvertX); v54 = t / 4 (the MSVC signed div-by-4 idiom in the
     // decompile: ((t - (4*(t>>31) + cf)) >> 2) == truncating division by 4).
-    double v53 = (double)(kLodNumer / scaleX) + kLodBias;
+    // fdiv dword ptr [esi+10h]: 50.0f and scaleX are loaded float -> x87 80-bit
+    // quotient; fadd dbl_628BB4 (double 0.5) stays wide; ConvertX truncates. Model
+    // the wide division/add with double so we don't round the quotient to float32.
+    double v53 = (double)kLodNumer / (double)scaleX + kLodBias;
     i32 t = (i32)v53;          // ConvertX truncates toward zero
     i32 v54 = t / 4;           // truncating signed division by 4
     i32 lod = v54;
@@ -26,7 +29,11 @@ i32 SelectTileMeshLod(float scaleX) {
 
 i32 SelectTileMeshLodFromBounds(float minX, float maxX, i32 size) {
     // scaleX = (maxX - minX) / (size + flt_628BA4)  (flt_628BA4 = -1.75)
-    float scaleX = (maxX - minX) / ((float)size + kGridDenomBias);
+    // Binary: fild size -> double, + flt_628BA4(-1.75); (maxX-minX) computed x87;
+    // quotient stored to [esi+16] as float32. Do the divide wide, then round to
+    // float to match the store (which SelectTileMeshLod reads back as float).
+    float scaleX = (float)(((double)maxX - (double)minX) /
+                           ((double)size + (double)kGridDenomBias));
     return SelectTileMeshLod(scaleX);
 }
 

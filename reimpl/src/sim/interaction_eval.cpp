@@ -27,8 +27,12 @@ using ai::ItemSummary;
 const u16 kGestureItems[9]       = {341, 349, 0, 351, 345, 357, 358, 363, 368};
 const u16 kTalkItems[2]          = {371, 347};
 const u16 kFlirtItems[2]         = {360, 364};
-const u16 kInsultItems[5]        = {380, 369, 348, 346, 0}; // slot4 stale -> 0
-const u16 kSocialGestureItems[7] = {361, 362, 376, 381, 365, 379, 0}; // v26[12]=stale
+// 0x470620: v16[0]=380, v17=369, v18=stale, v19=348, v20=346 -> stale is SLOT 2,
+// not slot 4 (12-byte stride; the stale v18 = v9 register sits between 369 and 348).
+const u16 kInsultItems[5]        = {380, 369, 0, 348, 346};
+// 0x46ff00: v26[0]=361, v26[6]=362, v26[12]=stale, v26[18]=376, v26[24]=381,
+// v26[30]=365, v26[36]=379 -> stale is SLOT 2.
+const u16 kSocialGestureItems[7] = {361, 362, 0, 376, 381, 365, 379};
 const u16 kGroupGreetItems[3]    = {354, 355, 356};
 
 // ===========================================================================
@@ -43,6 +47,9 @@ static int DefWealth(u16) { return 0; }
 static int DefDispatch(int, u16) { return 0; }
 static bool DefQuery(i32, int, int, int, int) { return false; }
 static int DefPrice(int, u8) { return 0; }
+// Default office rank: model the lookup-fail path (officeByte >= 0x25 -> v10=7),
+// so a cold actor lands on slot 7 of the gesture acquire scan as the binary would.
+static int DefOfficeRank(u8) { return -1; }
 
 void ResetEvalLeafHooks() {
     g_evalHooks.currencyAmount = DefCurrency;
@@ -50,6 +57,7 @@ void ResetEvalLeafHooks() {
     g_evalHooks.dispatchByType = DefDispatch;
     g_evalHooks.queryFind = DefQuery;
     g_evalHooks.marketPrice = DefPrice;
+    g_evalHooks.officeRank = DefOfficeRank;
 }
 namespace {
 struct HookInit { HookInit() { ResetEvalLeafHooks(); } } g_hookInit;
@@ -69,132 +77,227 @@ struct HookInit { HookInit() { ResetEvalLeafHooks(); } } g_hookInit;
 //
 // `rejectIfPriorResult` matches the `if (a1) return 0;` guard present in
 // Gesture/Insult/SocialGesture/Group/SelectWorker but absent in Talk/Flirt/Drink.
-// `acquireMode`/`useMode` are the planner mode args (2 for acquire; 3 or 4 for use).
+//
+// Earlier this was one over-generalized `RunSocialChoice`. It is NOT 1:1: the
+// per-function "use now" slot dispatch and Gesture's office-rank acquire start
+// differ between the five evals (verified against 0x46ef04/0x46f2a4/0x46f578/
+// 0x470620/0x46f7fc disasm). Each is now translated explicitly.
+//
+// Shared classify-prologue helper: build the slot table, classify, and apply the
+// two early rejects. Returns false (with *code = 0) if rejected, else fills `slots`
+// and `summary`. `branch` reports which path the summary selects:
+//   0 = "acquire" (accessibleNodes<6 && usable==0)
+//   1 = "use now" (otherwise, usable>0)
+//   2 = reject (otherwise, usable==0)
 // ===========================================================================
-struct SocialResult {
-    char code = 0;
-    EvalFrame a, b;
-    bool accepted = false;
-};
-
-static SocialResult RunSocialChoice(char result, char armed, EvalActor* actor,
-                                    const u16* items, int n, char defaultCode,
-                                    bool rejectIfPriorResult, int useMode) {
-    SocialResult out;
-    char actionCode = result ? result : defaultCode;
-    if (armed) { out.code = 0; return out; }
-    if (rejectIfPriorResult && result) { out.code = 0; return out; }
-
-    ItemSlot slots[16] = {};
-    for (int i = 0; i < n; ++i) slots[i].itemId = items[i];
-    ItemSummary summary;
+static bool ClassifyPrologue(EvalActor* actor, const u16* items, int n,
+                             ItemSlot* slots, ItemSummary& summary, int& branch) {
+    for (int i = 0; i < n; ++i) { slots[i] = ItemSlot{}; slots[i].itemId = items[i]; }
     ai::ClassifyItemsHook()(actor, n, slots, &summary);
-
-    // if (summary.accessibleNodes==6 && !usable) return 0;
-    if (summary.accessibleNodes == 6 && summary.usableCount == 0) { out.code = 0; return out; }
-    // if (summary.blockedCount==n) return 0;
-    if (summary.blockedCount == n) { out.code = 0; return out; }
-
-    if (summary.accessibleNodes < 6 && summary.usableCount == 0) {
-        // "acquire" branch: pick the first blocked slot starting at a random offset.
-        int slot = ai::RandomModulo(static_cast<u16>(n));
-        // scan forward (mod n) to a slot whose available != 0 (blocked == -1).
-        while (slots[slot].available != 0)
-            slot = (slot + 1) % n;
-        i32 itemId = slots[slot].objectId; // the binary reads object/item id here
-        out.a.set_kind(2);
-        out.a.set_arg1(1);
-        out.a.set_arg0(itemId >> 16);
-        out.a.set_scoreBits(ai::kScoreBits005);
-        out.b.set_kind(7);
-        out.b.set_arg0(actor->entityId);
-        out.b.set_arg1(1);
-        char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId,
-                                      &out.a, 2, &out.b);
-        out.code = r;
-        out.accepted = (r != 0);
-        return out;
-    }
-
-    if (summary.usableCount == 0) { out.code = 0; return out; }
-
-    // "use now" branch: pick the first usable slot (available >= 1) from a random
-    // offset, build a "use" frame, and (depending on slot) call the planner or
-    // return the default code directly.
-    int slot = ai::RandomModulo(static_cast<u16>(n));
-    while (slots[slot].available < 1)
-        slot = (slot + 1) % n;
-    out.a.set_kind(1);
-    out.a.set_arg0(slots[slot].objectId);
-    out.a.set_arg1(1);
-    out.b.set_kind(0);
-    out.b.set_arg0(-1);
-    out.b.set_arg1(-1);
-    out.b.set_arg2(defaultCode);
-
-    // The Talk/Flirt/Insult/Drink variants gate which slots go through the planner
-    // (useMode) vs return the default directly. We model the common cases:
-    //   slot 0 -> planner (mode useMode); else -> direct default.
-    // (Gesture/SocialGesture have richer slot dispatch handled in their wrappers.)
-    if (slot == 0) {
-        char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId,
-                                      &out.a, useMode, &out.b);
-        out.code = r;
-        out.accepted = (r != 0);
-    } else {
-        out.code = defaultCode;
-        out.accepted = true;
-    }
-    return out;
+    if (summary.accessibleNodes == 6 && summary.usableCount == 0) return false;
+    if (summary.blockedCount == n) return false;
+    if (summary.accessibleNodes < 6 && summary.usableCount == 0) { branch = 0; return true; }
+    if (summary.usableCount == 0) return false;
+    branch = 1;
+    return true;
 }
 
-static char Emit(SocialResult& r, EvalFrame* outA, EvalFrame* outB) {
-    if (r.accepted) {
-        if (outA) *outA = r.a;
-        if (outB) *outB = r.b;
-    }
-    return r.code;
+// Build the standard "acquire" frame pair (kind 2 / companion kind 7) and run the
+// planner (mode 2). `startSlot` is the scan start; scans forward to the first slot
+// with available==0. Common to all five evals' acquire branch.
+static char AcquireBranch(EvalActor* actor, ItemSlot* slots, int n, int startSlot,
+                          char actionCode, EvalFrame* outA, EvalFrame* outB) {
+    int slot = startSlot;
+    while (slots[slot].available != 0)
+        slot = (slot + 1) % n;
+    i32 word = slots[slot].objectId;
+    EvalFrame a, b;
+    a.set_kind(2);
+    a.set_arg1(1);
+    a.set_arg0(word >> 16);
+    a.set_scoreBits(ai::kScoreBits005);
+    b.set_kind(7);
+    b.set_arg0(actor->entityId);
+    b.set_arg1(1);
+    char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId, &a, 2, &b);
+    if (r) { if (outA) *outA = a; if (outB) *outB = b; }
+    return r;
 }
 
 // gilde.exe 0x46ef04 — EvalChooseGesture (9 items, default 28, rejectIfPrior).
+// Acquire-branch slot start is OFFICE-RANK derived (no RNG draw): officeRank<4 ->
+// 0; <7 -> 2; else 4; lookup fail -> 7. Use-now: slot 8 -> planner (mode 3); any
+// other usable slot -> return 28 directly (no planner call).
 char EvalChooseGesture(char result, EvalActor* actor, EvalFrame* outA,
                        char armed, EvalFrame* outB) {
-    SocialResult r = RunSocialChoice(result, armed, actor, kGestureItems, 9, 28,
-                                     /*rejectIfPriorResult=*/true, /*useMode=*/3);
-    return Emit(r, outA, outB);
+    char actionCode = result ? result : 28;
+    if (armed) return 0;
+    if (result) return 0;
+
+    ItemSlot slots[9] = {};
+    ItemSummary summary;
+    int branch;
+    if (!ClassifyPrologue(actor, kGestureItems, 9, slots, summary, branch))
+        return 0;
+
+    if (branch == 0) {
+        int rank = g_evalHooks.officeRank(actor->office);
+        int start;
+        if (rank < 0)            start = 7;   // lookup failed
+        else if (rank < 4)       start = 0;
+        else if (rank < 7)       start = 2;
+        else                     start = 4;
+        return AcquireBranch(actor, slots, 9, start, actionCode, outA, outB);
+    }
+
+    int slot = ai::RandomModulo(9u);
+    while (slots[slot].available < 1)
+        slot = (slot + 1) % 9;
+    EvalFrame a, b;
+    a.set_kind(1);
+    a.set_arg0(slots[slot].objectId);
+    a.set_arg1(1);
+    b.set_kind(0);
+    b.set_arg0(-1);
+    b.set_arg1(-1);
+    b.set_arg2(28);
+    if (slot == 8) {
+        char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId, &a, 3, &b);
+        if (r) { if (outA) *outA = a; if (outB) *outB = b; }
+        return r;
+    }
+    if (outA) *outA = a;
+    if (outB) *outB = b;
+    return 28;
 }
 
 // gilde.exe 0x46f2a4 — EvalChooseTalkAction (2 items, default 29, no prior-reject).
+// Acquire start is RNG. Use-now: slot 0 -> planner (mode 4); slot != 0 -> return 29.
 char EvalChooseTalkAction(char result, EvalActor* actor, EvalFrame* outA,
                           char armed, EvalFrame* outB) {
-    SocialResult r = RunSocialChoice(result, armed, actor, kTalkItems, 2, 29,
-                                     /*rejectIfPriorResult=*/false, /*useMode=*/4);
-    return Emit(r, outA, outB);
+    char actionCode = result ? result : 29;
+    if (armed) return 0;
+
+    ItemSlot slots[2] = {};
+    ItemSummary summary;
+    int branch;
+    if (!ClassifyPrologue(actor, kTalkItems, 2, slots, summary, branch))
+        return 0;
+
+    if (branch == 0) {
+        int start = ai::RandomModulo(2u);
+        return AcquireBranch(actor, slots, 2, start, actionCode, outA, outB);
+    }
+
+    int slot = ai::RandomModulo(2u);
+    while (slots[slot].available < 1)
+        slot = (slot + 1) % 2;
+    EvalFrame a, b;
+    a.set_kind(1);
+    a.set_arg0(slots[slot].objectId);
+    a.set_arg1(1);
+    b.set_kind(0);
+    b.set_arg0(-1);
+    b.set_arg1(-1);
+    b.set_arg2(29);
+    if (slot != 0) {
+        if (outA) *outA = a;
+        if (outB) *outB = b;
+        return 29;
+    }
+    char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId, &a, 4, &b);
+    if (r) { if (outA) *outA = a; if (outB) *outB = b; }
+    return r;
 }
 
 // gilde.exe 0x46f578 — EvalChooseFlirtAction (2 items, default 30, no prior-reject).
+// Acquire start is RNG. Use-now: ALWAYS returns 30 directly (no planner call at all,
+// for any slot) — the binary builds the frames and `return 30`.
 char EvalChooseFlirtAction(char result, EvalActor* actor, EvalFrame* outA,
                            char armed, EvalFrame* outB) {
-    SocialResult r = RunSocialChoice(result, armed, actor, kFlirtItems, 2, 30,
-                                     /*rejectIfPriorResult=*/false, /*useMode=*/0);
-    return Emit(r, outA, outB);
+    char actionCode = result ? result : 30;
+    if (armed) return 0;
+
+    ItemSlot slots[2] = {};
+    ItemSummary summary;
+    int branch;
+    if (!ClassifyPrologue(actor, kFlirtItems, 2, slots, summary, branch))
+        return 0;
+
+    if (branch == 0) {
+        int start = ai::RandomModulo(2u);
+        return AcquireBranch(actor, slots, 2, start, actionCode, outA, outB);
+    }
+
+    int slot = ai::RandomModulo(2u);
+    while (slots[slot].available < 1)
+        slot = (slot + 1) % 2;
+    EvalFrame a, b;
+    a.set_kind(1);
+    a.set_arg0(slots[slot].objectId);
+    a.set_arg1(1);
+    b.set_kind(0);
+    b.set_arg0(-1);
+    b.set_arg1(-1);
+    b.set_arg2(30);
+    if (outA) *outA = a;
+    if (outB) *outB = b;
+    return 30;
 }
 
 // gilde.exe 0x470620 — EvalChooseInsultAction (5 items, default 34, rejectIfPrior).
+// Acquire start is RNG. Use-now: slot 0 -> planner (mode 4); slots 1..3 -> planner
+// (mode 3); slot >= 4 -> return 34 directly.
 char EvalChooseInsultAction(char result, EvalActor* actor, EvalFrame* outA,
                             char armed, EvalFrame* outB) {
-    SocialResult r = RunSocialChoice(result, armed, actor, kInsultItems, 5, 34,
-                                     /*rejectIfPriorResult=*/true, /*useMode=*/3);
-    return Emit(r, outA, outB);
+    char actionCode = result ? result : 34;
+    if (armed) return 0;
+    if (result) return 0;
+
+    ItemSlot slots[5] = {};
+    ItemSummary summary;
+    int branch;
+    if (!ClassifyPrologue(actor, kInsultItems, 5, slots, summary, branch))
+        return 0;
+
+    if (branch == 0) {
+        int start = ai::RandomModulo(5u);
+        return AcquireBranch(actor, slots, 5, start, actionCode, outA, outB);
+    }
+
+    int slot = ai::RandomModulo(5u);
+    while (slots[slot].available < 1)
+        slot = (slot + 1) % 5;
+    EvalFrame a, b;
+    a.set_kind(1);
+    a.set_arg0(slots[slot].objectId);
+    a.set_arg1(1);
+    b.set_kind(0);
+    b.set_arg0(-1);
+    b.set_arg1(-1);
+    b.set_arg2(34);
+    if (slot == 0) {
+        char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId, &a, 4, &b);
+        if (r) { if (outA) *outA = a; if (outB) *outB = b; }
+        return r;
+    }
+    if (slot < 4) {
+        char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId, &a, 3, &b);
+        if (r) { if (outA) *outA = a; if (outB) *outB = b; }
+        return r;
+    }
+    if (outA) *outA = a;
+    if (outB) *outB = b;
+    return 34;
 }
 
 // gilde.exe 0x46f7fc — EvalChooseDrinkAction (1 item, default 31, no prior-reject).
 // The single item is 382 when the actor is already drinking (a2[11]!=0), else 373
-// but with a 2-in-3 reject (RandomModulo(3) != 0 -> 0).
+// but with a 2-in-3 reject (RandomModulo(3) != 0 -> 0). Use-now is single-slot
+// (slot 0) -> planner (mode 4).
 char EvalChooseDrinkAction(char result, EvalActor* actor, EvalFrame* outA,
                            char armed, EvalFrame* outB) {
     char actionCode = result ? result : 31;
-    (void)actionCode;
     if (armed) return 0;
     u16 item;
     if (actor->drinkState) {
@@ -204,9 +307,28 @@ char EvalChooseDrinkAction(char result, EvalActor* actor, EvalFrame* outA,
             return 0;           // 2-in-3 reject when sober
         item = kDrinkItemSober; // 373
     }
-    SocialResult r = RunSocialChoice(result, armed, actor, &item, 1, 31,
-                                     /*rejectIfPriorResult=*/false, /*useMode=*/4);
-    return Emit(r, outA, outB);
+
+    ItemSlot slots[1] = {};
+    ItemSummary summary;
+    int branch;
+    if (!ClassifyPrologue(actor, &item, 1, slots, summary, branch))
+        return 0;
+
+    if (branch == 0)
+        return AcquireBranch(actor, slots, 1, 0, actionCode, outA, outB);
+
+    // single usable slot (slot 0) -> planner mode 4.
+    EvalFrame a, b;
+    a.set_kind(1);
+    a.set_arg0(slots[0].objectId);
+    a.set_arg1(1);
+    b.set_kind(0);
+    b.set_arg0(-1);
+    b.set_arg1(-1);
+    b.set_arg2(31);
+    char r = ai::SelectBestHook()(static_cast<u8>(actionCode), actor->personId, &a, 4, &b);
+    if (r) { if (outA) *outA = a; if (outB) *outB = b; }
+    return r;
 }
 
 // ===========================================================================
@@ -336,7 +458,10 @@ static int (*g_socialTargetHook)(EvalActor*, u16 itemId) = nullptr;
 
 char EvalChooseSocialGesture(char result, EvalActor* actor, EvalFrame* outA,
                              char armed, EvalFrame* outB) {
-    char actionCode = result ? result : 33;
+    // 0x46ff00: v7 = a1 ? a1 : 28 — the planner classId default is 28 (NOT 33). The
+    // direct-return short-circuit and the companion frame tag use 33 (v28[4]=33;
+    // `return 33`). Don't conflate the two.
+    char actionCode = result ? result : 28;
     if (armed) return 0;
     if (result) return 0;
 

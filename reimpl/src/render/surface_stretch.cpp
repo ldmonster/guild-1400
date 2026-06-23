@@ -46,21 +46,27 @@ u8 StretchSurface8(const StretchSurfaceDesc& dst, const StretchSurfaceDesc& src)
     return last;
 }
 
-// gilde.exe 0x436488 — VIBE_Render_StretchSurface8Up
-//   v2=src(a1), a2=dst. SRC-driven: for each src row i in [0,dst? ] ... NOTE the
-//   original loops `i < a2[2]` (dst.height) and reads `v2[...]` (src). dst row dst
-//   base = a2[9] + a2[4]*i; src row = v2[4]*(v2[2]*i/a2[2]) + v2[9]; for each col j
-//   in [0,dst.width): dst col = j*v2[3]/a2[3]; write src byte sequentially.
-u8 StretchSurface8Up(const StretchSurfaceDesc& src, const StretchSurfaceDesc& dst) {
+// gilde.exe 0x436488 — VIBE_Render_StretchSurface8Up  (eax=dst, edx=src)
+//   Up-sample by reading the SMALLER source (edx=a2) row sequentially and
+//   SCATTERING each byte into the LARGER destination (eax=a1). Verified against
+//   disasm (DISASM is the reference of record; Hex-Rays' a1/a2 naming is reversed):
+//     edi = eax (a1, DST written)   esi = edx (a2, SRC read)
+//     ebx (read cursor) = a2.pixels + a2.pitch*i              (++ebx each col)
+//     ebp (write base)  = a1.pixels + a1.pitch*(a1.h*i/a2.h)
+//     loop i < a2.height (esi[2]);  inner col < a2.width (esi[0xC])
+//     write addr = ebp + (a1.width*c / a2.width)   value = *ebx
+//   First positional arg (`dst`) = eax = the larger write target; second (`src`) =
+//   edx = the smaller sequential read source.
+u8 StretchSurface8Up(const StretchSurfaceDesc& dst, const StretchSurfaceDesc& src) {
     u8 last = 0;
-    for (u32 i = 0; i < static_cast<u32>(dst.height); ++i) {           // i < a2[2]
-        u8* dRow = dst.pixels + dst.pitch * i;                         // a2[9] + a2[4]*i
-        const u8* s = src.pixels
-            + src.pitch * (static_cast<u32>(src.height) * i / static_cast<u32>(dst.height)); // v2[4]*(v2[2]*i/a2[2]) + v2[9]
-        for (u32 j = 0; j < static_cast<u32>(dst.width); ++j) {        // v5 < a2[3]
-            last = *s;                                                 // al = *v3
-            dRow[j * static_cast<u32>(src.width) / static_cast<u32>(dst.width)] = *s; // scatter
-            ++s;
+    for (u32 i = 0; i < static_cast<u32>(src.height); ++i) {          // i < a2[2] (src.h)
+        const u8* sRow = src.pixels + src.pitch * i;                  // ebx: a2[9] + a2[4]*i
+        u8* wBase = dst.pixels
+            + dst.pitch * (static_cast<u32>(dst.height) * i / static_cast<u32>(src.height)); // ebp: a1[4]*(a1[2]*i/a2[2]) + a1[9]
+        for (u32 c = 0; c < static_cast<u32>(src.width); ++c) {       // c < a2[3] (src.w)
+            last = *sRow;                                             // al = *ebx
+            wBase[c * static_cast<u32>(dst.width) / static_cast<u32>(src.width)] = *sRow; // scatter into dst
+            ++sRow;                                                   // ++ebx
         }
     }
     return last;
@@ -117,8 +123,11 @@ u16* StretchAverage16(const StretchSurfaceDesc& dst, const StretchSurfaceDesc& s
 }
 
 // gilde.exe 0x437814 — VIBE_Render_Convert24To16
-//   24bpp source bytes are (B,G,R) in memory order: *result=B, +1=G, +2=R. Dest
-//   field positions/precisions derived from the DEST masks.
+//   Verified against disasm (0x43790e..0x437954): the source byte at offset +0
+//   feeds the R channel (rPos/rBits), +1 feeds G, +2 feeds B. i.e. memory order is
+//   (R,G,B), NOT (B,G,R). The original `sar` of a `movzx`-ed byte (0..255) by a
+//   non-negative count is identical to an unsigned shift. Dest field
+//   positions/precisions derived from the DEST masks (a1[22..24]).
 u32 Convert24To16(const StretchSurfaceDesc& dst, const StretchSurfaceDesc& src) {
     const int rPos  = MaskPos(dst.rMask), rBits = MaskBits(dst.rMask);  // i / j
     const int gPos  = MaskPos(dst.gMask), gBits = MaskBits(dst.gMask);  // k / m
@@ -133,9 +142,9 @@ u32 Convert24To16(const StretchSurfaceDesc& dst, const StretchSurfaceDesc& src) 
         u16* d = reinterpret_cast<u16*>(dst.pixels + dst.pitch * row);  // a1[4]*v11 + a1[9]
         const u8* s = src.pixels + src.pitch * row;                     // a2[4]*v11 + a2[9]
         for (u32 col = 0; col < static_cast<u32>(src.width); ++col) {   // v9 < a2[3]
-            const u8 B = s[0];
-            const u8 G = s[1];
-            const u8 R = s[2];
+            const u8 R = s[0];   // byte[+0] -> R channel (8-bit shift via sar==shr)
+            const u8 G = s[1];   // byte[+1] -> G channel
+            const u8 B = s[2];   // byte[+2] -> B channel
             result = (static_cast<u32>(R >> rDrop) << rPos)
                    | (static_cast<u32>(G >> gDrop) << gPos)
                    | (static_cast<u32>(B >> bDrop) << bPos);
@@ -182,7 +191,9 @@ ConvertSurf16 AsDst16(const StretchSurfaceDesc& d) {
 //   Depth match gate, then size-relative dispatch. Only 8bpp/16bpp paths are
 //   reconstructed; 24/32bpp average/interpolate leaves are deferred.
 u8 StretchSurfaceDispatch(StretchSurfaceDesc& dst, const StretchSurfaceDesc& src) {
-    u8 status = 0;
+    // v3 (the return register, al) starts as src.bpp (`mov eax,[edx+54h]`). On either
+    // gate-fail the function returns `(char)src.bpp` — NOT 0.
+    u8 status = static_cast<u8>(src.bpp);
     if (static_cast<u32>(src.bpp) != static_cast<u32>(dst.bpp))   // bpp != a1[21]
         return status;
     // Gate: indexed OR 16/24/32 bpp.
@@ -195,8 +206,10 @@ u8 StretchSurfaceDispatch(StretchSurfaceDesc& dst, const StretchSurfaceDesc& src
             return StretchSurface8(dst, src);
         if (src.bpp == 16)
             return static_cast<u8>(reinterpret_cast<std::uintptr_t>(StretchAverage16(dst, src)));
-        // 24/32 average leaves deferred
-        return status;
+        // 24/32 average leaves deferred (StretchAverage24@0x436078 / Average32@0x436228).
+        // At this point the return register v3 == dst.width (`mov eax,[ebp+0Ch]`); the
+        // leaf would overwrite its low byte. Boundary: leaf not in tree.
+        return static_cast<u8>(dst.width);
     } else if (dst.width == src.width) {
         // straight per-row copy; rowBytes depends on bpp (indexed = width bytes)
         int rowBytes;
@@ -209,9 +222,10 @@ u8 StretchSurfaceDispatch(StretchSurfaceDesc& dst, const StretchSurfaceDesc& src
     } else {
         // up-sample
         if (src.indexed)
-            return StretchSurface8Up(src, dst);
-        // 16/24/32 interpolate leaves deferred
-        return status;
+            return StretchSurface8Up(dst, src);   // eax=a1=dst, edx=a2=src
+        // 16/24/32 interpolate leaves deferred (StretchInterpolate16@0x436504 /
+        // 24@0x436aa4 / 32@0x436f30). Return register v3 == dst.width here. Boundary.
+        return static_cast<u8>(dst.width);
     }
 }
 

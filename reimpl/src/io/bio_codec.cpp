@@ -174,12 +174,18 @@ guild::u32 BioReadArrayQuick(VfsHandle* h, guild::u32 expectStride, void** out) 
 int ZipTellCurrentFile(const void* unzPtr) {
     if (!unzPtr)
         return kUnzParamError;
+    // The unz_s +124 slot holds a pointer and the file-info +24 slot a dword.
+    // In a byte-modeled struct these offsets are not naturally aligned for a
+    // native pointer/int, so read them via memcpy (byte-identical, no UB).
     const unsigned char* base = static_cast<const unsigned char*>(unzPtr);
-    const void* fileInfo = *reinterpret_cast<void* const*>(base + 124);
+    const void* fileInfo = nullptr;
+    std::memcpy(&fileInfo, base + 124, sizeof(fileInfo));
     if (!fileInfo)
         return kUnzParamError;
     const unsigned char* fi = static_cast<const unsigned char*>(fileInfo);
-    return *reinterpret_cast<const int*>(fi + 24);
+    int off;
+    std::memcpy(&off, fi + 24, sizeof(off));
+    return off;
 }
 
 // gilde.exe 0x5ffae0 — VIBE_Inflate_SyncPoint: return *a1 == 1.

@@ -23,14 +23,14 @@ constexpr double kTurnHi      = 0.04;                // dbl_61088C / dbl_61094C 
 constexpr double kTurnLo      = -0.04;               // dbl_610894 / dbl_610954  (aligned threshold -)
 constexpr double kTurnPerTick = 0.9090909090909092;  // dbl_61089C / dbl_61095C  (10/11)
 constexpr double kCartTurn    = 0.4000000059604645;  // flt_6108A4 / flt_610964
-constexpr double kRunThresh   = 2.094395102393333;   // dbl_6108AC / dbl_61096C  (2*pi/3)
-constexpr double kBucketHalfPi= 1.570796326795;      // dbl_6108B4 / dbl_610974  (pi/2)
-constexpr double kBucketPi3   = 1.047197551196667;   // dbl_6108BC / dbl_61097C  (pi/3)
-constexpr double kBucketPi6   = 0.5235987755983333;  // dbl_6108C4 / dbl_610984  (pi/6)
+constexpr double kRunThresh   = 2.0943951023931953;  // dbl_6108AC 0x4000c152382d749b (2*pi/3)
+constexpr double kBucketHalfPi= 1.5707963267948966;  // dbl_6108B4 0x3ff921fb54442eea (pi/2)
+constexpr double kBucketPi3   = 1.0471975511965976;  // dbl_6108BC 0x3ff0c152382d749d (pi/3)
+constexpr double kBucketPi6   = 0.5235987755982988;  // dbl_6108C4 0x3fe0c152382d749c (pi/6)
 constexpr double kFac150      = 1.5;                  // dbl_6108CC / dbl_61098C  (1.5 ... 2.0 in monolith!)
 constexpr double kFac014      = 0.14;                // dbl_6108D4 / dbl_610994
 constexpr double kFac020      = 0.2;                 // dbl_6108DC / dbl_61099C
-constexpr double kTwoPi       = 6.28318530718;       // dbl_6108E4 / dbl_6109AC
+constexpr double kTwoPi       = 6.283185307179586;   // dbl_6108E4 0x401921fb54442eea (2*pi)
 
 // Arrival "missed threshold" multiplier on the segment length:
 constexpr double kMissedThresh = 1.4;                // dbl_610884 / dbl_610944? (Rotation uses 1.4;
@@ -46,6 +46,10 @@ constexpr float  kSpeedMulStairs = 2.5f;                // flt_6108F4 (tile 6/11
 constexpr float  kSpeedMulCartFl = 1.7000000476837158f; // flt_6108F8 (cart, flat)
 constexpr float  kSpeedMulCartSt = 1.899999976158142f;  // flt_6108FC (cart, stairs/water)
 constexpr float  kTileFactorDflt = 0.69999999f;         // v20 default (0.7)
+// Indoor tile factor: dword_62D07C @0x62D07C — a config-set runtime global,
+// static-init value 1.0 (0x3f800000). Used in place of the 0.7 default when the
+// mesh has an indoor floor. NOT mounted-dependent.
+constexpr float  kIndoorTileFactor = 1.0f;              // dword_62D07C (default 1.0)
 
 // Monolith Dispatcher's distinct duration-scale (segment) constants for indoor:
 constexpr double kIndoorDurMono = 1.2;               // dbl_61093C
@@ -353,9 +357,15 @@ int WalkUpdate(WalkState* st, float frameStep) {
     // Update the anim playback speed from the tile ahead.
     if (tileAhead && tileAhead != 13 && st->anim) {
         bool mounted = (av->flag1 & 8) != 0;
+        // gilde.exe 0x40a3e3..0x40a40b:
+        //   v22 = 0.69999999 (default tile factor);
+        //   if (mesh.floorHandle == -1 && mesh+512) v22 = dword_62D07C.
+        // dword_62D07C is a config-controlled runtime global (default 1.0 at
+        // 0x62D07C); it is NOT mounted-dependent. The condition keys off the mesh
+        // floor handle, modeled here by av->indoorFloor.
         float tileFactor = kTileFactorDflt;            // 0.7 default
         if (av->indoorFloor)                           // indoor floor present
-            tileFactor = mounted ? 1.0f : (1.0f + (float)kFac020); // 1.0 / 1.2
+            tileFactor = kIndoorTileFactor;            // dword_62D07C (default 1.0)
         // baseSpeed/ramp owned by the avatar in the engine; use 1.0 ramp here
         // (the ramp is verified separately via WalkAnimSpeed in the unit test).
         st->anim->speed = WalkAnimSpeed(1.0f, 1.0f, tileFactor, tileAhead, mounted);

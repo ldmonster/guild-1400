@@ -67,8 +67,7 @@ TEST(PSpawn_CreateEmitter, TemplateDefaults) {
     CHECK(sys->position[0] == 1.0f);
     CHECK(sys->position[1] == 2.0f);
     CHECK(sys->position[2] == 3.0f);
-    delete[] static_cast<unsigned char*>(sys->particles);
-    delete[] reinterpret_cast<unsigned char*>(sys);
+    FreeAllSpawnAllocations(); // wave-10: reclaim all four AllocSystem blocks
 }
 
 // SpawnSystemByType dispatches the integrator by template[0].
@@ -95,10 +94,8 @@ TEST(PSpawn_SpawnByType, Dispatch) {
     ParticleSystem* d = SpawnSystemByType(0, pos, np, 1, 0, 1.0f, tmpl, 2, 0);
     CHECK(d == nullptr);
 
-    for (ParticleSystem* s : {a, b, c}) {
-        delete[] static_cast<unsigned char*>(s->particles);
-        delete[] reinterpret_cast<unsigned char*>(s);
-    }
+    (void)a; (void)b; (void)c;
+    FreeAllSpawnAllocations(); // wave-10: reclaim all blocks (incl. scratch)
 }
 
 // SpawnSystemByType trigger path: flagByte1 bit0 set -> spawnedCount 0, bit1 set.
@@ -114,8 +111,7 @@ TEST(PSpawn_SpawnByType, TriggerPriming) {
     CHECK(s != nullptr);
     CHECK_EQ(s->spawnedCount, 0u);
     CHECK_EQ(s->flagByte1, 0x03u); // bit0 (orig) | bit1 (raised)
-    delete[] static_cast<unsigned char*>(s->particles);
-    delete[] reinterpret_cast<unsigned char*>(s);
+    FreeAllSpawnAllocations(); // wave-10
 }
 
 // AllocSystem reject conditions + alloc accounting + per-slot init.
@@ -153,8 +149,7 @@ TEST(PSpawn_AllocSystem, RejectsAndInits) {
         CHECK(as_f(p + 56) == 0.0f);
         CHECK(as_f(p + 0)  == 0.0f);
     }
-    delete[] static_cast<unsigned char*>(s->particles);
-    delete[] reinterpret_cast<unsigned char*>(s);
+    FreeAllSpawnAllocations(); // wave-10
 }
 
 // SetPosition forwards placement; null is a no-op returning null.
@@ -166,8 +161,7 @@ TEST(PSpawn_SetPosition, Forwards) {
     CHECK(SetPosition(s, pos) == s);
     CHECK(s->position[0] == 4.0f && s->position[1] == 5.0f && s->position[2] == 6.0f);
     CHECK(SetPosition(nullptr, pos) == nullptr);
-    delete[] static_cast<unsigned char*>(s->particles);
-    delete[] reinterpret_cast<unsigned char*>(s);
+    FreeAllSpawnAllocations(); // wave-10
 }
 
 // Kill* guard: valid -> free, invalid -> report.

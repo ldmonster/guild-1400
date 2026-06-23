@@ -125,6 +125,11 @@ struct NpcAction10Hooks {
 
     // --- text / voice / history / event-panel ---
     void (*sendMessage)(i32 targetId, int textId);    // Text_Render + He_SendEntityMessage
+    // VIBE_NpcAction_NotifyJoinLeaveGroup(tag, occupant, seat, -1) @0x4c9dec — the
+    // group join/leave/exec notifier. TavernSocializeState invokes it with the
+    // "new "/"exec" FourCC, the resolved tavern entity (occupant) and the type-301
+    // seat node; a4(personId) is unused for those two tags. null => inert.
+    void (*notifyJoinLeaveGroup)(u32 tag, void* occupant, void* seat);
     void (*playSample)(int channel, const char* name);
     i32  (*eventPanelCreate)(HeRecord* h);            // EventPanel_CreateSlot -> ok
     i32  (*eventPanelDestroy)(HeRecord* h);           // EventPanel_DestroySlot

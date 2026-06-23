@@ -24,6 +24,8 @@
 // SwitchActiveSlot, command emission) are out of this module's scope and routed
 // through the hook tables below, mirroring the existing charaction.h /
 // charaction_walk.h / npcaction*.h hook pattern.
+#include <cstring>
+
 #include "guild/common/types.h"
 #include "sim/he.h"
 
@@ -226,7 +228,16 @@ const GroupInteractHooks& GetGroupInteractHooks();
 //   +9    role byte (0 -> leader is the "from" id, else swapped).
 //   +92   partner/leader person id (dword).
 //   +104..+120  up to 5 member person ids (dword each; -1 == empty).
-inline i32& Gi_DwellCounter(HeRecord* h) { return *reinterpret_cast<i32*>(HeBytes(h) + 82); }
+// +82 is NOT 4-byte aligned (82 % 4 == 2). The original x86 binary reads it with an
+// unaligned `*(DWORD*)(h+82)`; in portable C++ binding an `i32&` to a misaligned
+// address is UB (UBSAN flags it). Use byte-exact memcpy load/store helpers instead —
+// the observable value (a 32-bit little-endian int at byte 82) is identical.
+inline i32 Gi_GetDwellCounter(HeRecord* h) {
+    i32 v; std::memcpy(&v, HeBytes(h) + 82, sizeof(v)); return v;
+}
+inline void Gi_SetDwellCounter(HeRecord* h, i32 v) {
+    std::memcpy(HeBytes(h) + 82, &v, sizeof(v));
+}
 inline i32& Gi_State(HeRecord* h)        { return *reinterpret_cast<i32*>(HeBytes(h) + 112); }
 inline float& Gi_Accum(HeRecord* h)      { return *reinterpret_cast<float*>(HeBytes(h) + 172); }
 

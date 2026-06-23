@@ -1,6 +1,7 @@
 // Unit tests for guild::render render_leaves3 — golden vectors computed with
 // python3 (CRC oracle: zlib.crc32; float math: IEEE single precision).
 #include "render/render_leaves3.h"
+#include "render/render_leaves4.h"  // g_rawLightingFlag (byte_649D70)
 #include "compress/crc.h"
 #include "test.h"
 
@@ -328,6 +329,14 @@ TEST(RenderLeaves3_CreateTile, InitFieldsAndMask) {
     // default strNCopyPad clone copies + NUL-pads.
     InstallRenderLeaves3Hooks(h);
 
+    // 0x5db955 — the original gates the whole init on byte_649D70 (g_rawLightingFlag);
+    // a clear flag short-circuits to a null return even when a slot was handed out.
+    g_rawLightingFlag = 0;
+    u32 counter0 = 100;
+    CHECK(CreateTileRecord("tile.bmp", 16, 1, 0, 0x1F, 0, &counter0, 77) == nullptr);
+    CHECK_EQ((int)counter0, 100);          // body skipped, counter untouched
+
+    g_rawLightingFlag = 1;
     u32 counter = 100;
     char* rec = CreateTileRecord("tile.bmp", /*size*/16, /*fmt*/1, /*extra*/0,
                                  /*flag1*/0x1F, /*flag2*/0, &counter, /*batch*/77);

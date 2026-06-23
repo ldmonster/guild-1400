@@ -100,12 +100,15 @@ TEST(NpcDailyE2E, FullDaySweep) {
     int chrmoveMorning = g_w.chrmove;
 
     // --- Work-start (hour 9 >= workStart 8): the second sweep fires AND state
-    // transitions to 1, appointment set to work-end hour. ---
+    // transitions to 1, appointment set to work-end hour. The morning-dispatched
+    // workers do NOT re-dispatch: the gate and the writeback are the SAME bit
+    // 0x1000 (BYTE1 |= 0x10 @0x4e8184; binary-verified — the earlier 0x100000
+    // gate was a misread), so chrmove stays at the morning count. ---
     SetNpcClock(GameTime{ 0, 9, 0, 0 });
     He_SavedTime(&rec).day = 0;       // saved-day == clock-day gate
     NpcDaily_DailyRoutineStep(&rec);
     CHECK_EQ(He_State(&rec), 1);
-    CHECK(g_w.chrmove > chrmoveMorning);
+    CHECK_EQ(g_w.chrmove, chrmoveMorning);
     CHECK_EQ(static_cast<int>(He_ApptTime(&rec).hour), 20); // work-end spring
 
     // --- Evening within window (hour 21 <= 22): social pass -> one tavern/home

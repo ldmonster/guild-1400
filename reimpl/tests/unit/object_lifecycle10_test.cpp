@@ -1,9 +1,16 @@
 #include "test.h"
 
 #include "sim/object_lifecycle10.h"
+#include "render/mesh_attach_textures.h"   // render::frame:: shared draw-block layout
 
 #include <cstring>
 #include <vector>
+
+// The reconciled per-LOD-frame STOCK/resident-gate slot AttachToUniverseNode reads:
+// LOD-frame_base(244) + a2[4] relocated slot(24) == 268 (the verbatim engine +260 on
+// a 32-bit build). The synthetic draw blocks below place the resident marker here.
+static constexpr int kResidentGate =
+    guild::render::frame::kLodFrameBase + guild::render::frame::kStockSlot;
 
 using namespace guild;
 using namespace guild::sim;
@@ -201,7 +208,7 @@ TEST(ObjLifecycle10, AttachToUniverseNodeResidentLinksAndSeats) {
     SceneNode10 node;
     std::vector<unsigned char> draw(0x910, 0);
     void* firstSub = reinterpret_cast<void*>(static_cast<std::intptr_t>(1));
-    SetBlockPtr(draw.data(), 260, firstSub);   // native-width resident marker
+    SetBlockPtr(draw.data(), kResidentGate, firstSub);   // native-width resident marker
     draw[2316] = 0;                            // submesh count 0 => no tex walk
     node.p(n10::kDrawData) = draw.data();
     g_spawned = &node;
@@ -236,7 +243,7 @@ TEST(ObjLifecycle10, AttachToUniverseNodeResidentLinksAndSeats) {
 
 TEST(ObjLifecycle10, AttachToUniverseNodeNonResidentDisposesReturnsNull) {
     SceneNode10 node;
-    std::vector<unsigned char> draw(0x910, 0);   // +260 == 0 => NOT resident
+    std::vector<unsigned char> draw(0x910, 0);   // gate (+268) == 0 => NOT resident
     node.p(n10::kDrawData) = draw.data();
     g_spawned = &node;
 
@@ -269,7 +276,7 @@ TEST(ObjLifecycle10, AttachToUniverseNodeNullSpawnReturnsNull) {
 TEST(ObjLifecycle10, AttachToUniverseNodeWithParentSkipsLinkIntoScene) {
     SceneNode10 node;
     std::vector<unsigned char> draw(0x910, 0);
-    SetBlockPtr(draw.data(), 260, reinterpret_cast<void*>(static_cast<std::intptr_t>(1)));
+    SetBlockPtr(draw.data(), kResidentGate, reinterpret_cast<void*>(static_cast<std::intptr_t>(1)));
     draw[2316] = 0;
     node.p(n10::kDrawData) = draw.data();
     g_spawned = &node;

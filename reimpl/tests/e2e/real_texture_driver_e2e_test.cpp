@@ -82,7 +82,16 @@ TEST(RealTextureDriverE2E, DriveRealTexturesBinToImage) {
     // ---- decode tier (real archive inventory) ----
     CHECK_EQ(r.archiveMembers, 2422);   // PKZIP central-dir total (dirs + leaves)
     CHECK_EQ(r.bmpMembers, 2370);       // real BMP leaves
-    CHECK_EQ(r.texturesDecoded, 1949);  // square BMPs the texture loader accepts
+    // RECALIBRATED (wave-5 W5-TX): was 1949 (8-bit square BMPs only). The ground
+    // tile textures (_DYNAMIC/Boden/*.bmp) are 24-bit, so DecodeBmpIntoTexture now
+    // runs the engine's 24-bit software-palettize arm (VIBE_Texture_LoadSoftPalettize
+    // @0x5da34c -> VIBE_Quant_BuildPalette @0x6029f0, render/texture_palettize.cpp)
+    // when the 8-bit BmpLoadBuffer yields nothing — exactly what the engine's
+    // VIBE_Texture_LoadByName software branch does for a 24-bit source. All 2370
+    // square BMPs now decode (the 8-bit + the 24-bit ones), not just the 8-bit
+    // subset. The old pin under-counted by skipping the 24-bit textures the engine
+    // loads. (squareTextures still == texturesDecoded: the square check gates both.)
+    CHECK_EQ(r.texturesDecoded, 2370);  // all square BMPs (8-bit + palettized 24-bit)
     CHECK_EQ(r.squareTextures, r.texturesDecoded);  // square check gates decode
     CHECK(!r.samples.empty());
 

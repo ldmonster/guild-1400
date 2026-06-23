@@ -80,8 +80,10 @@ TEST(SimCombat, CutsceneRandIntGolden) {
 TEST(SimCombat, CutsceneRandFloatGolden) {
     CutsceneRng rng;
     rng.state = 12345;
-    double expected[5] = {0.655181884765625, 0.304840087890625, 0.67498779296875,
-                          0.10675048828125, 0.5166015625};
+    // Goldens recomputed against the REAL flt_61D934 = float(0x38000100) =
+    // 3.0518509447574615e-05 (float-rounded 1/32767), NOT 2^-15. See combat.cpp.
+    double expected[5] = {0.6552018793299794, 0.30484939087182283, 0.6750083919614553,
+                          0.106753746047616, 0.5166173279285431};
     for (int i = 0; i < 5; ++i) {
         double f = rng.RandFloat();
         CHECK(std::fabs(f - expected[i]) < 1e-9);
@@ -187,6 +189,45 @@ TEST(SimCombat, FindNearestEnemyUnit) {
     CHECK_EQ(FindNearestEnemyUnit(0, 0, 1, weighted), &far);
 }
 
+// --- Wave-12 hardening: 0/max units and degenerate candidate lists ---------
+
+// FindNearestEnemyUnit over an entirely empty candidate list returns nullptr and
+// never dereferences a candidate (the loop body is skipped).
+TEST(SimCombat, FindNearestEnemyUnitEmpty) {
+    std::vector<UnitPose> empty;
+    CHECK(FindNearestEnemyUnit(0, 0, 1, empty) == nullptr);
+    // A list of only null-unit poses is also skipped safely.
+    std::vector<UnitPose> nulls = {{nullptr, 1.0f, 0.0f, 1.0},
+                                   {nullptr, 2.0f, 0.0f, 1.0}};
+    CHECK(FindNearestEnemyUnit(0, 0, 1, nulls) == nullptr);
+}
+
+// A full combat field: every capacity slot is occupied; FindUnitById must locate
+// the last-spawned id (scanning all kUnitCapacity slots) and Spawn must refuse a
+// further unit (no write past the fixed array).
+TEST(SimCombat, FullFieldFindAndSpawnRefused) {
+    CombatField field;
+    for (int i = 0; i < kUnitCapacity; ++i)
+        CHECK(field.Spawn(5000 + i, 100, 0) != nullptr);
+    // The last id lives in the highest slot — exercises the full scan.
+    CombatUnit* last = field.FindUnitById(5000 + kUnitCapacity - 1);
+    CHECK(last != nullptr);
+    CHECK_EQ(last->id, 5000 + kUnitCapacity - 1);
+    // Missing id over a full field scans all slots and returns nullptr.
+    CHECK(field.FindUnitById(999999) == nullptr);
+    // No free slot -> Spawn returns nullptr (does not over-index the array).
+    CHECK(field.Spawn(424242, 100, 0) == nullptr);
+}
+
+// ApplyUnitDeath with a zero max-HP baseline must not divide by zero: the ratio
+// is forced to 0.0 (< the death threshold) so the unit dies, with no UB.
+TEST(SimCombat, ApplyUnitDeathZeroMaxHpNoDivByZero) {
+    CombatUnit u{}; u.id = 1; u.alive = 1; u.hp = 0;
+    bool dead = ApplyUnitDeath(u, /*currentHp*/ 0.0, /*maxHp*/ 0.0);
+    CHECK(dead);
+    CHECK_EQ(static_cast<int>(u.alive), 0);
+}
+
 // ===========================================================================
 // Command hook (lockstep mock).
 // ===========================================================================
@@ -269,16 +310,21 @@ TEST(SimCombat, DuelShotMissAndHitScoring) {
         CHECK(r2.damage >= 15 && r2.damage <= 44);
         int drop = static_cast<int>(200.0 * 0.01 * r2.damage);
         CHECK_EQ(t2.hp, 100 - drop);
-        CHECK_EQ(static_cast<int>(s2.scoreA), r2.damage);
+        // Score is keyed on the TARGET (byte_6315DC/DD, esi at disasm 0x4a4c36).
+        // shooterIsA=true -> target is B -> scoreB accumulates.
+        CHECK_EQ(static_cast<int>(s2.scoreB), r2.damage);
     }
 }
 
 TEST(SimCombat, DuelAimNarrowsDamageBand) {
     // aim on -> RandInt(15)+5 (5..19); aim off -> RandInt(30)+15 (15..44).
+    // The aim gate is CROSS-WIRED (disasm 0x4a4c10..0x4a4c25): shooter A reads
+    // aimB (byte_6315E1), shooter B reads aimA (byte_6315E0). So to get the narrow
+    // band for shooterIsA=true we must set aimB.
     // Force a hit by giving a huge skill so chance >> any roll.
     for (int trial = 0; trial < 50; ++trial) {
         CutsceneRng rng; rng.state = 1000 + trial;
-        DuelState s; s.skillA = 100.0f; s.aimA = true;
+        DuelState s; s.skillA = 100.0f; s.aimB = true;
         CombatUnit t{}; t.hp = 1000; t.worth = 1.0f;
         DuelShotResult r = Duel_ResolveShot(s, true, t, rng);
         CHECK(r.hit);
@@ -287,24 +333,28 @@ TEST(SimCombat, DuelAimNarrowsDamageBand) {
 }
 
 TEST(SimCombat, DuelTauntAndAimFlags) {
-    // Taunt: defender's roll >= attacker's -> attacker rattled.
-    // Force determinism with crafted ratings.
+    // Taunt (gilde.exe 0x4a4eb4 choice-2, disasm-verified): v36 = RandFloat()
+    // + attackerSkill; if (RandFloat()+defenderRating4 >= v36) the DEFENDER
+    // prevails (jnb 0x4a5002) and NO rattle byte is set; ELSE the attacker LANDS
+    // the taunt and sets its OWN rattle byte (0x4a503f attackerIsA->rattledA /
+    // 0x4a5166 ->rattledB). Force determinism with crafted ratings.
     {
         CutsceneRng rng; rng.state = 4242;
         DuelState s;
-        // attackerSkill very low, defenderRating4 very high -> defender wins.
+        // attackerSkill low, defenderRating4 high -> defender prevails, no flag.
         DuelChoiceOutcome o = Duel_ResolveTaunt(s, /*attackerIsA=*/true,
                                                 /*attackerSkill=*/0.0f,
                                                 /*defenderRating4=*/100.0f, rng);
         CHECK(o == DuelChoiceOutcome::kTauntFailed);
-        CHECK(s.rattledA);
+        CHECK(!s.rattledA);
     }
     {
         CutsceneRng rng; rng.state = 4242;
         DuelState s;
+        // attackerSkill high -> attacker lands the taunt, sets rattledA.
         DuelChoiceOutcome o = Duel_ResolveTaunt(s, true, 100.0f, 0.0f, rng);
         CHECK(o == DuelChoiceOutcome::kTauntLanded);
-        CHECK(!s.rattledA);
+        CHECK(s.rattledA);
     }
     // Aim: RandFloat() < ownRating2 -> gain aim.
     {

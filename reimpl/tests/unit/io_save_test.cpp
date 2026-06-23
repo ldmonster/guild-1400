@@ -451,3 +451,103 @@ TEST(io_save, bio_primitives_wire_format) {
 
     VfsShutdown();
 }
+
+// ===========================================================================
+// Wave-11 hardening: malformed / truncated / oversized header+scalar streams.
+// Every loader must fail safely (return false) on a short/degenerate stream and
+// never read past the buffer. Valid-asset roundtrips above are unchanged.
+// ===========================================================================
+namespace {
+// Write a raw byte buffer to `path` through the VFS (caller has VfsInit'd).
+void WriteRawSave(const char* path, const std::vector<u8>& s) {
+    VfsHandle* w = VfsOpenFile(path, "wb");
+    CHECK(w != nullptr);
+    if (w) {
+        if (!s.empty())
+            CHECK_EQ(VfsWriteStream(s.data(), 1, w, (u32)s.size()), (u32)s.size());
+        VfsCloseStream(w);
+    }
+}
+} // namespace
+
+// 0-byte save: SaveLoadHeaderAndThumbnail can't even read the magic -> false.
+TEST(io_save, malformed_zero_byte_header) {
+    RwFs fs; VfsInit(&fs, false);
+    WriteRawSave("z.SAV", {});
+    SaveHeader h{};
+    VfsHandle* r = VfsOpenFile("z.SAV", "rb");
+    CHECK(r != nullptr);
+    CHECK(!SaveLoadHeaderAndThumbnail(r, h, nullptr));
+    VfsCloseStream(r);
+    VfsShutdown();
+}
+
+// 1-byte and header-magic-only saves: the magic is partially / fully read but the
+// subsequent fixed fields short-read -> false (no OOB).
+TEST(io_save, malformed_tiny_header) {
+    RwFs fs; VfsInit(&fs, false);
+    // 1 byte: ReadExact(&magic,4) fails.
+    WriteRawSave("one.SAV", std::vector<u8>{0x45});
+    { SaveHeader h{}; VfsHandle* r = VfsOpenFile("one.SAV", "rb");
+      CHECK(!SaveLoadHeaderAndThumbnail(r, h, nullptr)); VfsCloseStream(r); }
+    // 4 bytes: magic reads, flag byte short-reads.
+    WriteRawSave("four.SAV", std::vector<u8>{0x45,0x01,0x01,0x00});
+    { SaveHeader h{}; VfsHandle* r = VfsOpenFile("four.SAV", "rb");
+      CHECK(!SaveLoadHeaderAndThumbnail(r, h, nullptr)); VfsCloseStream(r); }
+    VfsShutdown();
+}
+
+// Header truncated mid-thumbnail: a valid v0x10045 header prefix then the stream
+// stops partway through the 0xE100 thumbnail. The thumbnail ReadExact fails.
+TEST(io_save, malformed_truncated_thumbnail) {
+    RwFs fs; VfsInit(&fs, false);
+    // Write a real header+thumbnail, then physically truncate the on-disk bytes.
+    SaveHeader src = MakeHeader();
+    std::vector<u8> thumb(kThumbnailBytes, 0x5A);
+    VfsHandle* w = VfsOpenFile("tt.SAV", "wb");
+    CHECK(SaveWriteScenarioBlock(w, src, thumb.data()));
+    VfsCloseStream(w);
+    const std::vector<u8>* raw = fs.bytes("tt.SAV");
+    CHECK(raw != nullptr);
+    // Re-write only the first ~half (lands inside the thumbnail body).
+    std::vector<u8> cut(raw->begin(), raw->begin() + raw->size() / 2);
+    WriteRawSave("ttc.SAV", cut);
+    SaveHeader h{};
+    std::vector<u8> thumbBack(kThumbnailBytes, 0);
+    VfsHandle* r = VfsOpenFile("ttc.SAV", "rb");
+    CHECK(!SaveLoadHeaderAndThumbnail(r, h, thumbBack.data()));
+    VfsCloseStream(r);
+    VfsShutdown();
+}
+
+// Version below the floor (<0x10025): the LABEL_9 floor check rejects it. We build
+// a stream whose always-present prefix parses but whose magic is too old.
+TEST(io_save, malformed_version_below_floor) {
+    RwFs fs; VfsInit(&fs, false);
+    std::vector<u8> s;
+    auto put32 = [&](u32 v){ s.push_back(v); s.push_back(v>>8); s.push_back(v>>16); s.push_back(v>>24); };
+    put32(0x10000);                  // magic well below the 0x10025 floor
+    s.push_back(0x00);               // flag byte
+    for (int i = 0; i < 32; ++i) s.push_back(0); // name
+    for (int i = 0; i < 8; ++i)  s.push_back(0); // timestamp
+    s.push_back(0);                  // season
+    WriteRawSave("old.SAV", s);
+    SaveHeader h{};
+    VfsHandle* r = VfsOpenFile("old.SAV", "rb");
+    CHECK(!SaveLoadHeaderAndThumbnail(r, h, nullptr));  // floor check -> false
+    VfsCloseStream(r);
+    VfsShutdown();
+}
+
+// SaveLoadScalarBlock on a 0-byte / truncated stream -> false (no OOB).
+TEST(io_save, malformed_truncated_scalar) {
+    RwFs fs; VfsInit(&fs, false);
+    SaveVersionSet(0x1003B);    // a defined, in-range version for the scalar gates
+    WriteRawSave("sc.SAV", std::vector<u8>{0x01,0x02,0x03});  // a few bytes only
+    SaveScalarBlock sb{};
+    VfsHandle* r = VfsOpenFile("sc.SAV", "rb");
+    CHECK(r != nullptr);
+    CHECK(!SaveLoadScalarBlock(r, sb));
+    VfsCloseStream(r);
+    VfsShutdown();
+}

@@ -20,6 +20,16 @@ const int kBld  = 1;
 }
 
 // ---------------------------------------------------------------------------
+// Golden: pin the QueueRequestSlotReset28 opcode + the 248-byte StagePendingBlock
+// body size (StagePendingBlock(0xF8,&scratch)). Traced to slice_production.h.
+// ---------------------------------------------------------------------------
+TEST(SliceProductionUnit, OpcodeAndBodyBytesGolden) {
+    CHECK_EQ((int)kProductionCmdOpcode, 28);       // 0x1C
+    CHECK_EQ((unsigned)kProductionBodyBytes, 0xF8u); // 248-byte StagePendingBlock body
+    CHECK_EQ((int)kProductionBodyBytes, 248);
+}
+
+// ---------------------------------------------------------------------------
 // Classifier golden: a production workshop kind + WriteProduction -> opcode 28.
 // ---------------------------------------------------------------------------
 TEST(SliceProductionUnit, ClassifierGolden) {

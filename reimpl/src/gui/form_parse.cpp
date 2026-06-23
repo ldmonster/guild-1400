@@ -4,6 +4,7 @@
 #include "gui/object.h"
 #include "gui/widget_create.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace guild::gui {
@@ -62,6 +63,11 @@ int BuildChildWindow(i16 x, i16 y, i16 w, i16 h, i32 flags, int parentSlot) {
     int childBacking = child.backWidget();              // dword_67EDEC[238*v13]
 
     // Append the child's backing widget to the parent's object-id list at its count.
+    // The id list holds kMaxChildren (384) ids; guard the write the same way
+    // Object_AddToWindow does ("Too many objects on window!") so a parent that is
+    // already full can't write plist[384..] out of bounds.
+    if (parent.objCount() >= kMaxChildren)
+        return -1;
     i32* plist = WindowChildList(parentSlot);
     plist[parent.objCount()] = childBacking;            // *(4*count + v7[6]) = backing
 
@@ -118,12 +124,16 @@ FormFile Form_ParseResourceFile(const u8* data, std::size_t len, const char* nam
                   static_cast<std::size_t>(windowCount) * stride)
         return out;
 
-    // Allocate a form slot: scan dword_676A60 (form array, 171-dword stride) from
-    // slot 1 for the first whose dword[0]==0; cap at 48 (>= 0x30 -> return -1).
-    // (The original scans dword_676E90 which is dword_676A60 + an offset into the
-    // first record; the recovered semantics are "first free form slot from 1".)
+    // Allocate a form slot (0x41c037): the original scans dword_676E90, which is
+    // dword_676A60 + 268 dwords == the windowCount field (dw[97]) of form[1]. The
+    // scan walks consecutive forms' windowCount() with stride 171, starting at v105=1,
+    // and returns the first form (>=1) whose windowCount()==0 (i.e. the first free
+    // slot); it caps at 48 (v30>=8208) and returns -1 when no slot is free.
+    //   NOTE: it is windowCount() (dw[97]) that is the free marker here, NOT dw[0] —
+    //   Form_InitTables stamps dw[0]=index for every slot, so dw[0] is never 0 for
+    //   forms 1..47 and scanning it would never find a free slot.
     int formId = 1;
-    while (formId < kMaxFormSlots && g_forms[formId].dw[0] != 0)
+    while (formId < kMaxFormSlots && g_forms[formId].windowCount() != 0)
         ++formId;
     if (formId >= kMaxFormSlots) {
         out.formId = -1;
@@ -156,18 +166,33 @@ FormFile Form_ParseResourceFile(const u8* data, std::size_t len, const char* nam
 
         // Resolve parent and create the window.
         int winSlot;
-        if (wr.parentIndex) {
+        // parentIndex is a 1-based index into the form window-id table dw[1..96]; a
+        // valid `.form` only ever names a parent that already appeared earlier. A
+        // malformed file can carry any dword here — guard the read against the form
+        // window-id table range so we never index g_forms[].dw out of bounds, and
+        // guard the resolved slot against g_windows[] (kMaxWindows). On a bad index
+        // we fall through to a root window (the original assumes a valid file).
+        if (wr.parentIndex >= 1 && wr.parentIndex <= kMaxWindows) {
             // parentWindowSlot = g_forms[formId].dw[parentIndex] (== dword_676A60[
             // 171*formId + parentIndex]); parentIndex is 1-based so it indexes the
             // window-id table (dw[1+slot]).
             int parentSlot = g_forms[formId].dw[wr.parentIndex];
             wr.parentWindowSlot = parentSlot;
-            // The original passes parent-relative deltas (x - parentX, y - parentY).
-            i16 dx = static_cast<i16>(wr.x - g_windows[parentSlot].x());
-            i16 dy = static_cast<i16>(wr.y - g_windows[parentSlot].y());
-            winSlot = BuildChildWindow(dx, dy, static_cast<i16>(wr.w),
-                                       static_cast<i16>(wr.h),
-                                       static_cast<i32>(wr.flags), parentSlot);
+            if (parentSlot < 0 || parentSlot >= kMaxWindows) {
+                // Stale/garbage slot id (parent not yet built / malformed) — fail safe.
+                winSlot = -1;
+                wr.parentWindowSlot = -1;
+            } else {
+                // The original passes parent-relative deltas (x - parentX, y - parentY).
+                i16 dx = static_cast<i16>(wr.x - g_windows[parentSlot].x());
+                i16 dy = static_cast<i16>(wr.y - g_windows[parentSlot].y());
+                winSlot = BuildChildWindow(dx, dy, static_cast<i16>(wr.w),
+                                           static_cast<i16>(wr.h),
+                                           static_cast<i32>(wr.flags), parentSlot);
+            }
+        } else if (wr.parentIndex) {
+            // Out-of-range parent index in a malformed file: do not index the table.
+            winSlot = -1;
         } else {
             winSlot = Window_Create(static_cast<i16>(wr.x), static_cast<i16>(wr.y),
                                     static_cast<i16>(wr.w), static_cast<i16>(wr.h),
@@ -176,27 +201,73 @@ FormFile Form_ParseResourceFile(const u8* data, std::size_t len, const char* nam
         wr.windowSlot = winSlot;
 
         // Store the window slot into the form's window-id table at logical slot wi
-        // (dword_676A64[171*formId + wi] == g_forms[formId].dw[1+wi]).
-        if (winSlot >= 0)
+        // (dword_676A64[171*formId + wi] == g_forms[formId].dw[1+wi]). The window-id
+        // table is dw[1..96]; only 96 window slots exist, so a valid form never has
+        // wi >= 96 (Window_Create returns -1 past 96). Guard the table write so a
+        // malformed windowCount > 96 can't overwrite dw[97] (the window-count) or run
+        // past the 171-dword Form record.
+        if (winSlot >= 0 && wi < static_cast<u32>(kMaxWindows))
             g_forms[formId].dw[1 + wi] = winSlot;
 
+        // Bump the form's windowCount (dw[97], == dword_676BE4[171*formId]) once per
+        // window, exactly as the original does inside the loop (v43 = ...+1; store).
+        // This is what makes the form usable afterward (Form_SelectWindow / Destroy /
+        // SetChildrenVisible all read windowCount()). It runs unconditionally per
+        // window in the original; the reconstruction increments it the same way.
+        ++g_forms[formId].windowCount();
+
         // ---- Object loop -------------------------------------------------------
-        // objectCount = HIWORD(dword@+202) == word@+204.
-        int objCount = static_cast<int>(rd_u32(rec, 202) >> 16);
+        // objectCount = HIWORD(dword@+202) == word@+204.  Original (0x41c3cb):
+        //   mov eax,[v40+0CAh]; sar eax,10h  -> signed (int)dword@+202 >> 16.
+        int objCount = static_cast<int>(rd_i32(rec, 202)) >> 16;
+        // PER-OBJECT STRIDES (verified from disasm @0x41c4d6, NOT the +8/+8/+8 the
+        // earlier reconstruction assumed):
+        //   v40 (type/aux base)   `add esi,4`   -> type @+208+4*o ; aux @+3472+4*o
+        //   v41 (x/y base)        `add edi,2`   -> x16 @+10 +2*o  ; y16 @+106 +2*o
+        //   v42 (name base)       `add ebp,40h` -> name @+400+64*o (64-byte slot)
+        //   v113 (slider range)   `inc`         -> range byte @+3868+1*o
+        //
+        // The per-object arrays live INSIDE the fixed-size window record, so the
+        // object count is implicitly bounded by the record layout. A valid `.form`
+        // never declares more objects than fit; a malformed/oversized count would
+        // otherwise read a per-object field past the record. Clamp objCount so EVERY
+        // unconditional per-object read stays within `stride` (min over all arrays —
+        // byte-identical for valid forms, fail-safe for malformed ones).
+        auto maxIdx = [](int base, int step, int span, int strideBytes) {
+            if (step <= 0) return 1 << 30;
+            return (strideBytes - base - span) / step; // largest o with base+step*o+span <= stride
+        };
+        int kMaxObjPerRecord = maxIdx(208, 4, 4, stride);
+        kMaxObjPerRecord = std::min(kMaxObjPerRecord, maxIdx(3472, 4, 4, stride));
+        kMaxObjPerRecord = std::min(kMaxObjPerRecord, maxIdx(10, 2, 4, stride));
+        kMaxObjPerRecord = std::min(kMaxObjPerRecord, maxIdx(106, 2, 4, stride));
+        kMaxObjPerRecord = std::min(kMaxObjPerRecord, maxIdx(400, 64, 64, stride));
+        int objCap = kMaxObjPerRecord + 1; // count = highest index + 1
+        if (objCount > objCap)
+            objCount = objCap;
+        if (objCount < 0)
+            objCount = 0;
         for (int o = 0; o < objCount; ++o) {
             FormObjectRecord orec;
-            orec.type = rd_i32(rec, 208 + 8 * o);          // *((int*)v35+52)
-            orec.aux  = rd_i32(rec, 3472 + 8 * o);         // *((int*)v35+868)
-            orec.x    = rd_i32(rec, 10  + 2 * o) >> 16;    // *(int*)(v36+5) >> 16
-            orec.y    = rd_i32(rec, 106 + 2 * o) >> 16;    // *(int*)(v36+53) >> 16
-            orec.name = rd_str(rec, 400 + 64 * o, 64);     // v37 (64-byte slot)
+            orec.type = rd_i32(rec, 208 + 4 * o);          // [v40+0D0h]
+            orec.aux  = rd_i32(rec, 3472 + 4 * o);         // [v40+0D90h]
+            orec.x    = rd_i32(rec, 10  + 2 * o) >> 16;    // [v41+0Ah]  sar 10h
+            orec.y    = rd_i32(rec, 106 + 2 * o) >> 16;    // [v41+6Ah]  sar 10h
+            orec.name = rd_str(rec, 400 + 64 * o, 64);     // v42 (64-byte slot)
 
             if (winSlot < 0) { wr.objects.push_back(orec); continue; }
 
-            // Build the widget by type, reusing the create leaves.
-            if (orec.type == kFormObjSprite || orec.type == kFormObjWindow) {
-                // The general image/window-backing object path: Object_AddToWindow
-                // with the graphic id resolved from the name (Property_Validate).
+            // The original's dispatch is NOT a mutually-exclusive type switch — it is
+            // two independent decisions (verified @0x41c3ea / 0x41c490 / 0x41c713):
+            //   (A) if (type < 64)            -> Object_AddToWindow  (sprites + all
+            //                                    types 0..63, INCLUDING inert type 0)
+            //   (B) then, separately:
+            //         if (type == 67 'C') && StrCmp("", name) -> text label
+            //         else if (type == 65 'A')                -> Input_AddFieldToWindow
+            //         else if (type == 69 'E')                -> Widget_AddSliderToWindow
+
+            // (A) type < 64: Object_AddToWindow with gfx resolved from the name.
+            if (orec.type < kFormObjWindow) { // < 64
                 int gfx = Form_PropertyValidate(orec.name.c_str());
                 int idx = Object_AddToWindow(winSlot, static_cast<i16>(orec.y),
                                              static_cast<i16>(orec.x), gfx);
@@ -206,39 +277,48 @@ FormFile Form_ParseResourceFile(const u8* data, std::size_t len, const char* nam
                     if (orec.aux == kSpriteAuxClickable) {
                         g_widgets[idx].btnFlagA() = 1;   // +68
                         g_widgets[idx].btnFlagB() = 0;   // +72
-                    } else if (orec.aux == kSpriteAuxToggle) {
+                    }
+                    if (orec.aux == kSpriteAuxToggle) {  // original: two separate ifs
                         g_widgets[idx].btnFlagA() = 0;
                         g_widgets[idx].btnFlagB() = 1;
                     }
                 }
-            } else if (orec.type == kFormObjLabel) {
-                // Text label: only built when the name resolves to a text-array id
-                // (the original guards FindTextArrayIndex != -1).
-                int ti = Form_FindTextArrayIndex(orec.name.c_str());
-                if (ti != -1)
-                    orec.widgetIdx =
-                        Object_AddTextLabel(static_cast<i16>(orec.x),
-                                            static_cast<i16>(orec.y), winSlot,
-                                            orec.name.c_str());
-            } else if (orec.type == kFormObjInput) {
-                // Numeric input field: step = HIWORD(aux), value = BYTE1(aux), flags
-                // = record +3472+... low byte (per the original BYTE2/BYTE1 reads).
-                int step  = (orec.aux >> 16) & 0xFF;
-                int value = (orec.aux >> 8) & 0xFF;
-                u8  fl    = rec[3472 + 8 * o]; // *((_BYTE*)v35+3472) low byte of aux
+            }
+
+            // (B) the independent type switch.
+            if (orec.type == kFormObjLabel) {            // 67 'C'
+                // Original guard: VIBE_Util_StrCmp(&dword_610ECC, name) (dword_610ECC
+                // is ""), i.e. only when name is non-empty; then FindTextArrayIndex.
+                if (!orec.name.empty()) {
+                    int ti = Form_FindTextArrayIndex(orec.name.c_str());
+                    if (ti != -1)
+                        orec.widgetIdx =
+                            Object_AddTextLabel(static_cast<i16>(orec.x),
+                                                static_cast<i16>(orec.y), winSlot,
+                                                orec.name.c_str());
+                }
+            } else if (orec.type == kFormObjInput) {     // 65 'A'
+                // Input_AddFieldToWindow(x>>16, y>>16, BYTE2(aux), BYTE1(aux),
+                //                        aux_low_byte, win)  (0x41c76f).
+                int step  = (orec.aux >> 16) & 0xFF;     // BYTE2
+                int value = (orec.aux >> 8) & 0xFF;      // BYTE1
+                u8  fl    = static_cast<u8>(orec.aux & 0xFF); // *(BYTE*)(v40+3472)
                 orec.widgetIdx = Input_AddFieldToWindow(orec.x, orec.y, step, value,
                                                         fl, winSlot);
-            } else if (orec.type == kFormObjSlider) {
-                // Slider: gfxBase from the object name; flags low byte of aux; range
-                // from a per-object byte (v108+3868); value 0, max 100 (constants).
-                int gfx = Form_PropertyValidate(orec.name.c_str());
-                u8  fl  = rec[3472 + 8 * o];
-                int range = rec[3868 + 8 * o]; // *((u8*)v108+3868)
+            } else if (orec.type == kFormObjSlider) {    // 69 'E'
+                // Widget_AddSliderToWindow(x>>16, y>>16, a3, range, 100,
+                //   Property_Validate(name), aux_low_byte, win)  (0x41c7d5).
+                int gfx   = Form_PropertyValidate(orec.name.c_str());
+                u8  fl    = static_cast<u8>(orec.aux & 0xFF);     // v91 = *(BYTE*)(v40+3472)
+                // range = *(BYTE*)(v113+3868) = record byte @ +3868+1*o. Guard the read
+                // against the record stride (the old layout's 3796-byte record cannot
+                // reach +3868, but old-layout sliders never set type 69).
+                int range = (3868 + o < stride) ? rec[3868 + o] : 0;
+                orec.range = range;   // expose the track length for 1:1 renderers
                 orec.widgetIdx = Widget_AddSliderToWindow(
                     static_cast<i16>(orec.x), static_cast<i16>(orec.y), 0, range, 100,
                     gfx, static_cast<i16>(fl), winSlot);
             }
-            // type 0 (inert) and any other: no widget created.
 
             wr.objects.push_back(orec);
         }
@@ -249,9 +329,11 @@ FormFile Form_ParseResourceFile(const u8* data, std::size_t len, const char* nam
     // Stamp the form record valid + record the new form id + copy the name. The
     // original sets dword_676BF0/BFC/C00[171*formId]=1, dword_676A60[171*formId]=formId,
     // dword_62D258=formId, and copies `name` into form +139 dwords (+556 bytes).
-    g_forms[formId].dw[0]   = formId;     // dword_676A60[171*formId] = formId
-    g_forms[formId].valid() = 1;          // dw[100] guard (Form_Destroy)
-    g_currentFormId         = formId;     // dword_62D258
+    g_forms[formId].valid()           = 1;      // dword_676BF0[171*id] = dw[100]
+    g_forms[formId].childrenVisible() = 1;      // dword_676BFC[171*id] = dw[103]
+    g_forms[formId].objectsVisible()  = 1;      // dword_676C00[171*id] = dw[104]
+    g_currentFormId                   = formId; // dword_62D258 = formId
+    g_forms[formId].dw[0]             = formId;  // dword_676A60[171*id] = formId
     out.ok = true;
     return out;
 }

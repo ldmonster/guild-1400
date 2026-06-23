@@ -129,8 +129,11 @@ TEST(AudioLeaves2Itest, ReacquireUsesDefaultPostMessage) {
     CHECK_EQ(mgr.reacquireDigitalDriver(0x900, nullptr, 0x10), 0x900);
     // valid msg + known output: default reacquire==0 -> default postMessage==1.
     CHECK_EQ(mgr.reacquireDigitalDriver(0x900, nullptr, 0x400), 1);
-    // valid msg + unknown output: nothing posted, result stays 0.
-    CHECK_EQ(mgr.reacquireDigitalDriver(0xDEAD, nullptr, 0x400), 0);
+    // valid msg + unknown output: nothing posted. The binary searches with eax as
+    // a byte offset (0,4,...) into dword_62EA1C and, on the not-found break, eax
+    // has reached 0x40 (64); that value is returned (disasm @0x449cf8 jge ->
+    // loc_449D06 retn). Golden corrected from 0 to 64 to match the binary.
+    CHECK_EQ(mgr.reacquireDigitalDriver(0xDEAD, nullptr, 0x400), 64);
 
     // ReleaseDigitalDriver: default digitalHandleRelease returns 1 (success) -> 0.
     CHECK_EQ(mgr.releaseDigitalDriver(0x900), 0);

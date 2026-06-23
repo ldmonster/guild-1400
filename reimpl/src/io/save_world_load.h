@@ -42,6 +42,8 @@
 #include "io/vfs.h"
 #include "sim/entity.h"
 
+#include <vector>
+
 namespace guild::io {
 
 // ===========================================================================
@@ -159,6 +161,17 @@ bool LoadCharacterSlot(VfsHandle* h, guild::u8* rec, guild::u32 version,
 // The full load driver.
 // ===========================================================================
 
+// gilde.exe 0x5abb84 — VIBE_Save_RelinkLoadedPointers, the person-record COLUMN
+// slice (0x5abbe2..0x5abc4f): for every live record, the saved link IDs at
+// +364 (homeBld) / +368 (workBld) are resolved against the object/building
+// array (-1 or miss -> 0), the +380 He link is cleared (the partial .cty path
+// loads no He records, so every id misses) and the +388 live-char pointer is
+// zeroed (@0x5abc3d). Gated on resolving the local player record dword_6498E4
+// (@0x5abb8e); returns false (nothing relinked) when it does not resolve.
+// LoadWorld/LoadWorldEx run this automatically at the original's call position
+// (after the partial-path tables / the full tail); exposed for tests.
+bool RelinkPersonRecordColumns(guild::i32 playerId);
+
 // VIBE_Save_LoadGameFile @0x5a7604 — open `path` through the VFS (transparent
 // gunzip for a `.cty`/`.SAV.gz`), reset the world, load the header + scalar block,
 // then the table loaders in the recovered order, populating `world` and the live
@@ -169,5 +182,20 @@ bool LoadCharacterSlot(VfsHandle* h, guild::u8* rec, guild::u32 version,
 // left partially populated and false is returned (matching the original's
 // abort-and-return-0 contract).
 bool LoadWorld(const char* path, WorldState& world);
+
+// LoadWorld + capture of the EMBEDDED CITY SCENE STREAM. After the table loaders,
+// the original's step 9 (VIBE_Save_PostLoadInitScene @0x5a7ef8) hands the still-open
+// save stream to VIBE_Scene_LoadFromStream @0x5e7e38 (edx = the stream handle, not a
+// path) — i.e. a full .ed3-grammar scene blob is serialized INSIDE the .cty at that
+// position, carrying every city node's world position (+76), rotation euler (+132)
+// and the +512 owner-object id that VIBE_Object_RebuildModelByOwner @0x5a8140 later
+// matches against the live object records. `embeddedSceneOut` (optional) receives
+// the raw remaining stream bytes from exactly that position (the scene tag dword
+// onward), so a host scene parser (render/scene_load + play::ParseSceneObjects) can
+// decode the REAL city placements. Capture is gated to version < 0x10045 (>= reads
+// the Amt table first, which this slice does not parse; the shipped cities are
+// 0x1003B). Pass null to behave exactly like LoadWorld.
+bool LoadWorldEx(const char* path, WorldState& world,
+                 std::vector<guild::u8>* embeddedSceneOut);
 
 } // namespace guild::io

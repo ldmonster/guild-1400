@@ -117,11 +117,16 @@ i32 DrawHLine(FrameTarget& t, i32 x0, i32 y0, i32 y1, i32 x1, u16 color) {
             v8 = result - a4;
             v7 = pitch * a2 + a4;
         }
+        // Original tracks `result` here as a BYTE offset (result = 2*v7 then += 2
+        // per pixel) and returns it; the writes are the same words. We keep a word
+        // index for the writes and convert to the byte offset on return to match
+        // the binary exactly (the return is discarded by every caller).
         result = v7;
         for (; v8 > 0; --v8) {
             base[result] = color;
             ++result;
         }
+        return 2 * result;                // 2*v7_final, the original's `result`
     } else if (result == a4) {            // x0 == x1: vertical line
         int idx, count;
         if (a2 <= a3) {

@@ -93,7 +93,7 @@ int StraftatSyncAllToNetwork() {
 // gilde.exe 0x4c3728 — VIBE_Straftat_BroadcastAccusation.
 // ===========================================================================
 int StraftatBroadcastAccusation(i32 crimeId, i32 ownerId, i32 mask,
-                                const AccusationRecipient* recipients,
+                                AccusationRecipient* recipients,
                                 int recipientCount, i32 /*perpetratorId*/perp,
                                 bool perpetratorResolves) {
     // First pass: confirm at least one crime record matches `crimeId` and its
@@ -109,12 +109,17 @@ int StraftatBroadcastAccusation(i32 crimeId, i32 ownerId, i32 mask,
 
     int delivered = 0;
     for (int j = 0; j < recipientCount; ++j) {
-        const AccusationRecipient& r = recipients[j];
+        AccusationRecipient& r = recipients[j];
         if ((r.kind == 6 || r.kind == 7) && ownerId != r.ownerId &&
             (mask & r.flagField) == 0) {
             // Require an evidence pair (owner==recipientOwnerId, crimeId==crimeId).
+            // The original's inner while-loop counts the pair SLOTS scanned (v8)
+            // before the match; v8 == matching pair index (e/2). If no pair is
+            // found it `goto LABEL_8` (no delivery), so v8 is meaningful only on a
+            // hit.
             bool haveEvidence = false;
-            for (int e = 0; e < kEvidenceDwords; e += 2) {
+            int v8 = 0;
+            for (int e = 0; e < kEvidenceDwords; e += 2, ++v8) {
                 if (g_evidenceOwner[e] == r.ownerId &&
                     g_evidenceCrimeId[e] == crimeId) {
                     haveEvidence = true;
@@ -124,6 +129,11 @@ int StraftatBroadcastAccusation(i32 crimeId, i32 ownerId, i32 mask,
             if (haveEvidence) {
                 AccusationMessage msg{r.ownerId, crimeId, perp};
                 g_accHook(msg, g_accCtx);
+                // 0x4c382b: dword_12CEAF4[134 * v8] &= v12 — mask the flagField of
+                // the recipient at table index v8 (the pair-scan count), NOT j.
+                // Faithful bug-for-bug; guarded to the supplied recipient view.
+                if (v8 < recipientCount)
+                    recipients[v8].flagField &= mask;
                 ++delivered;
             }
         }

@@ -106,9 +106,12 @@ HistoryTokenMode HistoryClassifyTokenMode(const char* token) {
 int HistoryTokenSlot(const char* token, HistoryTokenMode mode) {
     if (!token || mode == HistoryTokenMode::kLiteral)
         return -1;                   // literal tokens carry no slot reference
-    // The slot digit follows the 4-char prefix: token[4] is the slot char in the
-    // original (v12[0] = *(a1 + 5) then ParseInt). A single decimal digit 0..7.
-    char d = token[4];
+    // gilde.exe 0x4fd44c / 0x4fd4fa..0x4fd507: v12[0] = *(a1 + 5) (token[5]); the
+    // rest of v12 was memset to 0 just above, so ParseInt sees the single slot char.
+    // The 4-char prefix lives at token[0..3], token[4] is a separator, token[5] is
+    // the decimal slot digit. (Binary-confirmed W16: the read is token[5], NOT
+    // token[4]; ParseInt on {digit,0} returns the digit.)
+    char d = token[5];
     if (d < '0' || d > '9')
         return -1;
     int slot = d - '0';

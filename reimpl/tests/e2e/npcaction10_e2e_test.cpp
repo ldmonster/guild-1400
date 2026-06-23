@@ -132,8 +132,10 @@ TEST(NpcAction10_E2E, KidnapRansomEmitsSlotReset) {
     HeBuf b; Set(b.rec(), 112, 0);
     *reinterpret_cast<u8*>(reinterpret_cast<u8*>(b.rec()) + 120) = 2;
     NpcAction10_KidnapCarryStep(b.rec());
-    // rank 1 factor 0.02 * min(50000,cap) = 1000.
-    bool saw = false; for (auto& c : e.trace) if (c == "slot28:62,1000") saw = true;
+    // rank 1 factor = 0x3CA3D70A (0.0199999996) * min(50000,cap)=50000 = 999.99998 in 80-bit;
+    // gilde.exe Coord_ConvertX (frndint, truncate-toward-zero) -> 999, then fistp stores 999.
+    // (A float*float intermediate would pre-round to 1000.0; the binary truncates to 999.)
+    bool saw = false; for (auto& c : e.trace) if (c == "slot28:62,999") saw = true;
     CHECK(saw);
     SetNpcAction10Hooks(nullptr);
 }

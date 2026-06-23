@@ -28,12 +28,33 @@ struct SeqPlatform : shim::IPlatform {
     const Step& at() const { static Step z; if (steps.empty()) return z;
         int i = iter < (int)steps.size() ? iter : (int)steps.size() - 1; return steps[i < 0 ? 0 : i]; }
 };
-constexpr int kRowY0 = 90, kRowH = 30, kValueX = 360;
-SeqPlatform::Step OnRow(int i, bool left) {
-    SeqPlatform::Step s; s.x = kValueX + 20; s.y = kRowY0 + i * kRowH + 4; s.left = left; return s;
+// Geometry mirror of sdl_options_screen.cpp BuildLayout (e2e runs at 800x600 -> ox=oy=0).
+constexpr int kDesignW = 800, kDesignH = 600;
+struct Geom { int win0X, win0Y, win0W, win0H, win1X, win1Y, sliderX; const int* rowY; };
+const int kGfxRowY[9]   = { 16, 48, 96, 160, 128, 192, 240, 272, 304 };
+const int kSfxRowY[5]   = { 32, 120, 160, 200, 280 };
+const int kGameRowY[11] = { 8, 72, 96, 120, 144, 168, 208, 232, 256, 280, 304 };
+Geom GeomFor(play::OptionsPage p) {
+    switch (p) {
+        case play::OptionsPage::kGfx:  return { 112,120,452,574, 146,171, 208, kGfxRowY };
+        case play::OptionsPage::kSfx:  return { 112,120,449,575, 144,168, 208, kSfxRowY };
+        case play::OptionsPage::kGame: default: return { 104,120,449,575, 136,168, 208, kGameRowY };
+    }
 }
-SeqPlatform::Step OnBack(int rc, bool left) {
-    SeqPlatform::Step s; s.x = 60 + 10; s.y = kRowY0 + rc * kRowH + 16 + 8; s.left = left; return s;
+constexpr int kBtnW = 110, kBtnH = 33;
+play::OptionsPage gPage = play::OptionsPage::kSfx;
+int gFbW = 800, gFbH = 600;
+SeqPlatform::Step OnRow(int i, bool left) {
+    const Geom g = GeomFor(gPage);
+    const int ox = (gFbW - kDesignW) / 2, oy = (gFbH - kDesignH) / 2;
+    SeqPlatform::Step s; s.x = ox + g.win1X + g.sliderX + 4; s.y = oy + g.win1Y + g.rowY[i]; s.left = left; return s;
+}
+SeqPlatform::Step OnBack(int /*rc*/, bool left) {
+    const Geom g = GeomFor(gPage);
+    const int ox = (gFbW - kDesignW) / 2, oy = (gFbH - kDesignH) / 2;
+    const int btnY = oy + g.win0Y + g.win0H - kBtnH - 24;
+    const int totalW = kBtnW * 2 + 24, firstX = ox + g.win0X + (g.win0W - totalW) / 2;
+    SeqPlatform::Step s; s.x = firstX + kBtnW / 2; s.y = btnY + kBtnH / 2; s.left = left; return s;
 }
 std::string GameDir() {
     if (const char* e = std::getenv("GUILD_GAME_DIR")) return e;
@@ -55,7 +76,7 @@ void DumpPpm(const char* path, const shim::MemoryGraphicsDevice& dev, int w, int
 }
 } // namespace
 
-TEST(OptionsE2E, RealSfxPageTogglesRealIniSetting) {
+TEST(OptionsE2E, RealSfxPageTogglesRealIniSettingAndPersists) {
     namespace fsx = std::filesystem;
     std::error_code ec;
     const fsx::path gdir = GameDir();
@@ -66,7 +87,16 @@ TEST(OptionsE2E, RealSfxPageTogglesRealIniSetting) {
         CHECK(true); return;
     }
 
-    // Seed the page from the REAL gilde.INI via the reconstructed reader.
+    // SANDBOX the INI: copy the real Gilde.INI into a temp dir and bind the
+    // screen to it (cfg.iniDir) — the live app binds straight to <gameDir>
+    // and writes the real file (1:1 with WritePrivateProfileStringA), but the
+    // test must never mutate the user's INI.
+    const fsx::path sandbox = fsx::temp_directory_path() / "guild_opts_e2e_ini";
+    fsx::create_directories(sandbox, ec);
+    fsx::copy_file(ini, sandbox / "Gilde.INI", fsx::copy_options::overwrite_existing, ec);
+    CHECK(!ec);
+
+    // Read the REAL gilde.INI via the reconstructed reader (for the baseline).
     config::IniFile profile;
     CHECK(profile.loadFile(ini.string()));
     config::GfxSettings g; config::SoundSettings s; config::GameSettings m;
@@ -77,11 +107,12 @@ TEST(OptionsE2E, RealSfxPageTogglesRealIniSetting) {
 
     play::OptionsConfig cfg;
     cfg.page = play::OptionsPage::kSfx;
-    cfg.gameDir = gdir.string();
+    cfg.gameDir = gdir.string();        // real assets (menu background)
+    cfg.iniDir  = sandbox.string();     // sandboxed persistence target
     cfg.fbW = 800; cfg.fbH = 600; cfg.frameCapMs = 0; cfg.maxFrames = 60;
-    cfg.gfx = g; cfg.sound = s; cfg.game = m;
+    gPage = cfg.page; gFbW = cfg.fbW; gFbH = cfg.fbH;
 
-    const int beforeMaster = (int)cfg.sound.masterVol;
+    const int beforeMaster = (int)s.masterVol;
 
     shim::MemoryGraphicsDevice dev; CHECK(dev.init(800, 600, 32, false));
     SeqPlatform plat;
@@ -93,12 +124,29 @@ TEST(OptionsE2E, RealSfxPageTogglesRealIniSetting) {
     CHECK(r.framesPresented > 0);
     CHECK(!r.cancelled);
     CHECK(r.changed);
+    CHECK(r.persisted);                              // the bound INI was written
     CHECK((int)r.sound.masterVol != beforeMaster);   // a real INI-backed value changed
     std::printf("[options-e2e] master_vol %d -> %d (rendered %d frames over real bg)\n",
                 beforeMaster, (int)r.sound.masterVol, r.framesPresented);
 
+    // The sandbox INI now reloads with the new value through the REAL reader,
+    // and the foreign sections of the real file survived the merge.
+    config::IniFile after;
+    CHECK(after.loadFile((sandbox / "Gilde.INI").string()));
+    config::GfxSettings g2; config::SoundSettings s2; config::GameSettings m2;
+    config::ReadGfxAndSoundSettings(after, g2, s2, m2);
+    CHECK((int)s2.masterVol == (int)r.sound.masterVol);
+    CHECK(after.getString("General", "Bildmodus", "") ==
+          profile.getString("General", "Bildmodus", "?"));
+    CHECK(after.getInt("Network", "Port", -1) == profile.getInt("Network", "Port", -2));
+    // The real file itself is untouched.
+    config::IniFile realAgain;
+    CHECK(realAgain.loadFile(ini.string()));
+    CHECK(realAgain.getInt("Sound", "master_vol", -1) == beforeMaster);
+
     DumpPpm("/tmp/options_sfx_e2e.ppm", dev, 800, 600);
     std::printf("[options-e2e] dumped /tmp/options_sfx_e2e.ppm\n");
+    fsx::remove_all(sandbox, ec);
 }
 
 TEST(OptionsE2E, RealGamePageOverBackgroundIsNonBlank) {
@@ -119,6 +167,7 @@ TEST(OptionsE2E, RealGamePageOverBackgroundIsNonBlank) {
     cfg.gameDir = gdir.string();
     cfg.fbW = 800; cfg.fbH = 600; cfg.frameCapMs = 0; cfg.maxFrames = 3;
     cfg.gfx = g; cfg.sound = s; cfg.game = m;
+    gPage = cfg.page; gFbW = cfg.fbW; gFbH = cfg.fbH;
 
     shim::MemoryGraphicsDevice dev; CHECK(dev.init(800, 600, 32, false));
     SeqPlatform plat; plat.steps = { OnRow(0, false) };

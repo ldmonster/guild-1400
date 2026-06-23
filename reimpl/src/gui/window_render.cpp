@@ -105,8 +105,10 @@ int Window_ApplyScrollOffset(int winSlot) {
         i32* list = WindowChildList(winSlot);            // v1[6]
         for (int k = start; k < w.objCount(); ++k) {
             Widget& c = g_widgets[list[k]];              // dword_69FFB4 + 740*list[k]
+            // 0x416631: nx = word@604(prevX) - word@600(scrollX) + child.x(+16)
+            //           ny = child.y(+18) + word@588(prevY) - word@584(scrollY)
             int nx = w.at<i16>(kOffWordScrollPrevX) - w.at<i16>(kOffWordScrollX) + c.x();
-            int ny = c.y() + w.at<i16>(kOffWordScrollY) - w.at<i16>(kOffWordScrollPrevY);
+            int ny = c.y() + w.at<i16>(kOffWordScrollPrevY) - w.at<i16>(kOffWordScrollY);
             Widget_LayoutBounds(nx, ny, list[k]);        // VIBE_Widget_LayoutBounds(...)
             if (c.type() == 17)                          // *(v23+24) == 17 -> mark redraw
                 c.at<i32>(116) = 2;                      // *(v23+116) = 2

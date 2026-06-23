@@ -46,7 +46,61 @@ if(GUILD_BACKEND)
   endif()
   target_compile_definitions(guild PUBLIC GUILD_HAVE_VULKAN GUILD_HAVE_SDL2)
   target_link_libraries(guild PUBLIC Vulkan::Vulkan SDL2::SDL2)
-  message(STATUS "GUILD_BACKEND=ON -> Vulkan ${Vulkan_VERSION} + SDL2; movie=STUB(skip videos), drm=SKIP")
+
+  # Video codec (rule-6, user-approved): pl_mpeg (MIT, vendored single-header) backs
+  # the IVideo shim, replacing the proprietary moveahead.dll MPEG player. Only the
+  # GUILD_BACKEND build sees the header + macro; the portable build's CreateVideoDecoder
+  # returns nullptr (no third-party dep).
+  target_include_directories(guild PUBLIC ${CMAKE_SOURCE_DIR}/third_party)
+  target_compile_definitions(guild PUBLIC GUILD_HAVE_PLMPEG)
+  message(STATUS "GUILD_BACKEND=ON -> Vulkan ${Vulkan_VERSION} + SDL2; movie=pl_mpeg(MPEG-1), drm=1:1")
+
+  # 3D scene GPU pipeline shaders: compile GLSL -> SPIR-V with glslc at build time
+  # and embed each as a C uint32 array header (glslc -mfmt=c), so the Vulkan backend
+  # has the SPIR-V with no runtime file lookup and the repo carries readable GLSL.
+  find_program(GUILD_GLSLC NAMES glslc HINTS ${Vulkan_GLSLC_EXECUTABLE} ENV VULKAN_SDK
+               PATH_SUFFIXES bin)
+  if(NOT GUILD_GLSLC AND TARGET Vulkan::glslc)
+    set(GUILD_GLSLC $<TARGET_FILE:Vulkan::glslc>)
+  endif()
+  if(GUILD_GLSLC)
+    set(GUILD_SHADER_GEN_DIR ${CMAKE_BINARY_DIR}/generated/shaders)
+    file(MAKE_DIRECTORY ${GUILD_SHADER_GEN_DIR})
+    set(GUILD_SHADER_HEADERS "")
+    foreach(stage vert frag)
+      set(_src ${CMAKE_SOURCE_DIR}/src/shim_impl/shaders/scene.${stage})
+      set(_out ${GUILD_SHADER_GEN_DIR}/scene_${stage}_spv.inc)
+      add_custom_command(
+        OUTPUT ${_out}
+        COMMAND ${GUILD_GLSLC} -O -mfmt=c ${_src} -o ${_out}
+        DEPENDS ${_src}
+        COMMENT "glslc scene.${stage} -> SPIR-V (embedded)"
+        VERBATIM)
+      list(APPEND GUILD_SHADER_HEADERS ${_out})
+    endforeach()
+    add_custom_target(guild_scene_shaders DEPENDS ${GUILD_SHADER_HEADERS})
+    add_dependencies(guild guild_scene_shaders)
+    target_include_directories(guild PUBLIC ${CMAKE_BINARY_DIR}/generated)
+    target_compile_definitions(guild PUBLIC GUILD_HAVE_SCENE_SHADERS)
+    message(STATUS "  + 3D scene shaders via glslc (${GUILD_GLSLC})")
+  else()
+    message(STATUS "  - glslc not found -> 3D scene GPU pipeline disabled (CPU raster only)")
+  endif()
+
+  # Optional MP3 music decode (the menu/credits Miles tracks) via libmpg123. We
+  # link the runtime soname directly so no -dev package is required; if it's
+  # absent at build time the menu just runs silent (DecodeMp3File stubs to false).
+  find_library(MPG123_LIB NAMES mpg123 libmpg123.so.0)
+  if(NOT MPG123_LIB AND EXISTS /lib/x86_64-linux-gnu/libmpg123.so.0)
+    set(MPG123_LIB -l:libmpg123.so.0)
+  endif()
+  if(MPG123_LIB)
+    target_compile_definitions(guild PUBLIC GUILD_HAVE_MP3)
+    target_link_libraries(guild PUBLIC ${MPG123_LIB})
+    message(STATUS "  + MP3 music via libmpg123 (${MPG123_LIB})")
+  else()
+    message(STATUS "  - libmpg123 not found -> menu music disabled")
+  endif()
 
   # Real-backend playable/headless entry point. Lives in apps/ (NOT src/) so the
   # src/**/*.cpp glob doesn't pull its main() into libguild.
@@ -54,6 +108,37 @@ if(GUILD_BACKEND)
     add_executable(guild_run ${CMAKE_SOURCE_DIR}/apps/guild_run.cpp)
     target_link_libraries(guild_run PRIVATE guild)
   endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Optional REAL network transport on SDL_net (Rule 6 — user-approved swap of
+# wsock32 -> SDL_net). The 1:1-reconstructed protocol/discovery logic in src/net/
+# is unchanged; this lights up the SDL_net socket backend
+# (src/shim_impl/sdlnet_backend.cpp: SdlNetDatagram UDP/broadcast + SdlNetSocket
+# TCP). The portable/headless build keeps the in-process loopback backend.
+# Supply SDL2_net via vcpkg, e.g.:
+#   cmake -S . -B build-net -DGUILD_NET_SDL=ON \
+#         -DCMAKE_PREFIX_PATH=<vcpkg>/installed/x64-linux
+# ---------------------------------------------------------------------------
+option(GUILD_NET_SDL "Build the SDL_net real network transport backend" OFF)
+if(GUILD_NET_SDL)
+  find_package(SDL2_net CONFIG REQUIRED)
+  # The vcpkg SDL2_net target does NOT declare its SDL2 dependency, so link SDL2
+  # explicitly AFTER SDL2_net (static link order: the consumer of SDL_* symbols
+  # must precede the provider).
+  find_package(SDL2 CONFIG REQUIRED)
+  target_compile_definitions(guild PUBLIC GUILD_HAVE_SDL2_NET)
+  if(TARGET SDL2_net::SDL2_net)
+    target_link_libraries(guild PUBLIC SDL2_net::SDL2_net)
+  else()
+    target_link_libraries(guild PUBLIC SDL2_net::SDL2_net-static)
+  endif()
+  if(TARGET SDL2::SDL2)
+    target_link_libraries(guild PUBLIC SDL2::SDL2)
+  else()
+    target_link_libraries(guild PUBLIC SDL2::SDL2-static)
+  endif()
+  message(STATUS "GUILD_NET_SDL=ON -> SDL_net transport backend (wsock32 swap)")
 endif()
 
 # ---- 1:1 differential-test harness (reconstruction side of tools/diff_test.py) ----

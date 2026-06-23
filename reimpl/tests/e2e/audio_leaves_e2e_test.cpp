@@ -66,9 +66,14 @@ TEST(AudioLeavesE2E, FullPlayQueueMixFlow) {
 
     // 3. Push a volume-settings update; the derived master volume should hit the
     //    device through ApplyVolumeSettings + ClampDigitalMasterVolume.
-    VolumeSettingsIn vin{120, 80, 100, 60, 40, 1.0f, 0.5f};
+    //    Binary math (disasm @0x56c148, opcodes D9 1C 24 / D8 0C 24 prove a
+    //    32-bit-float round-trip for v6):
+    //      v6     = (float)(soundByte * scale0)          // fstp dword [esp]
+    //      master = trunc(musicByte * v6)                // NOT soundByte*scale0
+    //    With soundByte=120, musicByte=1, scale0=1.0: v6=120.0, master=120.
+    VolumeSettingsIn vin{120, 1, 100, 60, 40, 1.0f, 0.5f};
     VolumeSettingsOut vout = ApplyVolumeSettings(vin);
-    CHECK_EQ(vout.masterVolume, 120); // 120 * 1.0
+    CHECK_EQ(vout.masterVolume, 120); // trunc(musicByte 1 * v6 120) = 120
     int clamped = ClampDigitalMasterVolume(vout.masterVolume);
     CHECK_EQ(clamped, 120);
     dev.setMasterVolume(clamped);

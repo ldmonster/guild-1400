@@ -38,12 +38,17 @@ struct Reader {
         Read(&v, 4);  // raw 4 bytes (ReadDwordSwapArgs does NOT swap)
         return v;
     }
-    void Vec3(float* out) {
-        Read(&out[0], 4);
-        Read(&out[1], 4);
-        Read(&out[2], 4);
+    // Returns false once the stream is exhausted so read-loops can stop instead
+    // of spinning a malformed/oversized declared count (W11 hardening).
+    bool Vec3(float* out) {
+        bool ok = Read(&out[0], 4);
+        ok = Read(&out[1], 4) && ok;
+        ok = Read(&out[2], 4) && ok;
+        return ok;
     }
-    void SkipVec3() { float t[3]; Vec3(t); }
+    // Returns false once the stream is exhausted so skip-loops can stop instead of
+    // spinning a malformed/oversized declared count to no effect (W11 hardening).
+    bool SkipVec3() { float t[3]; bool ok = Read(&t[0], 4); ok = Read(&t[1], 4) && ok; ok = Read(&t[2], 4) && ok; return ok; }
     // ReadString: a length-prefixed/zero-terminated name in the engine; for the
     // reconstruction we skip up to a NUL or 64 bytes (the attach name buffer is 64).
     void SkipString() {
@@ -100,6 +105,14 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
     // token 35: frame count + allocate.
     if (tok == 35) {
         frameCount = r.Dword();
+        // Hardening (W11): bound the declared frame count by the file size before
+        // allocating. The engine read the count from a finite file and allocated
+        // 192*frameCount bytes; a malformed/oversized count would otherwise drive
+        // a huge std::vector::assign (bad_alloc / heap exhaustion). Each frame
+        // costs at least one stream byte, so `size` is a safe upper bound that
+        // never rejects a real animation (a valid file always has the bytes).
+        if (frameCount > 0 && (size_t)frameCount > size)
+            return false;
         if (frameCount > 0) {
             StrNCopyPad(hdr.name, name, 63);
             hdr.frameCount  = frameCount;
@@ -151,22 +164,39 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
             if (tok == 33) {        // vertices
                 int n = (vtxOverride <= 0) ? vertexCount : vtxOverride;
                 std::vector<float>& pts = out.points[(size_t)k];
+                // Hardening (W11): clamp the per-frame point allocation. A negative
+                // n (cast to size_t -> enormous) or a malformed/oversized count
+                // would otherwise drive a runaway assign. Each point needs >=12
+                // stream bytes (a vec3), so bound by the remaining buffer; a valid
+                // frame always fits. The point WRITES below are already guarded by
+                // `base+2 < pts.size()`.
+                if (n < 0) n = 0;
+                if ((size_t)n > size) n = (int)size;
                 if (accumulated == 0) pts.assign((size_t)n * 3, 0.0f);
+                // Hardening (W11): index with size_t and stop at EOF. A malformed/
+                // oversized vertexCount would otherwise (a) overflow the int `base`
+                // arithmetic (UB) and (b) spin the loop billions of times. The
+                // stream reader returns false once exhausted, which is the same
+                // truncation the engine's per-field reader hit; a valid frame reads
+                // every declared point before EOF, so the in-bounds path is
+                // unchanged. The write is still bounds-checked against pts.size().
+                int read = 0;
                 for (int j = 0; j < vertexCount; ++j) {
                     float v[3];
-                    r.Vec3(v);
+                    if (!r.Vec3(v)) break;   // short read -> stop (stream exhausted)
                     // The engine delta-encodes frame k>0 points against frame 0 at
                     // PARSE time; here we keep raw points and apply the documented
                     // delta in the post-pass for clarity (behaviour-identical for the
                     // recovered keyframe/duration outputs the tests cover).
-                    int base = (accumulated + j) * 3;
-                    if (base + 2 < (int)pts.size()) {
+                    size_t base = (static_cast<size_t>(accumulated) + j) * 3;
+                    if (base + 2 < pts.size()) {
                         pts[base + 0] = v[0];
                         pts[base + 1] = v[1];
                         pts[base + 2] = v[2];
                     }
+                    ++read;
                 }
-                accumulated += vertexCount;
+                accumulated += read;
                 tok = r.Token();    // expect 40 (done)
                 if (tok == 40) tok = r.Token();
             }
@@ -174,7 +204,9 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
                 i32 nf = r.Dword();
                 u8 t2 = r.Token();
                 if (t2 == 34) {
-                    for (int j = 0; j < nf; ++j) { r.SkipVec3(); r.SkipVec3(); }
+                    for (int j = 0; j < nf; ++j) {
+                        if (!r.SkipVec3() || !r.SkipVec3()) break;  // stop at EOF
+                    }
                     t2 = r.Token();
                 }
                 if (t2 == 40) tok = r.Token();
@@ -235,11 +267,18 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
     out.frames[0].rx = out.frames[0].ry = out.frames[0].rz = 0.0f;
 
     // Per-frame point passes: optional delta-from-root, AABB, duration *= 3, quantize.
+    // Hardening (W11): nPts comes straight from the file; clamp it non-negative and
+    // do the "have we got nPts*3 floats?" guard in size_t so a malformed/oversized
+    // count cannot overflow the int `nPts * 3` multiply (UB) before the comparison.
+    // A valid animation has a small nPts, so every in-bounds load is unchanged; an
+    // oversized count simply fails the size guard and the point passes are skipped.
     int nPts = hdr.vertexCount;
+    if (nPts < 0) nPts = 0;
+    const size_t needPts = static_cast<size_t>(nPts) * 3;
     for (i32 k = 0; k < frameCount; ++k) {
         AnimFrame& fr = out.frames[(size_t)k];
         std::vector<float>& pts = out.points[(size_t)k];  // always sized to frameCount
-        if (hdr.flag361 && (int)pts.size() >= nPts * 3) {
+        if (hdr.flag361 && pts.size() >= needPts) {
             for (int j = 0; j < nPts; ++j) {
                 pts[(size_t)j * 3 + 0] -= fr.tx;
                 pts[(size_t)j * 3 + 1] -= fr.ty;
@@ -250,7 +289,7 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
         // AABB over the frame's points.
         float minX = kBigPos, minY = kBigPos, minZ = kBigPos;
         float maxX = kBigNeg, maxY = kBigNeg, maxZ = kBigNeg;
-        if (nPts > 0 && (int)pts.size() >= nPts * 3) {
+        if (nPts > 0 && pts.size() >= needPts) {
             for (int j = 0; j < nPts; ++j) {
                 float x = pts[(size_t)j * 3 + 0];
                 float y = pts[(size_t)j * 3 + 1];
@@ -279,7 +318,7 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
         // (We compute into the frame's _attach/_tail region only conceptually; the
         // produced bytes are not surfaced — see header. The truncation matches
         // VIBE_Coord_ConvertX -> (int) chop.) Kept for fidelity of the AABB inputs.
-        if (nPts > 0 && (int)pts.size() >= nPts * 3) {
+        if (nPts > 0 && pts.size() >= needPts) {
             for (int j = 0; j < nPts; ++j) {
                 if (ex != 0.0f) (void)(int)guild::util::ConvertX((pts[(size_t)j*3+0]-minX) * k255 / ex);
                 if (ey != 0.0f) (void)(int)guild::util::ConvertX((pts[(size_t)j*3+1]-minY) * k255 / ey);

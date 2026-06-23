@@ -255,19 +255,22 @@ TEST(CharActionW, WaitCountsDown) {
 TEST(CharActionW, WaitAccept) {
     InstallAll();
     BigRec r; He_State(r.get()) = 0; r.at<u8>(172) = 0;
-    Cas4_Fee176(r.get()) = 50;      // value = 2*50 = 100
-    g_s.willingness = 100; g_s.rnd = 200;   // roll 200 >= 100 -> accept (3353)
+    Cas4_Fee176(r.get()) = 50;
+    // threshold = 100*0.5 + 64 = 114; roll 200 >= 114 -> accept (3353).
+    // accept value = trunc(50 * 0.5) = 25 (flt_61EAF4 + ConvertX truncate).
+    g_s.willingness = 100; g_s.rnd = 200;
     WaitThenMoveStep(r.get());
     CHECK_EQ(g_s.sendMsgText[0], 3353);
-    CHECK_EQ(g_s.cmd15Vals[0], 100);
+    CHECK_EQ(g_s.cmd15Vals[0], 25);
     CHECK_EQ(g_leaf.freeCalls, 1);
 }
 
 TEST(CharActionW, WaitRefuse) {
     InstallAll();
     BigRec r; He_State(r.get()) = 0; r.at<u8>(172) = 0;
-    Cas4_Fee176(r.get()) = 10;      // value = 20
-    g_s.willingness = 200; g_s.rnd = 50;    // roll 50 < 200 -> refuse (3352)
+    Cas4_Fee176(r.get()) = 10;      // refuse value = 2*10 = 20
+    // threshold = 200*0.5 + 64 = 164; roll 50 < 164 -> refuse (3352).
+    g_s.willingness = 200; g_s.rnd = 50;
     WaitThenMoveStep(r.get());
     CHECK_EQ(g_s.sendMsgText[0], 3352);
     CHECK_EQ(g_s.cmd15Vals[0], 20);
@@ -291,12 +294,16 @@ TEST(CharActionW, GossipSendsRumor) {
     BigRec person; person.at<u8>(2) = 6; person.at<i32>(4) = 0x77;
     g_s.personRet = person.get();
     g_s.resolveRet = person.get();        // target resolves -> bribe path
-    g_s.wealth = 10; g_s.rnd = 0;         // bribe = 10 * (0+2) = 20
+    // gilde.exe 0x4d0ce3: bribe = trunc((double)wealth * flt_61EAD4) * (rnd+2),
+    // where flt_61EAD4 = 0x3C23D70A == 0.00999999977f (a *float* 0.01, NOT exact).
+    // ConvertX @0x5c6b08 truncates toward zero (frndint, RC=11), so:
+    //   trunc(1000.0 * 0.00999999977) = trunc(9.99999977...) = 9; 9*(0+2) = 18.
+    g_s.wealth = 1000; g_s.rnd = 0;
     GossipBroadcast(r.get());
     // 768 table entries, each eligible -> rumor (3365) + acceptance (3366) sent.
     CHECK(g_s.sendMsgCalls >= 2);
     CHECK_EQ(g_s.req16Calls, 768);
-    CHECK_EQ(g_s.req16Vals[0], 20);
+    CHECK_EQ(g_s.req16Vals[0], 18);
     CHECK_EQ(g_leaf.freeCalls, 1);
 }
 

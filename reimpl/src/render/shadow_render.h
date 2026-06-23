@@ -99,4 +99,40 @@ void FillSpans(ShadowRasterState& s, const ShadowSurface& surf, int count);
 void RasterizeTriangle(ShadowRasterState& s, const ShadowTri& tri,
                        ShadowSurface& surf);
 
+// ---------------------------------------------------------------------------
+// PER-OBJECT SHADOW RENDER ENTRY — the geometry tail of
+// gilde.exe 0x5f363c VIBE_Shadow_RenderMeshShadow (loc 0x5f3f0b..0x5f3f8b):
+//
+//     if ( *(_DWORD *)(v96 + 96) )                       // surface bound
+//     {
+//       VIBE_Render_LockSurfaceRegion(...);              // 0x5f3f0b
+//       dword_7626F0/FC/F8 = locked surface base/pitch/width;   // 0x5f3f21
+//       for ( j = mesh.tris; v78 < mesh.triCount; j += 40 )     // 0x5f3f38
+//         VIBE_Shadow_RasterizeTriangle(j, surf.bpp, surf.width, v78++); // 0x5f3f4c
+//       VIBE_Render_UnlockSurface(...);                  // 0x5f3f67
+//       if ( *(BYTE*)(*(a8+8)+16) )                       // copy-out flag
+//         VIBE_Render_CopySurfacePixels(...);            // 0x5f3f8b
+//     }
+//
+// This is the clean entry the live 3D frame calls per shadow-casting object: a
+// projected-silhouette MESH (each triangle's three vertices already projected to
+// the ground and screen-spaced — vertex .x/.y are the +16/+20 screen coords the
+// rasterizer reads) is splatted, one VIBE_Shadow_RasterizeTriangle per triangle,
+// into the object's shadow `surf`. The lock/unlock/copy-out are the platform
+// surface ops (the original's DirectDraw lock; here the caller owns `surf`).
+//
+// A shadow mesh triangle: three projected screen-space vertices + the per-tri
+// back-face flag (+38 bit2) the rasterizer's reverse-winding branch gates on.
+struct ShadowMeshTri {
+    ShadowTri v;   // x[3]/y[3] screen verts + backFlag
+};
+
+// Splat every triangle of a projected shadow mesh into `surf`. Faithful to the
+// tri loop tail of RenderMeshShadow: iterates [0, count), calling
+// RasterizeTriangle(tri[i], surf) in order with a shared ShadowRasterState
+// (the original re-uses the 13FCxxxx accumulator globals across triangles).
+// Returns the number of triangles processed (== count). This is the per-object
+// render entry the frame drives once the silhouette has been projected.
+int RenderObjectShadow(const ShadowMeshTri* tris, int count, ShadowSurface& surf);
+
 } // namespace guild::render

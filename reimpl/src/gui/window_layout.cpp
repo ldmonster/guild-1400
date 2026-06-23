@@ -16,25 +16,32 @@ int Window_Resize(i16 newW, i16 newH, int winSlot) {
     Window& win = g_windows[winSlot];
     if (!win.enabled())                         return 952 * winSlot; // free slot: original returns base*4
 
-    // --- height delta (v36) and an in-place "fitted width" accumulator (v37). ----------
-    int heightDelta = newH - win.h();           // (a1>>16) - (win h)
-    int fittedW     = newW - win.w();           // (a2>>16) - (win w) : width growth
+    // 0x41a143/0x41a156: widthDelta (v39, var_18) = newW - w  (a1@ax = newW);
+    //                    heightAccum (var_14)    = newH - h  (a2@dx = newH).
+    // NOTE: the original's child-fit loop grows the HEIGHT accumulator (var_14), NOT the
+    // width.  The width delta is never grown by the loop.  (Verified against the disasm:
+    // var_18 = a1-w[+8], var_14 = a2-h[+10]; the loop writes *(DWORD*)&var_14.)
+    int widthDelta   = newW - win.w();          // v39 (NOT grown below)
+    int heightAccum  = newH - win.h();          // var_14 (grown by the child loop)
 
-    // Pass 1: expand fittedW to bound the widest child (matches the +8 padding loop).
+    // Pass 1 (0x41a160 loop): expand heightAccum to bound the children. The original
+    // compares child (x + w) against (heightAccum + y + h) and grows on overflow.
+    //   v26 = y (word@+6), a4 = h (word@+10); v36 = heightAccum + y + h;
+    //   v27 = child.x(+16) + child.w(+20); if (v27 > v36) heightAccum = v27 - y - h + 8.
     i32* list = WindowChildList(winSlot);
     for (int i = 0; i < win.objCount(); ++i) {
         Widget& c = g_widgets[list[i]];
         int childRight = c.x() + c.w();          // (+16>>16) + (+20>>16)
-        int origin     = win.x() + win.y();      // (winX) + (winY)  (as the original sums)
-        if (childRight > fittedW + origin)
-            fittedW = childRight - origin + 8;
+        int origin     = win.y() + win.h();      // v26 + a4 = y + h
+        if (childRight > heightAccum + origin)
+            heightAccum = childRight - origin + 8;
     }
 
     // --- Surface re-creation (+32/+36/+40) is DEFERRED to the renderer cluster. ----------
 
-    // Apply the width/height growth to the window words (+8 w, +10 h).
-    win.w() = static_cast<i16>(win.w() + fittedW); // *((WORD*)w+4) += v36-equivalent (width)
-    win.h() = static_cast<i16>(win.h() + heightDelta); // *((WORD*)w+5) += heightDelta
+    // 0x41a228/0x41a231: w (word@+8) += widthDelta ; h (word@+10) = heightAccum + old_h.
+    win.w() = static_cast<i16>(win.w() + widthDelta);
+    win.h() = static_cast<i16>(win.h() + heightAccum);
 
     // --- The scrollbar-tile snap (flags 0x400 / 0x4) needs the 84-byte gfx-metric table
     //     and is DEFERRED. ----------------------------------------------------------------
@@ -44,9 +51,11 @@ int Window_Resize(i16 newW, i16 newH, int winSlot) {
     backing.clipY1() = static_cast<i16>(win.h() + win.y()); // +34
     backing.clipX1() = static_cast<i16>(win.w() + win.x()); // +30
 
-    // Clamp to the screen extent (dword_69FFB8 width, dword_69FFBC extent).
-    if (win.y() + win.x() > (g_screenClipW >> 16))
-        win.h() = static_cast<i16>(g_screenClipExt - win.y());
+    // 0x41a335: if (y + h > LOWORD(dword_69FFBC)) h = LOWORD(dword_69FFBC) - y.
+    //   ([&dword_69FFB8+2]>>16 resolves to the low word of dword_69FFBC == (i16)g_screenClipExt)
+    if (win.y() + win.h() > static_cast<i16>(g_screenClipExt))
+        win.h() = static_cast<i16>(static_cast<i16>(g_screenClipExt) - win.y());
+    // 0x41a35f: if (x + w > dword_69FFBC>>16) w = HIWORD(dword_69FFBC) - x.
     if (win.x() + win.w() > (g_screenClipExt >> 16))
         win.w() = static_cast<i16>((g_screenClipExt >> 16) - win.x());
 
@@ -73,10 +82,12 @@ int Window_AutoFitHeight(int winSlot, int minHeight) {
     if (win.flags() & kWinFlagTextBuffer)
         minHeight = win.contentHeight();        // v3[145] == +580
 
-    i32* list = WindowChildList(winSlot);
+    // 0x41a537 loop: the original walks the GLOBAL widget array (dword_69FFB4 + 740*i,
+    // i = 0..objCount-1) — NOT the window's child id list (v5 steps 0x2E4 from base 0).
+    // Reproduce that flat iteration exactly.
     int count = win.objCount();
-    for (int i = 0; i < count; ++i) {
-        Widget& c = g_widgets[list[i]];
+    for (int i = 0; i < count && i < kMaxWidgets; ++i) {
+        Widget& c = g_widgets[i];
         int childBottom = c.x() + c.w();        // (+16>>16) + (+20>>16)  (per the original)
         int winTop      = win.y();              // v3[1] >> 16
         if (childBottom > minHeight + winTop)

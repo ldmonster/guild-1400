@@ -1,6 +1,7 @@
 #include "render/render_leaves3.h"
 
 #include "compress/crc.h"  // CrcCompute (0x5dc6e0 VIBE_Util_Crc32 equivalent)
+#include "render/render_leaves4.h"  // g_rawLightingFlag (byte_649D70)
 
 #include <cmath>
 #include <cstddef>
@@ -16,7 +17,7 @@ namespace guild::render {
 // padding slot the original never reads (loop runs v2 = 1..15). Bit-exact floats.
 const float kUvScrollRate[16] = {
     0.0f,                                 // [0]  (unused padding)
-    3.333333370392211e-05f,               // [1]  0x38B7176E -> 1/30000-ish
+    3.333333370392211e-05f,               // [1]  0x380BCF65 (bit-exact, verified)
     6.666666740784422e-05f,               // [2]
     9.999999747378752e-05f,               // [3]
     0.00013333333481568843f,              // [4]
@@ -358,11 +359,10 @@ char* CreateTileRecord(const char* name, int size, i8 fmt, int extra,
                        int batchTag) {
     int idx = 0;
     char* rec = static_cast<char*>(g_hooks.findActiveRecord(extra, &idx));
-    if (!rec) return nullptr;
+    // 0x5db955 — `if (!ActiveRecord || !byte_649D70) return 0`. Both the record
+    // slot AND the system-init flag byte_649D70 (g_rawLightingFlag) must be set.
+    if (!rec || !g_rawLightingFlag) return nullptr;
 
-    // The original gates the body on byte_649D70 (a "system initialised" flag);
-    // with no record allocated the default hook returns null above, so reaching
-    // here implies the active record exists — proceed with the init exactly.
     std::memset(rec, 0, 4);  // head zero (unrolled memset in the original)
     g_hooks.strNCopyPad(rec, name, 63);
 

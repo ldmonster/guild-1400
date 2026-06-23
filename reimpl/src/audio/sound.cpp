@@ -31,11 +31,17 @@ VoiceSlot* SoundSystem::playSample(const std::string& name) {
     }
     v->field2C = 0;         // v9[11] = 0 (+0x2C)
     v->loopCount = 1;       // v9[3]  = 1 (+0x0C)
-    v->volume = 127;        // v9[9]  = 127 (+0x24)
-    v->pan = 63;            // v9[10] = 63  (+0x28)
-    // VIBE_Audio_SetSampleVolume / SetSamplePan / SetSampleLoopCount.
-    device_->setVolume(v->handle, v->pan);    // +0x28 holds the volume value
-    device_->setPan(v->handle, v->volume);    // +0x24 holds the pan value
+    v->volume = 127;        // v9[9]  = 127 (+0x24)  (carries the volume value)
+    v->pan = 63;            // v9[10] = 63  (+0x28)  (carries the pan value)
+    // VIBE_Audio_SetSampleVolume(*v9) / SetSamplePan(*v9) / SetSampleLoopCount(*v9):
+    // each pushes the value held in the slot. SetSampleVolume -> AIL_set_sample_volume
+    // pushes +0x24 (=127); SetSamplePan -> AIL_set_sample_pan pushes +0x28 (=63).
+    // (The AIL_set_sample_* calls are the Miles boundary; routed through the SDL shim.)
+    device_->setVolume(v->handle, v->volume);  // +0x24 (=127)  -> AIL_set_sample_volume
+    device_->setPan(v->handle, v->pan);        // +0x28 (=63)   -> AIL_set_sample_pan
+    // SetSampleLoopCount pushes +0x0C (=1); the shim carries loop count via playSample/
+    // startVoice, and PlaySample only primes the slot (no StartSample here), so there is
+    // no separate device loop-count call at this site.
     return v;
 }
 

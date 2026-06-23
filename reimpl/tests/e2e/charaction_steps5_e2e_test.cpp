@@ -33,6 +33,7 @@ struct Host {
     i32 seqRet = 0;
     int markCalls = 0;
     int quickjumpCalls = 0;
+    int finalizeCalls = 0;
     u8 cityCat = 0;
     i32 cityPid = 0;
     int playerActionCalls = 0;
@@ -53,6 +54,7 @@ i32  HSeq(i32) { return g_h.seqRet; }
 void HMark(i32) { ++g_h.markCalls; }
 void HSlot28() {}
 void HQuick(i32, i32, int) { ++g_h.quickjumpCalls; }
+void HFinalize(i32, i32) { ++g_h.finalizeCalls; }
 i32  HPid(u16) { return g_h.cityPid; }
 u8   HCat(u16) { return g_h.cityCat; }
 int  HRnd(int) { return 0; }
@@ -82,6 +84,7 @@ void Install() {
     s5.markObjectBought = HMark;
     s5.queueSlotReset28 = HSlot28;
     s5.sendQuickjumpMessage = HQuick;
+    s5.queuePurchaseFinalize32 = HFinalize;
     s5.cityPersonId = HPid;
     s5.cityCategory = HCat;
     s5.randomModulo = HRnd;

@@ -105,21 +105,23 @@ int UpdateIdleSocial(Character* ch) {
         return 0;
     }
 
+    // gilde.exe 0x405418: `else if ( FindNearbyInRadius(...) )`.  Note the binary
+    // does NOT clear +140&~8 in the eligible-but-no-neighbour case — the flag clear
+    // only happens in the NOT-eligible branch above (0x4054a9).  When a neighbour is
+    // found but WorldToTileWithHeight misses, it likewise just falls through.
     Character* buf[16] = {};
     if (FindNearbyInRadius(ch, buf, 16, 20.0f)) {
         Character* other = buf[0];
         int col = 0, row = 0;
-        if (hk.resolveMeetTile(ch, other, &col, &row)) {
+        if (hk.resolveMeetTile(ch, other, &col, &row)) {  // 0x405469 hit
             // VIBE_CharAction_InsertActionVararg(ch | type45, col, row, scene id).
             i32 args[3] = { col, row, ch->slotIndex };
             InsertActionVararg(ch, kActWalk /*45 talk/walk*/, args, 3);
             return 1;
         }
-        return 0;
+        return 0;                                          // tile miss -> no action
     }
-    // No neighbour: clear the dirty-mesh flag (the original's fall-through path).
-    ch->flagsA &= ~0x08u;
-    return 0;
+    return 0;                                              // no neighbour -> no flag clear
 }
 
 } // namespace guild::sim

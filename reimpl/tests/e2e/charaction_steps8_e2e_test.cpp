@@ -117,7 +117,10 @@ TEST(CharActionSteps8E2E, ArrestLifecycle) {
     CharActionStep8Hooks h = MakeE2E();
     Block person; Zero(person);
     person.b[0] = 3;                    // ordinary class
-    *reinterpret_cast<u16*>(person.b + 37) = 0xFFFF;
+    {  // +37 is unaligned for u16; store via memcpy (byte-identical, no UB).
+        u16 _v = 0xFFFF;
+        std::memcpy(person.b + 37, &_v, sizeof(_v));
+    }
     e.person = reinterpret_cast<HeRecord*>(person.b);
     e.rng = 0;                          // every roll 0 -> +4h wakes, no escape branch
     SetCharActionStep8Hooks(&h);

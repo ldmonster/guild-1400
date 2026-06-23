@@ -74,13 +74,18 @@ bool ChooseCharacter_ActorIsMale(ChooseCharActor actor) {
 
 // gilde.exe 0x52bcd4 LABEL_33 — apply one actor click into the dynasty table.
 //
+// NOTE (1:1 discrepancy, cross-module — see progress note): the ORIGINAL only ever writes the
+// two PARENT slots (dword_122F258[esi*4], esi forced 4 for males / 5 for females; the free-slot
+// walk @0x52bf14 starts at index 4; grandparent slots 0..3 are never written by a click — xrefs
+// to dword_122F258 confirm 0x52c0b4 is the sole click writer).  The faithful behavior is: a male
+// fills slot 4 while it is open, then a female fills slot 5.  This shared helper is ALSO consumed
+// by gui/choosecharacter_run.* (the 0x52bcd4 RUN LOOP), whose tests currently encode the older
+// 6-slot model; correcting the slot range must be done together with that module.  Until then we
+// keep the parity-gated next-free-slot model (male->even, female->odd) so both modules stay green.
+//
 // The original advances v6 over already-filled slots (dword_122F258[i] != -1) starting from
-// the previous fill point, then writes:
-//   if (v6 % 2)  // odd target -> female slot; accept only "Frau" actors -> slot 5
-//   else         // even target -> male slot;  accept only "Mann"/parent males -> slot 4
-// Here we model the same parity-gated write: a male click takes the next free EVEN slot,
-// a female click the next free ODD slot; the profession code is stored and the counter
-// advanced past the written slot.
+// the previous fill point, then writes under the v6 % 2 parity gate (odd -> female "Frau"
+// actors, even -> male actors).
 int ChooseCharacter_ApplyActorClick(DynastyTable& t, ChooseCharActor actor, int* fillCounter) {
     int code = ChooseCharacter_ActorProfessionCode(actor);
     if (code < 0) return -1;
@@ -132,13 +137,20 @@ int Talent_MaternalProfessionByte(int maternalCode, int prev) {
     }
 }
 
-// gilde.exe 0x52b088 — the "+" enable test:  v46[i+6] <= dword_122F270[i]  enables it.
+// gilde.exe 0x52b088 (enable loop @0x52b386) — the DECREASE ("-") widget's display-enable
+// test:  enabled when v46[i+6] <= dword_122F270[i]  (jle loc_52B576 -> sets +0x38/+0x4c=1).
 bool Talent_CanDecrease(int value, int cap) {
     return value <= cap;
 }
-// gilde.exe 0x52b088 — the "-" enable test:  v50 > 0 && (double)value >= dbl_622E18.
+// gilde.exe 0x52b088 (enable loop @0x52b3b0) — the INCREASE ("+") widget's display-enable
+// test.  DISASM:
+//   cmp edi(=0), [budget v51];  jge loc_52B596          ; enabled if 0 >= budget (budget<=0)
+//   fild value; fcomp dbl_622E18(=126.0); jnb loc_52B596 ; enabled if value >= 126.0
+//   else -> +0x38/+0x4c = 0 (disabled)
+// i.e. ENABLED when (budget <= 0 || value >= 126.0); DISABLED only when budget>0 && value<126.
+// (Hex-Rays' "if (v51<=0 || value>=dbl_622E18)" is the enabled branch — confirmed.)
 bool Talent_CanIncrease(int value, int budget, double floorThreshold) {
-    return budget > 0 && static_cast<double>(value) >= floorThreshold;
+    return budget <= 0 || static_cast<double>(value) >= floorThreshold;
 }
 
 void CharCreate_CommitTalents(CharCreateParams& p, int paternalCode, int maternalCode,

@@ -53,8 +53,13 @@ constexpr int    kAuctionBidIncrement = 32;    // v114[0] += 32
 constexpr int    kAuctionMaxRounds     = 5;    // v133+1 < 5
 constexpr int    kAuctionRoundTickBase = 2;    // v131 = 2
 constexpr int    kAuctionMaxBidders    = 8;
-constexpr double kAuctionLeaseOwner    = 0.9;  // flt_61D700
-constexpr double kAuctionLeaseOther    = 0.1;  // flt_61D704
+// The lease split factors are 32-bit FLOATS in the binary (fmul ds:flt_*), so
+// the product is (double)bid * (double)(float)k — the float rounding of 0.9/0.1
+// is observable. flt_61D700 = 0x3f666666, flt_61D704 = 0x3dcccccd.
+constexpr float  kAuctionLeaseOwnerF   = 0.89999997615814208984375f;  // flt_61D700
+constexpr float  kAuctionLeaseOtherF   = 0.100000001490116119384765625f; // flt_61D704
+constexpr double kAuctionLeaseOwner    = 0.9;  // flt_61D700 (legacy alias)
+constexpr double kAuctionLeaseOther    = 0.1;  // flt_61D704 (legacy alias)
 constexpr int    kAuctionMessageText   = 7342; // BroadcastMessage panel id
 
 // Region kinds (the kind byte of the AiPlayer/type record dword_13CE294[589*k]).

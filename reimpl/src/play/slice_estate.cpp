@@ -76,9 +76,9 @@ void RunApplyCash(i32 id, i64 delta) {
 // ---------------------------------------------------------------------------
 void EstateCmdHandler(sim::CommandQueue& /*q*/, sim::CommandPacket& pkt,
                       sim::AckEntry* /*ack*/) {
-    i32 newOwner = static_cast<i32>(pkt.get32(kEstateNewOwnerOff));  // a1
-    i32 objectId = static_cast<i32>(pkt.get32(kEstateObjectOff));    // a2
-    i32 parent   = static_cast<i32>(pkt.get32(kEstateParentOff));    // a4
+    i32 objectId = static_cast<i32>(pkt.get32(kEstateObjectOff));    // a1 @+0x10 (object)
+    i32 parent   = static_cast<i32>(pkt.get32(kEstateParentOff));    // a2 @+0x14 (parent src)
+    i32 newOwner = static_cast<i32>(pkt.get32(kEstateNewOwnerOff));  // a4 @+0x18 (owner src)
     RunApplyOwnership(objectId, static_cast<i16>(newOwner), static_cast<i16>(parent));
 }
 
@@ -140,9 +140,9 @@ namespace {
 sim::CommandPacket BuildEstatePacket(const EstateCommand& c) {
     sim::CommandPacket pkt{};
     pkt.bytes[0] = kEstateCmdOpcode;                                 // v5[0] = 56
-    pkt.put32(kEstateNewOwnerOff, static_cast<u32>(c.newOwnerId));   // v6 = a1
-    pkt.put32(kEstateObjectOff,   static_cast<u32>(c.object));       // v7 = a2
-    pkt.put32(kEstateParentOff,   static_cast<u32>(c.parentHandle)); // v8 = a4
+    pkt.put32(kEstateObjectOff,   static_cast<u32>(c.object));       // v6 = a1 (object,+0x10)
+    pkt.put32(kEstateParentOff,   static_cast<u32>(c.parentHandle)); // v7 = a2 (parent,+0x14)
+    pkt.put32(kEstateNewOwnerOff, static_cast<u32>(c.newOwnerId));   // v8 = a4 (owner,+0x18)
     return pkt;
 }
 } // namespace

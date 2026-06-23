@@ -297,3 +297,54 @@ TEST(CrtFloat, ScanMatchesCSscanf) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wave-11 hardening: ReadFloat collected the numeric token into a fixed 128-byte
+// stack buffer with no bound — an unbounded "%f" of a very long digit run blew
+// the stack. The collect is now capped; this must run clean under ASAN and the
+// value of a 200-zero-then-something token must still convert sensibly.
+// ---------------------------------------------------------------------------
+TEST(CrtFloat, ScanFloatOverlongTokenNoOverflow) {
+    std::string big(300, '1'); // 300 '1' chars — far past the 128-byte buffer
+    big += ".5";
+    double d = -1.0;
+    int n = Sscanf(big.c_str(), "%lf", &d);
+    CHECK_EQ(n, 1);
+    CHECK(d > 0.0); // converted (value is ~1.111e299 -> inf is acceptable too)
+}
+
+// Width-bounded float read of a long input: only `width` chars consumed; no
+// overflow either way.
+TEST(CrtFloat, ScanFloatWidthBounded) {
+    double d = 0.0;
+    int n = Sscanf("123456789.0", "%5lf", &d);
+    CHECK_EQ(n, 1);
+    CHECK(std::fabs(d - 12345.0) < 1e-9);
+}
+
+// Integer scan with an overlong digit run (200 nines): the 2's-complement wrap
+// must not trip signed-overflow UB.
+TEST(CrtFloat, ScanIntegerOverlongNoUB) {
+    std::string big(200, '9');
+    int v = 0;
+    int n = Sscanf(big.c_str(), "%d", &v);
+    CHECK_EQ(n, 1);
+    volatile int sink = v; // value is the low-32-bit wrap; just no crash/UB
+    (void)sink;
+}
+
+// INT_MIN integer scan (the safe-negate path in ReadInteger).
+TEST(CrtFloat, ScanIntMin) {
+    int v = 0;
+    int n = Sscanf("-2147483648", "%d", &v);
+    CHECK_EQ(n, 1);
+    CHECK_EQ(v, -2147483647 - 1);
+}
+
+// Empty input to sscanf: no conversions, returns 0 (EOF-before-any-match).
+TEST(CrtFloat, ScanEmptyInput) {
+    int v = 7;
+    int n = Sscanf("", "%d", &v);
+    CHECK(n <= 0);   // EOF: 0 or -1
+    CHECK_EQ(v, 7);  // untouched
+}

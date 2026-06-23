@@ -126,6 +126,12 @@ struct NewGameParams {
     std::string cityFile;        // the matched ".CTY"/".NET" file (extension stripped)
     bool        network = false; // network game -> ".NET" extension, word_63C740 & 4
 
+    // Difficulty (ChooseCharacterIntroVariant @0x52e4e0): the picked level 0..4.
+    // Round-trips through byte_12335BA; the session bootstrap copies it into
+    // dword_63C744 (the live difficulty the start-gold formula 1250-250*d reads,
+    // gilde.exe 0x5340e5).
+    int difficulty = 0;
+
     // History/difficulty (RunChooseHistory): 1, 2 or 0 (History_SetActiveFlag arg).
     int historyFlag = 0;
 

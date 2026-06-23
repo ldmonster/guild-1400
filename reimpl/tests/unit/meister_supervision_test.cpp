@@ -122,14 +122,16 @@ TEST(MeisterSupervision, FlagIdleStaff_AlreadySupervised) {
     Cap c;
     guild::ai::BuildingFlag b; b.supervisedBit = 4;  // bit4 already set
     std::vector<guild::ai::StaffSlot> slots(1);
-    CHECK_EQ(guild::ai::FlagIdleStaff(&b, 1, slots.data(), 1, MakeHooks(c)), -1);
+    // already supervised (bit4 set) -> the original returns 0 (0x45e07a), not -1.
+    CHECK_EQ(guild::ai::FlagIdleStaff(&b, 1, slots.data(), 1, MakeHooks(c)), 0);
 }
 
 TEST(MeisterSupervision, FlagIdleStaff_CandidateRollAbort) {
     Cap c;
     guild::ai::BuildingFlag b;  // bit4 clear
     std::vector<guild::ai::StaffSlot> slots(1);
-    slots[0].live = true; slots[0].employed = true; slots[0].hasActionObj = false;
+    slots[0].live = true; slots[0].ownerBuildId = 1; slots[0].employed = true;
+    slots[0].hasActionObj = false;
     slots[0].gaugeA = 100; slots[0].gaugeB = 100;  // < 168 -> idle candidate
     // rng_mod(128) = 0 < 32 -> abort, no flag.
     int seq[1] = {0}; SetRng(seq, 1);
@@ -142,7 +144,7 @@ TEST(MeisterSupervision, FlagIdleStaff_CandidateFlags) {
     Cap c;
     guild::ai::BuildingFlag b;
     std::vector<guild::ai::StaffSlot> slots(2);
-    for (auto& s : slots) { s.live = true; s.employed = true; s.gaugeA = 100; s.gaugeB = 100; }
+    for (auto& s : slots) { s.live = true; s.ownerBuildId = 1; s.employed = true; s.gaugeA = 100; s.gaugeB = 100; }
     // rng_mod(128) = 64 -> not < 32 -> proceed; both idle slots get bit 0x10.
     int seq[1] = {64}; SetRng(seq, 1);
     CHECK_EQ(guild::ai::FlagIdleStaff(&b, 1, slots.data(), 2, MakeHooks(c)), 1);
@@ -160,7 +162,7 @@ TEST(MeisterSupervision, FlagIdleStaff_NoCandidateFreshSkip) {
     // Over-allocate by one so the trailing probe (index == scanned count) is in
     // bounds, mirroring the real 768-entry array the original relies on.
     std::vector<guild::ai::StaffSlot> slots(2);
-    slots[0].live = true; slots[0].employed = true;
+    slots[0].live = true; slots[0].ownerBuildId = 1; slots[0].employed = true;
     slots[0].gaugeA = 200; slots[0].gaugeB = 200;  // not idle (>= 168) -> no candidate
     slots[1].gaugeA = 100; slots[1].gaugeB = 100;  // fresh probe target slot[v3==1] (< 252)
     int seq[1] = {100}; SetRng(seq, 1);            // 100 > 96 -> skip

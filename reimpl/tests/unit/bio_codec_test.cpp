@@ -197,9 +197,11 @@ TEST(BioCodec, ZipTellCurrentFile_Pure) {
     // Model the unz_s struct: a byte block whose +124 slot points at a file-info
     // block whose +24 dword is the byte offset.
     std::vector<u8> fileInfo(64, 0);
-    *reinterpret_cast<int*>(fileInfo.data() + 24) = 0x4321;
+    int off = 0x4321;
+    std::memcpy(fileInfo.data() + 24, &off, sizeof(off));   // +24 unaligned dword
     std::vector<u8> unz(160, 0);
-    *reinterpret_cast<void**>(unz.data() + 124) = fileInfo.data();
+    void* fi = fileInfo.data();
+    std::memcpy(unz.data() + 124, &fi, sizeof(fi));         // +124 unaligned ptr
     CHECK_EQ(ZipTellCurrentFile(unz.data()), 0x4321);
 
     // null base -> param error

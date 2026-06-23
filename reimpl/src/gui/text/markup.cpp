@@ -23,8 +23,13 @@ int ReadDigit(const char*& p) {
 // the byte-exact `v15` switch in VIBE_Window_ParseMarkupAndBuild @0x416720.
 MarkupKind ClassifyDollar(unsigned char v15) {
     switch (v15) {
+        // '<' (0x3C): recognized bound/metric token. Disasm 0x416f71: al>=0x3C
+        // falls through to the Property_Get("M")/LayoutScrollContent branch (a
+        // valid token), only al>0x3C re-tests. '=' (0x3D) is NOT a token: at
+        // 0x41702b `cmp al,0x3E; jb default` routes 0x3D to the "Unknown
+        // textparameter" path (along with '>','?','@'). Earlier reconstruction
+        // mislabeled 0x3D as BoundLeft; the binary rejects it. (gilde.exe 0x416720)
         case 0x3C: return MarkupKind::BoundRight;    // '<'
-        case 0x3D: return MarkupKind::BoundLeft;     // '='
         case 0x41: return MarkupKind::LineFeed;      // 'A'
         case 0x42: return MarkupKind::ColumnCenter;  // 'B'  (v208=128)
         case 0x43: return MarkupKind::Clear;         // 'C'

@@ -13,6 +13,7 @@
 //   VIBE_VoiceQueue_SetPauseFlag@0x57efe8
 #include "guild/common/types.h"
 #include "audio/voice.h"
+#include <string>
 #include <vector>
 
 namespace guild::audio {
@@ -29,6 +30,12 @@ struct VoiceQueueNode {
     const void* pcm = nullptr;  // PCM to play when the node starts
     std::size_t pcmBytes = 0;
     int sampleRate = 44100;
+    // The sample's name string. In the original ProcessNext (0x57eff0) reads it
+    // from voice->sample (slot+0 -> sample record +4) and runs strstr() against
+    // it to decide ambient ducking: a line whose name contains "Fanfare" ducks
+    // ambient on start; a following line whose name contains "MausclickLinks"
+    // un-ducks + retires. Carried on the node so those exact tests are 1:1.
+    std::string sampleName;
 };
 
 // The original ducks ambient music to 0 while speech plays (SetFadeVolume 0/1).
@@ -54,7 +61,7 @@ public:
     // voice looping (so the recycler won't steal it before it plays). Returns
     // false when `voice` is null (original returns 0).
     bool enqueue(VoiceSlot* voice, int delay, const void* pcm, std::size_t bytes,
-                 int sampleRate);
+                 int sampleRate, const std::string& sampleName = std::string());
 
     // VIBE_VoiceQueue_ProcessNext @0x57eff0 — advance the head one step against
     // the current tick (in the original tick = 13 * frameCounter).

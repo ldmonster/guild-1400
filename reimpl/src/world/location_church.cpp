@@ -15,15 +15,22 @@ DonationResult ChurchComputeDonation(int playerWealth, int employerWealth, int p
     r.wealthPlayer   = (playerWealth   <= 1) ? 1 : playerWealth;
     r.wealthEmployer = (employerWealth <= 1) ? 1 : employerWealth;
     r.wealthCombined = r.wealthPlayer + r.wealthEmployer;
+    // 0x521741: v6 = (double)combined * flt_62240C; ConvertX truncates -> (int)v6.
     r.suggestedCost  = (int)((double)r.wealthCombined * (double)church::kDonationCostFrac);
+    // 0x5218fe..0x521945: v15 = (double)(255*paid) / (double)combined (x87 fdivrp).
+    //   fst var_18 (FLOAT slot) at 0x521939 stores the quotient BEFORE the truncating
+    //   fistp at 0x521945. reputSpread (v45) is built from that FLOAT, not the (int).
+    float quotientF = 0.0f;
     if (r.wealthCombined != 0) {
-        // v48 = 255 * v15; v16 = (double)(255*v15) / (double)v44;  v47 = (int)v16
-        r.reputDelta = (int)((double)(255 * paid) / (double)r.wealthCombined);
+        const double q = (double)(255 * paid) / (double)r.wealthCombined;
+        quotientF    = (float)q;          // fst var_18 (32-bit float)
+        r.reputDelta = (int)q;            // fistp var_14 (ConvertX truncates toward 0)
     } else {
         r.reputDelta = 0;
     }
-    // v46 = v46 * flt_622410  (the per-peer spread the loop queues to each rival)
-    r.reputSpread = (float)r.reputDelta * church::kDonationReputFactor;
+    // 0x521958/0x52195f: v45 = (float)quotient; v45 = v45 * flt_622410.  The per-peer
+    // spread uses the UN-truncated float quotient (var_18), NOT the (int) reputDelta.
+    r.reputSpread = quotientF * church::kDonationReputFactor;
     return r;
 }
 
@@ -37,24 +44,30 @@ DonationResult ChurchComputeDonation(int playerWealth, int employerWealth, int p
 //   v28 = (double)v32 * dbl_622440;                // /10
 //   if (v28 > 3200.0 && v28 >= 320000.0) cost = 320000;
 //   else { v29 = v32 * 0.1; cost = (v29 <= 3200.0) ? 3200 : v29; }
-IndulgenceResult ChurchComputeIndulgence(bool hasCrime, int playerWealth,
+IndulgenceResult ChurchComputeIndulgence(int crimeHandlerSum, int playerWealth,
                                          bool npcIsPlayer, int favorability) {
     IndulgenceResult r{};
-    r.offered = hasCrime;
-    if (!hasCrime) {
+    r.offered = (crimeHandlerSum != 0);
+    if (!r.offered) {
         r.factor = 0.0f;
         r.rawCost = 0;
         r.cost = 0;
         return r;
     }
+    // 0x521d35: base = (float)((double)wealth * flt_622430), stored to FLOAT var_20.
     double base = (double)playerWealth * (double)church::kIndulgenceCostFrac;
-    float factor = church::kIndulgenceDefFactor;
+    base = (double)(float)base;            // fstp var_20 narrows to 32-bit float
+    float factor = church::kIndulgenceDefFactor;   // mov var_2C, 3FC00000h (1.5f)
     if (!npcIsPlayer) {
         factor = (church::kIndulgenceFavBase - (float)favorability) *
-                 church::kIndulgenceFavScale;
+                 church::kIndulgenceFavScale;       // fstp var_2C (float)
     }
+    // 0x521d8b..0x521d99: factor *= (double)crimeHandlerSum (ecx == SumPlayerHandlerValues,
+    // preserved across ComputeTotalWealth/Favorability), re-stored to FLOAT var_2C.
+    float factorEff = (float)((double)crimeHandlerSum * (double)factor);
     r.factor = factor;
-    int raw = (int)(base * (double)factor);
+    // 0x521da0..0x521db3: raw = (int)trunc(base * factorEff)  (ConvertX truncates).
+    int raw = (int)(base * (double)factorEff);
     r.rawCost = raw;
 
     double t = (double)raw * church::kIndulgenceTenthDiv;

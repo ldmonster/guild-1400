@@ -84,6 +84,59 @@ TEST(ShadowProjectUnit, ProjectVertexPoint) {
 }
 
 // ===========================================================================
+// WAVE-10 HARDENING — degenerate light directions. The projection divides by
+// -dir.y (directional) / -d.y (point); a light whose ray is PARALLEL to the
+// ground (dir.y == 0) yields an IEEE inf/nan, which is well-defined float
+// behavior (NOT UB) — the original FPU produced the same. These tests pin that
+// the degenerate path is finite-free of integer UB and that a zero direction
+// vector does not trap. (The engine gates these out upstream via the bounds
+// guard ShadowBoundsAcceptable; the math itself must not crash.)
+// ===========================================================================
+TEST(ShadowProjectUnit, DegenerateDirectionalLightDir) {
+    // dir.y == 0: ray parallel to ground -> division by zero -> ±inf, no UB.
+    ShadowVec3 dirFlat{1.0f, 0.0f, 0.0f};
+    ShadowVec3 r = ProjectVertexDirectional({2.0f, 6.0f, 1.0f}, dirFlat, 0.0f);
+    // x/z become inf (t = (6-0)/0 = +inf); y = t*0 + 6 = nan. We only assert no
+    // crash/UB; the values are the same inf/nan the original FPU yields.
+    CHECK(std::isinf(r.x) || std::isnan(r.x));
+
+    // Fully-zero direction vector: t = (v.y-g)/-0 = -inf/+inf, components nan/inf.
+    ShadowVec3 zero{0.0f, 0.0f, 0.0f};
+    ShadowVec3 z = ProjectVertexDirectional({3.0f, 4.0f, 5.0f}, zero, 0.0f);
+    CHECK(std::isnan(z.x) || std::isinf(z.x));
+}
+
+TEST(ShadowProjectUnit, DegeneratePointLightCoincident) {
+    // Point light coincident with the vertex in Y (L.y == v.y): d.y == 0 ->
+    // t = (L.y - g)/-0 -> inf; components inf/nan. No UB, matches the FPU.
+    ShadowVec3 L{0.0f, 5.0f, 0.0f};
+    ShadowVec3 r = ProjectVertexPoint({2.0f, 5.0f, 1.0f}, L, 0.0f);
+    CHECK(std::isinf(r.x) || std::isnan(r.x));
+
+    // Light exactly at the vertex (zero ray): d == 0 -> 0/0 = nan everywhere.
+    ShadowVec3 r2 = ProjectVertexPoint({2.0f, 5.0f, 1.0f}, {2.0f, 5.0f, 1.0f}, 0.0f);
+    CHECK(std::isnan(r2.x) || std::isinf(r2.x));
+}
+
+// Empty / single-vertex meshes: ProjectMeshToGround must not read past the span
+// and returns the seeded (empty) bounds for n==0.
+TEST(ShadowProjectUnit, ProjectMeshEmptyAndSingle) {
+    ShadowVec3 dir{0.0f, -1.0f, 0.0f};
+    ShadowVec3 out[1];
+
+    // n == 0: no projection, bounds stay at their 1e10/-1e10 seeds.
+    ShadowBounds b0 = ProjectMeshToGround(nullptr, 0, nullptr, dir, true, 0.0f);
+    CHECK(b0.minX > 1e9f && b0.maxX < -1e9f);   // untouched seeds
+
+    // n == 1: single vertex; bounds collapse to that point's XZ.
+    ShadowVec3 one[1] = {{3.0f, 6.0f, 7.0f}};
+    ShadowBounds b1 = ProjectMeshToGround(one, 1, out, dir, true, 0.0f);
+    CHECK(Near(out[0].y, 0.0f));
+    CHECK(Near(b1.minX, 3.0f) && Near(b1.maxX, 3.0f));
+    CHECK(Near(b1.minZ, 7.0f) && Near(b1.maxZ, 7.0f));
+}
+
+// ===========================================================================
 // ComputeCasterHeight (0x5f34c0) — the 3-priority resolution.
 // ===========================================================================
 TEST(ShadowProjectUnit, ComputeCasterHeightPriorities) {
@@ -115,4 +168,22 @@ TEST(ShadowProjectUnit, ComputeCasterHeightPriorities) {
     // No table (samples == nullptr) -> 0 (the v18||!(a1+492) early return).
     q.samples = nullptr;
     CHECK(Near(ComputeCasterHeight(t2, true, q), 0.0f));
+}
+
+// Edge: sampleCount == 0 in the priority-3 path. The min-fold loop runs zero
+// times, so v16 stays at the 1e10 seed and the result is 1e10 + baseOffset.
+// (Faithful to the original's `v16 = v17 = 1e10` init when the loop is empty.)
+TEST(ShadowProjectUnit, ComputeCasterHeightZeroSamples) {
+    ShadowCasterSlot t[kCasterTableSlots];        // all empty -> no override
+    ShadowSamplePoint samples[1] = {{1.0f}};
+    CasterHeightQuery q;
+    q.originY = 0.0f; q.planeY = 0.0f; q.baseOffset = 2.0f;
+    q.onGround = false; q.samples = samples; q.sampleCount = 0;
+    float h = ComputeCasterHeight(t, /*enabled=*/true, q);
+    CHECK(h > 9.0e9f);                              // 1e10 + 2.0 (no min taken)
+
+    // enabled == false skips the override scan but priority 2/3 still run.
+    q.sampleCount = 1;
+    float h2 = ComputeCasterHeight(t, /*enabled=*/false, q);
+    CHECK(Near(h2, 3.0f));                          // min(1.0) + base(2.0)
 }

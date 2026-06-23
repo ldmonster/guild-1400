@@ -91,15 +91,23 @@ TEST(CrtTimeE2E, TimeBasePeriodicScheduling) {
     CHECK_EQ(g_count, 20);
 }
 
-// One-shot timer stops after the first tick when not periodic.
-TEST(CrtTimeE2E, TimeBaseOneShot) {
+// StartTimer's second argument selects the re-arm MECHANISM, not whether the
+// timer repeats: a2 == 0 arms a TIME_PERIODIC winmm timer (@0x44e28c
+// fuEvent = (a2 == 0)); a2 != 0 arms a one-shot that fptc re-arms each tick
+// (@0x44e209, dword_62EB50). Both modes tick continuously until StopTimer —
+// the app boots with StartTimer(0xE, 0) @0x527e52 and runs forever on it.
+TEST(CrtTimeE2E, TimeBaseModeZeroIsContinuous) {
     g_count = 0;
     MockClock clk;
     crt::TimeBase tb(&clk);
     tb.RegisterProc(onTick, 1);
-    CHECK_EQ(tb.StartTimer(10, 0 /*one-shot*/), 1);
+    CHECK_EQ(tb.StartTimer(10, 0 /*winmm TIME_PERIODIC mode*/), 1);
     clk.advance(100);
     tb.PumpFromClock();
-    CHECK_EQ(g_count, 1);          // only fired once
-    CHECK_EQ(tb.MasterTicks(), 1u);
+    CHECK_EQ(g_count, 10);         // keeps ticking — 100 ms / 10 ms = 10 fires
+    CHECK_EQ(tb.MasterTicks(), 10u);
+    tb.StopTimer();                // 0x44e2c4 — the only way ticking ends
+    clk.advance(100);
+    tb.PumpFromClock();
+    CHECK_EQ(tb.MasterTicks(), 10u);
 }

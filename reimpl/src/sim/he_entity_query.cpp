@@ -5,6 +5,7 @@
 #include "sim/command_apply4.h"  // g_straftatTable / g_straftatCounter (dword_11BC760)
 
 #include <cstring>  // std::memcpy
+#include <cstdint>  // std::uintptr_t
 
 // he_entity_query.cpp — implementation of the "He" entity filter/query API. The
 // three backing globals are REUSED from their owning modules (ODR):
@@ -383,7 +384,10 @@ u8* He_SortEntitiesByRank(int count, u8* buf) {
     // last inner record compared (the original's eax / `result`).
     int v7 = count - 1;
     int i = 0;                       // running byte offset of the outer record
-    u8* last = buf;
+    // The original initialises result = (count - 1) (a raw integer cast to a
+    // pointer). For count <= 1 the outer loop never runs and the function returns
+    // that sentinel verbatim; callers treat the result as opaque. We reproduce it.
+    u8* last = reinterpret_cast<u8*>(static_cast<std::uintptr_t>(static_cast<u32>(count - 1)));
     for (int v9 = 0; v9 < v7; ++v9) {
         int v4 = v9 + 1;
         if (v4 < count) {

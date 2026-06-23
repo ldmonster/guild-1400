@@ -51,7 +51,13 @@ int WorkerCommentPlayer::playSelectedWorkerComment(
         if (people[i].selected)
             return playWorkerClickComment(people[i]);
     }
-    return 0; // result*2 with result == kPersonTableCount index past the end (==0 found)
+    // None selected: the original walks the fixed 768-record table to the end and
+    // returns `result * 2` with result == 205824 (= 768*268), i.e. 411648 — NOT 0.
+    // That value is dead: the sole caller (VIBE_Hud_UpdateSelectionAndTargets
+    // @0x4ba664) discards it. We return 0 here as the "nothing played" signal; the
+    // difference is unobservable. (We cannot reproduce 411648 exactly because the
+    // fixed 768-entry table is modeled as a variable-length vector.)
+    return 0;
 }
 
 // gilde.exe 0x58232c — VIBE_Voice_UnloadCommentBanks
@@ -184,17 +190,31 @@ int WorkerCommentPlayer::playCraftFavorComment(
 //   else               Play(owner, greetingBank, v4 ? 3 : v6, "_GUTE_GUNST");
 int WorkerCommentPlayer::playBuildingFavorComment(
         u16 ownerId, bool slotEmpty, FavorFn favor, ModuloFn randMod, void* ctx) {
+    // result = RandomModulo(3); v6 = (u16)result.  RNG is drawn FIRST,
+    // unconditionally, before the favourability fetch (matches 0x5826af).
     int channel = static_cast<u16>(randMod(3, ctx));
-    int bucket  = static_cast<int>(favor(ownerId, ctx)) / 33;  // 0..3
-    int used    = slotEmpty ? 3 : channel;
 
+    // v12 = (int)ConvertX(favor) / 33.  The 64-bit idiv at 0x582710 sign-extends
+    // edx (sar 31), so this is a SIGNED divide truncating toward zero; the (int)
+    // cast + C++ '/' reproduce it exactly. v12 can be negative.
+    int bucket = static_cast<int>(favor(ownerId, ctx)) / 33;
+
+    int used = slotEmpty ? 3 : channel;  // v4 ? 3 : v6
+
+    // Bucket switch (0x582742..0x582834):
+    //   v12 == 0  -> SCHLECHTE
+    //   v12 == 1  -> MITTLERE
+    //   v12 >= 2  -> GUTE
+    //   v12 <  0  -> falls through 'cmp ebx,2 / jl loc_5826C8' WITHOUT playing.
     const char* tag;
     if (bucket == 0)
         tag = kBldFavorBad;
     else if (bucket == 1)
         tag = kBldFavorMedium;
-    else
+    else if (bucket >= 2)
         tag = kBldFavorGood;
+    else
+        return used;  // negative bucket: original returns without any playback
 
     sink_->playPositionalSample(ownerId, greetingBank_, used, tag);
     return used;

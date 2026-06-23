@@ -254,18 +254,27 @@ int ObjectSearchFindEntitiesByCount(const ObjectSearchContext& ctx,
 
 // gilde.exe 0x4784cc — VIBE_ObjectRing_AdvanceIterator.
 //   v0 = *cursor (current record pointer);
-//   if (count == 0) return base;
+//   if (count == 0) return base;                 // NOTE: does NOT touch *cursor
 //   *cursor = &base[3 * ((bias + (v0 - base)/12) % count)];
 //   return v0;
 // We operate on byte offsets from base (record stride 12 == 3 dwords).
+//
+// Disasm fidelity notes (0x4784cc):
+//   * the count==0 branch (0x4784e1) loads `dword_B596A0` into eax and returns
+//     WITHOUT storing to [ecx] — i.e. the cursor is left untouched. We mirror
+//     that by returning slot 0 and NOT writing *cursor.
+//   * (v0 - base)/12 is a SIGNED divide (`idiv esi`, sar edx,1Fh at 0x4784fb).
+//   * (bias + index) % count is an UNSIGNED divide (`div edi` at 0x47850d), and
+//     bias is read as unsigned (off_4784C0[1]). We compute it in unsigned to
+//     match the wraparound exactly.
 int ObjectRingAdvance(ObjectRing& ring) {
     int v0 = *ring.cursor;                  // current byte offset from base
-    if (ring.count == 0) {
-        *ring.cursor = 0;
-        return 0;
-    }
-    int slot = (ring.bias + v0 / 12) % ring.count;
-    *ring.cursor = 12 * slot;               // 3 dwords == 12 bytes
+    if (ring.count == 0)
+        return 0;                           // base, cursor untouched (no store)
+    int index = v0 / 12;                    // signed idiv by 12
+    u32 slot = (static_cast<u32>(ring.bias) + static_cast<u32>(index)) %
+               static_cast<u32>(ring.count);    // unsigned div by count
+    *ring.cursor = 12 * static_cast<int>(slot); // 3 dwords == 12 bytes
     return v0;
 }
 

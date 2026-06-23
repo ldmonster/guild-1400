@@ -213,7 +213,11 @@ void He_DestroyStaleIcons() {
 //   for (i = 0; i != 1024; i += 16)
 //     if ( parent == slot[i/16].mesh )      // *(dword_11C6168 + i) == field +8
 //        DestroyIconGfx(&slot[i/16]);
-// Matches on the +8 field (the parent-object pointer CreateIconMesh stores there).
+// Matches on the +8 field. Binary-confirmed (W16) semantics: CreateIconMesh @0x4c662c
+// stores `*(a1+8) = a2` where a2 is the parent passed down from CreateGfxInfo, so the
+// struct field named `mesh` actually holds the OWNING PARENT pointer; field +12 (node)
+// holds the universe-node handle from AttachToUniverseNode. The match here against the
+// `parent` argument is therefore correct (name is a historical misnomer).
 // ===========================================================================
 void He_DestroyIconsForEntity(int parent) {
     for (int i = 0; i < kHeIconSlotCount; ++i) {

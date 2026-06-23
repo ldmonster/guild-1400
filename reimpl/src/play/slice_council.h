@@ -34,6 +34,7 @@
 
 #include "guild/common/types.h"
 #include "shim/IFileSystem.h"
+#include "sim/command.h"          // sim::CommandPacket (the op-68 wire image)
 #include "world/law_types.h"      // OfficeHolder layout
 #include "world/office_assign.h"  // OfficePersonRec (the candidacy apply record)
 
@@ -58,13 +59,23 @@ struct CouncilInteraction {
 
 // ===========================================================================
 // CouncilPacket — the wire packet VIBE_Command_RequestBuildOp68 builds (0x495454).
-// Byte layout, exactly as the original packs it:
-//   [0]    opcode = 68
-//   [1..4] applicant person id (the v17 = *(person+4) dword, little-endian)
-//   [5]    holderA (v18)
-//   [6]    holderB (v19; 0xFF == none)
-//   [7]    officeType (v20)
+// Byte layout, exactly as the original packs it (disasm @0x495454: char v3[16] @
+// ebp-ACh is the packet buffer; v4[4] @ ebp-9Ch == buffer +0x10 receives qmemcpy of
+// a1 (the applicant dword v17); v5[3] @ ebp-98h == buffer +0x14 receives qmemcpy of
+// a1+4 (the three bytes v18/v19/v20)):
+//   [0x00]      opcode = 68
+//   [0x10..0x13] applicant person id (v17 = *(person+4) dword, little-endian)
+//   [0x14]      holderA  (v18)
+//   [0x15]      holderB  (v19; 0xFF == none)
+//   [0x16]      officeType (v20)
+// (The original buffer is the full 153-byte command packet; only these spans are set.)
 // ===========================================================================
+// RequestBuildOp68 packet-staging offsets (recovered @0x495454):
+inline constexpr u32 kCouncilApplicantOff = 0x10;  // v4 = qmemcpy(a1, 4)  -> applicant
+inline constexpr u32 kCouncilHolderAOff   = 0x14;  // v5[0] = (a1+4)[0]    -> holderA
+inline constexpr u32 kCouncilHolderBOff   = 0x15;  // v5[1] = (a1+4)[1]    -> holderB
+inline constexpr u32 kCouncilOfficeOff    = 0x16;  // v5[2] = (a1+4)[2]    -> officeType
+
 struct CouncilPacket {
     u8  opcode    = 0;   // 68 on a valid candidacy command, else 0
     i32 applicant = -1;  // packed applicant id
@@ -73,8 +84,10 @@ struct CouncilPacket {
     u8  officeType = 0;
     bool built    = false;
 
-    // The 8-byte on-wire image (as RequestBuildOp68 lays it out), for byte asserts.
-    void encode(u8 out[8]) const;
+    // The on-wire image (the full 153-byte command packet, as RequestBuildOp68 lays
+    // it out: opcode @0, applicant @+0x10, holderA/B/officeType @+0x14/+0x15/+0x16),
+    // for byte asserts.
+    sim::CommandPacket encode() const;
 };
 
 // gilde.exe 0x495454 — VIBE_Command_RequestBuildOp68 (the packet BUILD).

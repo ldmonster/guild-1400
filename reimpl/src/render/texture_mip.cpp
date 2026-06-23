@@ -90,22 +90,27 @@ u32 BuildBlendLut(u8* out, u32 a2) {
 
 // ---------------------------------------------------------------------------
 // gilde.exe 0x5b903c (head) — block-size pick: width/height clamped to [16,64].
+//   0x5b905c xor edx,edx / 0x5b905e div ecx  => UNSIGNED division a2[3]/a2[4].
+//   0x5b9065 cmp eax,10h / jnb ... cmp esi,40h => unsigned clamp to [16,64].
 // ---------------------------------------------------------------------------
 int MipBlockSize(int width, int height) {
-    int b = height ? width / height : width; // dword_1404E6C = a2[3]/a2[4]
-    if ((unsigned)b > 0x40)
+    // a2[3]/a2[4] is an unconditional unsigned `div`; height==0 faults in the
+    // binary. We reproduce the unsigned division (callers always pass height>0).
+    u32 b = (u32)width / (u32)height; // dword_1404E6C = a2[3]/a2[4]
+    if (b > 0x40)
         return 64;
-    if ((unsigned)b >= 0x10)
-        return b;
+    if (b >= 0x10)
+        return (int)b;
     return 16;
 }
 
 // ---------------------------------------------------------------------------
 // gilde.exe 0x5db234 (tail) — *(v4+116) = *(v4+120) >> byte_64A350.
+//   0x5db347 mov cl, byte_64A350 / 0x5db350 shr eax, cl => UNSIGNED shift, and
+//   there is NO saturation to 1 in the binary (bare shr stored to +116).
 // ---------------------------------------------------------------------------
 int MipWidth(int baseWidth, int shift) {
-    int w = baseWidth >> shift;
-    return w < 1 ? 1 : w;
+    return (int)((u32)baseWidth >> shift); // shr eax, cl ; mov [esi+74h], eax
 }
 
 int MipLevelCount(int width) {

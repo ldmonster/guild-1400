@@ -14,7 +14,8 @@
 //
 // All five share the same shape (see dialog.cpp for the decomposed helpers):
 //   1. bail out if THIS box's reentrancy guard is already set (returns 0);
-//   2. clamp the render palette (dword_11BC2D0 & 0xC7), overridden to 464838 by flag 0x08;
+//   2. clamp the render palette (LOBYTE(dword_11BC2D0) &= 0xC7, high 3 bytes preserved =>
+//      effective 0xFFFFFFC7), overridden to 464838 by flag 0x08;
 //   3. pick a .form by the kind flags and load it via GameTick_Finalize -> form id;
 //      (the 0x100 "NONE_PERGA" path additionally selects window 1 before rendering);
 //   4. render the message rich-text into the form, center its windows;
@@ -57,12 +58,16 @@ extern u8 g_msgGuardModeless; // byte_631DAA
 
 // ---------------------------------------------------------------------------
 // Palette globals (read by every variant).
-//   dword_11BC2D0  the live render palette; the box uses (palette & 0xC7),
-//                  overridden to kMsgPaletteOverride when flag 0x08 is set.
+//   dword_11BC2D0  the live render palette.  The originals do `and byte ptr [v],0C7h`
+//                  on the 32-bit snapshot — i.e. only the LOW BYTE is masked with 0xC7;
+//                  the upper three bytes of dword_11BC2D0 are PRESERVED.  So the effective
+//                  mask is 0xFFFFFFC7, not 0xC7 (verified at 0x4ad72b / 0x4acc0b /
+//                  0x569a63 / 0x4adc93 / 0x4ada2c).  Overridden to kMsgPaletteOverride
+//                  when flag 0x08 is set.
 // Owned here; reused via extern by no one else (other modules read 11BC2D0 from
 // their own owning module — we declare it extern and reuse if present).
 // ---------------------------------------------------------------------------
-inline constexpr i32 kMsgPaletteMask     = 0xC7;   // palette &= 0xC7
+inline constexpr i32 kMsgPaletteMask     = 0xFFFFFFC7; // LOBYTE &= 0xC7 (high 3 bytes kept)
 inline constexpr i32 kMsgPaletteOverride = 464838; // v20 = 464838 when flag 0x08 set
 
 // The live render-palette snapshot the box reads (dword_11BC2D0).  Owned by the render
@@ -100,7 +105,8 @@ struct MessageBoxHost {
     virtual int  LoadForm(const char* /*formName*/, bool /*selectWindow1*/) { return 0; }
     // Step 4: render the primary message text into the current window of `formId`.
     virtual void RenderText(int /*formId*/, int /*textArg*/) {}
-    // Green variant only: render the second (body) text into window slot 2.
+    // Green variant: render the optional header text into window slot 1 (RenderText)
+    // and the body text into window slot 2 (RenderBodyText).
     virtual void RenderBodyText(int /*formId*/, int /*textArg*/) {}
     // Green variant only: VIBE_Hud_SyncWindowColors(currentWindow) recolor pass.
     virtual void SyncWindowColors(int /*formId*/) {}
@@ -162,7 +168,7 @@ int MessageBox_ShowModeless(MessageBoxHost& host, char kindFlags, char buttonGro
 
 // gilde.exe 0x4ad9dc — VIBE_Dialog_ShowMessageBoxGreen
 //   (a1@<edx>=bodyText, a2@<bl>=flags, a3@<dil>=group; fixed "misc\MessageBoxGreen" form).
-// `headerText` is the optional header rendered into the default window (0 = skip);
+// `headerText` is the optional header rendered into window slot 1 (0 = skip);
 // `bodyText` is rendered into window slot 2.
 int MessageBox_ShowGreen(MessageBoxHost& host, int bodyText, char kindFlags,
                          char buttonGroupArg, int headerText);

@@ -139,6 +139,10 @@ int CountWithTransport(int ownerUniverse, int anyMesh);
 // Caps at 31 matches / 768 scanned. Returns the match count.
 //   `personLiveActor[i]`  == person[i] live-actor ptr (Person+388 column).
 //   `outPersons`/`maxOut` == the result buffer.
+// NOTE (1:1): the binary indexes the result buffer with a PRE-incremented counter
+// (dword_11BB69C[++v6]), so the k-th match (1-based) is stored at outPersons[k];
+// outPersons[0] is the reserved slot and is left untouched. Provide a buffer of
+// at least 32 entries to hold the full 31-match cap.
 int CollectByOwner(int ownerKeyId, LiveActor* const* personLiveActor,
                    int personCount, LiveActor** outPersons, int maxOut);
 

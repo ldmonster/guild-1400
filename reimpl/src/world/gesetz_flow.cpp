@@ -265,18 +265,38 @@ int GesetzLoadState(GesetzStream& s, u32 formatVersion) {
             return 0;
     }
 
+    // HARDENING (wave-12): the declared counts come straight from the (possibly
+    // malformed/truncated) save blob and are used as loop bounds writing into the
+    // fixed-size g_crimeTable[512] / g_evidence*[2048] tables. A negative or
+    // over-capacity count drives a global-buffer-overflow (confirmed via ASAN).
+    // On any VALID save these are <= the table capacities, so rejecting an
+    // out-of-range count changes nothing for real input; it only turns a memory
+    // corruption into the same "load failed" (0) the stream-failure paths return.
+    if (crimeCount < 0 || crimeCount > kCrimeCount)
+        return 0;
+    if (evidenceCount < 0 || evidenceCount > kEvidenceCapacity)
+        return 0;
+
     int loaded = 0;
     for (; loaded < crimeCount; ++loaded) {
         if (!ReadCrime(s, g_crimeTable[loaded]))
             return 0;
     }
-    // LABEL_27: clear the remainder of the crime table (id/perp/target=-1, ...).
+    // LABEL_27: clear the remainder of the crime table. WAVE-16 (binary diff,
+    // 0x4c2af4): the original increments i by 45 BEFORE the writes and clears, per
+    // record: +0 (dword_11BC733+45 == id) = -1, +18 (dword_11BC745+45) = -1,
+    // +22 (dword_11BC749+45 == perpetrator) = -1, +37 (dword_11BC758+45 ==
+    // provenState) = 0, +26 (word_11BC74D+45 == wanted, 16-bit) = 0. NOTE: the
+    // original clears the +18 dword, NOT +33 (target) — corrected here to match.
     for (int i = loaded; i < kCrimeCount; ++i) {
-        g_crimeTable[i].id          = -1;
-        g_crimeTable[i].perpetrator = -1;
-        g_crimeTable[i].target      = -1; // dword_11BC745/49 region (+33)
-        g_crimeTable[i].provenState = 0;  // dword_11BC758 (+37) cleared via word write
-        g_crimeTable[i].wanted      = 0;
+        u8* p = reinterpret_cast<u8*>(&g_crimeTable[i]);
+        i32 m1 = -1; i32 z = 0;
+        std::memcpy(p + 0,  &m1, 4);  // id          = -1   (dword_11BC733 + 45)
+        std::memcpy(p + 18, &m1, 4);  // +18 dword   = -1   (dword_11BC745 + 45)
+        std::memcpy(p + 22, &m1, 4);  // perpetrator = -1   (dword_11BC749 + 45)
+        std::memcpy(p + 37, &z,  4);  // provenState = 0    (dword_11BC758 + 45)
+        u16 zw = 0;
+        std::memcpy(p + 26, &zw, 2);  // wanted (u16) = 0   (word_11BC74D + 45)
     }
     // Reset the evidence table to -1 (VIBE_Light_SetGrayColorThunk fill), then read.
     for (int j = 0; j < kEvidenceDwords; ++j) {

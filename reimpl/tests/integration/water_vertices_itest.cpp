@@ -64,6 +64,19 @@ TEST(WaterVerticesITest, DriverTextureMatchesSpeedTable) {
 }
 
 // ---------------------------------------------------------------------------
+// GOLDEN PIN — the full water-animation speed table dword_5D93C8[0..10]
+// (gilde.exe @0x5d93c8, recovered via get_bytes; see render/water_anim.cpp):
+//   index 0 unused (the selector is guarded nonzero); indices 1..10 are
+//   {15,13,11,9,8,7,5,3,2,1} (the frame divisors). Pinned exhaustively here so a
+//   drift in any single entry is caught (previously only index 5 was asserted).
+// ---------------------------------------------------------------------------
+TEST(WaterVerticesITest, SpeedTableFullGolden) {
+    static const u32 kExpect[11] = {0, 15, 13, 11, 9, 8, 7, 5, 3, 2, 1};
+    for (int i = 0; i < 11; ++i)
+        CHECK_EQ(render::kWaterAnimSpeedTable[i], kExpect[i]);
+}
+
+// ---------------------------------------------------------------------------
 // Driver's wave grid must equal a direct AnimateWaterWaveGrid call on the
 // PROPAGATED phases — i.e. the driver wires the real sibling correctly.
 // ---------------------------------------------------------------------------
@@ -78,10 +91,10 @@ TEST(WaterVerticesITest, DriverGridEqualsSiblingOnPropagatedPhase) {
         m.phase[k] = 0.05f * (k + 1);
     }
 
-    // Reproduce the propagation the driver applies (phase[0..2]<-prop[1..3]).
+    // Reproduce the propagation the driver applies (in place: phase[k]<-prop[k]).
     float prop[4];
     render::PropagatePhases(m.waveSpeed, m.phase, 7.0, prop);
-    float expectPhase[4] = {prop[1], prop[2], prop[3], m.phase[3]};
+    float expectPhase[4] = {prop[0], prop[1], prop[2], prop[3]};
     float expectGrid[64];
     render::AnimateWaterWaveGrid(expectGrid, m.amp, expectPhase, kTwoPi);
 
@@ -89,9 +102,8 @@ TEST(WaterVerticesITest, DriverGridEqualsSiblingOnPropagatedPhase) {
 
     for (int i = 0; i < 64; ++i)
         CHECK(nearF(m.waveOut[i], expectGrid[i]));
-    for (int k = 0; k < 3; ++k)
+    for (int k = 0; k < 4; ++k)
         CHECK(nearF(m.phase[k], expectPhase[k]));
-    CHECK(nearF(m.phase[3], expectPhase[3]));
 }
 
 // ---------------------------------------------------------------------------

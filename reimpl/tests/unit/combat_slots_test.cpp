@@ -174,16 +174,31 @@ TEST(CombatSlots, PickActiveRingV3None) {
     CHECK_EQ(f.cursor, 0);  // cursor untouched
 }
 
-TEST(CombatSlots, PickActiveRingV4FullWrap) {
+// 0x57e9c6: v6 = 255 -> the ring probes at most 255 positions (cursor ..
+// cursor+254). With cursor=100 the LAST probe (try 255) is position 98; entry
+// 99 (256th position) is NEVER reached, so it must return null with the cursor
+// left untouched. (Verified disasm: v6 starts 255, `if (!--v6) return 0`.)
+TEST(CombatSlots, PickActiveRingV4LastReachable) {
     RingFixture f;
     f.cursor = 100;
-    f.SetEntry(99, 1, 0x7FFFFFFF);   // reached on the last (256th) try
+    f.SetEntry(98, 1, 0x7FFFFFFF);   // reached on the last (255th) try
     f.SetTypeCode(1, 3);
     ActiveRing r = f.View();
     ActiveTargetResult res = PickActiveTargetEntry(r);
-    CHECK(res.entry == f.ring.data() + kActiveRingStride * 99);
+    CHECK(res.entry == f.ring.data() + kActiveRingStride * 98);
     CHECK_EQ(res.typeId, (i32)0x7FFFFFFF);
-    CHECK_EQ(f.cursor, 100);   // 99 + 1
+    CHECK_EQ(f.cursor, 99);   // 98 + 1
+}
+
+TEST(CombatSlots, PickActiveRingV4FullWrapUnreachable) {
+    RingFixture f;
+    f.cursor = 100;
+    f.SetEntry(99, 1, 0x7FFFFFFF);   // 256th position -> NOT probed (v6 cap 255)
+    f.SetTypeCode(1, 3);
+    ActiveRing r = f.View();
+    ActiveTargetResult res = PickActiveTargetEntry(r);
+    CHECK(res.entry == nullptr);
+    CHECK_EQ(f.cursor, 100);   // untouched
 }
 
 // --------------------------------------------------------------------------
@@ -273,4 +288,49 @@ TEST(CombatSlots, FindSquadSlotBothZero) {
     std::vector<SlotRecord> tbl = MakeTable();
     SlotStubPolicy pol;
     CHECK(FindAvailableSquadSlot(tbl.data(), 0xFFFF, 0, 0, pol) == nullptr);
+}
+
+// --- Wave-12 hardening: capacity boundaries / degenerate counts -------------
+
+// Zero active squads: FindUnitByEntity scans nothing and returns nullptr without
+// dereferencing the (possibly empty-region) squad table.
+TEST(CombatSlots, FindUnitByEntityZeroSquads) {
+    std::vector<i32> tbl(kSquadBlockDwords, 0);
+    tbl[kOrderSlotBase] = 42;
+    CHECK(FindUnitByEntity(tbl.data(), 0, 42) == nullptr);
+}
+
+// A FULLY-CLAIMED table: the allocator scans all kSlotCapacity (768) slots and
+// returns nullptr. This drives the loop across the whole fixed-capacity array;
+// ASAN confirms the scan stops exactly at the table end.
+TEST(CombatSlots, FindSquadSlotFullTableNoMatch) {
+    std::vector<SlotRecord> tbl = MakeTable();
+    // Make every slot a candidate that is already claimed -> none qualifies.
+    for (auto& s : tbl) {
+        s = MakeFreeSlot();
+        s.ownerClassByte = 0x42;
+        s.fillCount = 5; s.requiredCap = 5.0f;
+        s.flags |= kSlotClaimed;               // already taken
+    }
+    SlotStubPolicy pol; pol.typeGroupResult = 2;   // wildcard group
+    CHECK(FindAvailableSquadSlot(tbl.data(), 0xFFFF, 7, 0x42, pol) == nullptr);
+}
+
+// ResolveTargetObjekt with the highest positive person-index (127, INT8_MAX):
+// the 589-byte type-table read lands at 589*127, which must be inside a type
+// table sized for the full signed-byte range. (Negative person indices read
+// BEFORE the table base in the original's signed multiply — that is the binary's
+// own envelope; documented in progress/harden-combat-wave12.md, not "fixed".)
+TEST(CombatSlots, ResolveTargetObjektMaxPositivePersonIndex) {
+    RecordingQuery q;
+    std::vector<u8> entry = MakeEntry(/*personIdx*/ 127, /*handle*/ 0x1234);
+    // Type table must cover indices 0..127 at 589-byte stride.
+    std::vector<u8> types(kTypeTableStride * 128, 0);
+    types[kTypeTableStride * 127] = 2;             // type code 2 -> prefers kind 19
+    int dummy;
+    q.ret19 = &dummy;
+    const void* r = ResolveTargetObjekt(entry.data(), types.data(), q);
+    CHECK(r == &dummy);
+    CHECK_EQ(static_cast<int>(q.calls.size()), 1);
+    CHECK_EQ(q.calls[0].kind, 19);
 }

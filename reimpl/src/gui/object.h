@@ -27,9 +27,22 @@ extern int    g_widgetHighWater;               // dword_62D24C
 // the i32 field only for the integer-id case. WidgetData()/SetWidgetData() are the
 // single access point for +12.
 extern void* g_widgetData[kMaxWidgets];        // mirrors widget +12 when pointer-valued
+// Parallel ownership flag: true when g_widgetData[idx] is a heap block this module must
+// free on slot recycle / reset (the original frees the widget's +116/+120/+12 buffer in
+// VIBE_Widget_DestroyByType). Borrowed pointers (Window*, field records, scene states)
+// keep owned=false and are never freed here.
+extern bool  g_widgetDataOwned[kMaxWidgets];
 
-inline void  SetWidgetData(int idx, void* p) { g_widgetData[idx] = p; }
+inline void  SetWidgetData(int idx, void* p) {
+    if (idx < 0 || idx >= kMaxWidgets) return;
+    g_widgetData[idx] = p;
+    g_widgetDataOwned[idx] = false; // borrowed by default
+}
 inline void* WidgetData(int idx)             { return g_widgetData[idx]; }
+// Store a HEAP-OWNED buffer at the widget's data slot: it will be std::free()d when the
+// slot is recycled (Widget_FreeSlot) or the array is reset (ResetWidgets), matching the
+// original's destroy-time release of the per-widget text/raw buffer. Defined in object.cpp.
+void SetWidgetDataOwned(int idx, void* heapBlock);
 
 // Reset all GUI core global state to the initial (zeroed) condition. Not present in
 // the original (BSS is zero at load); provided so tests start from a clean slate.

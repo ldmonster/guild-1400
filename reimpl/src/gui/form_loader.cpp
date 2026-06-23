@@ -36,7 +36,12 @@ void Form_InitTables() {
         g_forms[i].dw[0] = i;                 // form +0 = formIndex (684-byte stride)
     for (int i = 0; i < kWindowInitCount; ++i)
         g_windows[i].at<i32>(0) = i;          // window +0 = windowIndex (238-dword stride)
-    for (int i = 0; i < kWidgetInitCount; ++i)
+    // The original stamps kWidgetInitCount (512) records; the reimpl's
+    // g_widgets table carries kMaxWidgets (511) slots (object.h sizes the
+    // POINTER cache dword_62D26C at 512 = kMaxWidgets+1). Clamp so the 512th
+    // stamp cannot write past the smaller record array (it previously
+    // corrupted the adjacent global — caught by ASAN through SessionHud::Init).
+    for (int i = 0; i < kWidgetInitCount && i < kMaxWidgets; ++i)
         g_widgets[i].marker() = i;            // widget +0 = widgetIndex (740-byte stride)
 }
 

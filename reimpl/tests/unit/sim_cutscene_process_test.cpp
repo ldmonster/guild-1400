@@ -314,9 +314,14 @@ TEST(DebugCmd, DispatchGates) {
 
     rec.person.kind = 6;                  // real person
     rec.present = true;
-    // bad command type -> 64
+    // bad command type -> 64. The gate is SIGNED `type >= 46` (disasm 0x5711f3
+    // cmp cl,0x2E; jge). Only types >= 46 are rejected here.
     CHECK_EQ((int)DebugCmdDispatchByType(46, 1), 64);
-    CHECK_EQ((int)DebugCmdDispatchByType(-1, 1), 64);
+    CHECK_EQ((int)DebugCmdDispatchByType(127, 1), 64);
+    // NEGATIVE type is NOT rejected by the binary: it falls through to the
+    // (signed-index) funcs_57120D call. With a real person (kind<10) it reaches
+    // the deferred ContextAction handler stub (0), NOT 64.
+    CHECK_EQ((int)DebugCmdDispatchByType(-1, 1), 0);
     // unresolved person -> 64
     rec.present = false;
     CHECK_EQ((int)DebugCmdDispatchByType(0, 1), 64);
@@ -402,4 +407,110 @@ TEST(DebugCmd, NpcTableEntryMapping) {
     CHECK(DebugCmdNpcTableEntry(32) == &DebugCmdSendEntityWithFlagA);
     CHECK(DebugCmdNpcTableEntry(33) == &DebugCmdSendEntityWithFlagB);
     CHECK(DebugCmdNpcTableEntry(1)  == nullptr);     // deferred
+}
+
+// ===========================================================================
+// Wave-12 hardening: malformed slot / out-of-range type / oversized counts.
+// These pin the bounds added to the per-type table dispatch and the participant
+// scans. ASAN+UBSAN must stay clean; goldens are unchanged.
+// ===========================================================================
+
+// A slot type byte >= kCutsceneTypeCount (12) must not index past the 12-entry
+// per-type table. Drive ExecMainFunc with a garbage type and a real type table.
+TEST(CutsceneHarden, ExecMainFuncOutOfRangeType) {
+    static int g_calls = 0;
+    g_calls = 0;
+    struct M { static int Fn(CutsceneSlot*) { ++g_calls; return 5; } };
+
+    CutsceneTypeTable types;
+    for (int t = 0; t < kCutsceneTypeCount; ++t)
+        types[t] = CutsceneTypeEntry{ &M::Fn, nullptr, nullptr, 0, &M::Fn };
+
+    CutsceneTable tbl;
+    CutsceneContext ctx;
+    ctx.table = &tbl; ctx.types = &types;
+
+    CutsceneSlot s{};
+    s.id = 1; s.partCount = 1;
+    s.type = 200;                              // OUT OF RANGE (>= 12)
+    int r = CutsceneExecMainFunc(ctx, &s);     // must not OOB-dispatch
+    CHECK_EQ(r, 0);                            // no fn for an invalid type
+    CHECK_EQ(g_calls, 0);
+
+    // a valid type still dispatches (byte-identical behaviour).
+    s.type = 4;
+    r = CutsceneExecMainFunc(ctx, &s);
+    CHECK_EQ(r, 5);
+    CHECK_EQ(g_calls, 1);
+}
+
+// partCount (+48) larger than the 16-entry partIds[] must not over-read.
+TEST(CutsceneHarden, ActorScanOversizedPartCount) {
+    CutsceneTable tbl;
+    CutsceneSlot tmpl{};
+    tmpl.partCount = 1;
+    CutsceneSlot* s = tbl.AllocSlot(tmpl, /*id*/7);
+    s->partCount = 255;                        // MALFORMED: far past 16
+    for (int i = 0; i < kMaxParticipants; ++i) s->partIds[i] = 1000 + i;
+
+    CutsceneContext ctx;
+    ctx.table = &tbl;
+    // a known participant within the clamped window resolves.
+    CHECK(CutsceneActorHasParticipant(ctx, 1005, s));
+    // an id only reachable past partIds[16] would be a stale read; with the clamp
+    // it is simply not found (no OOB).
+    CHECK(!CutsceneActorHasParticipant(ctx, 999999, s));
+
+    // Remove-participant with the oversized count must also stay bounded.
+    CHECK_EQ(tbl.RemoveParticipant(7, 1005), 1);
+    CHECK(!CutsceneActorHasParticipant(ctx, 1005, s));  // now cleared
+}
+
+// AddParticipant on a slot whose count is already past capacity must reject
+// (full) without scanning past partIds[].
+TEST(CutsceneHarden, AddParticipantOversizedCountRejects) {
+    CutsceneTable tbl;
+    CutsceneSlot tmpl{};
+    tmpl.partCount = 1;
+    CutsceneSlot* s = tbl.AllocSlot(tmpl, /*id*/9);
+    s->partCount = 200;                        // already "full" and then some
+    for (int i = 0; i < kMaxParticipants; ++i) s->partIds[i] = -1;
+    CHECK_EQ(tbl.AddParticipant(9, 42), 0);    // full -> 0, no OOB dedup scan
+}
+
+// 0-participant slot: scans are empty, ProcessActive skips it (alive gate).
+TEST(CutsceneHarden, ZeroParticipantSlotSkipped) {
+    CutsceneTable tbl;
+    CutsceneSlot tmpl{};
+    tmpl.partCount = 1;
+    CutsceneSlot* s = tbl.AllocSlot(tmpl, /*id*/3);
+    s->partCount = 0;                          // alive gate off
+    CutsceneContext ctx;
+    ctx.table = &tbl;
+    CHECK(!CutsceneActorHasParticipant(ctx, 1, s));
+
+    // Full 16-participant slot: every slot is scannable, none past the array.
+    s->partCount = kMaxParticipants;
+    for (int i = 0; i < kMaxParticipants; ++i) s->partIds[i] = 500 + i;
+    CHECK(CutsceneActorHasParticipant(ctx, 515, s));
+    CHECK_EQ(tbl.AddParticipant(3, 600), 0);   // full -> rejects
+}
+
+// AddActorToSlot / RemoveActorFromSlot on the 8-entry actor list: full list and
+// not-present id must stay within 8 entries.
+TEST(CutsceneHarden, ActorSlotListBounds) {
+    guild::i32 list[8];
+    for (int i = 0; i < 8; ++i) list[i] = 100 + i;   // FULL, none == target
+    int idx = CutsceneAddActorToSlot(/*id*/999, list);
+    CHECK_EQ(idx, 8);                                  // list full -> 8 (no write)
+    for (int i = 0; i < 8; ++i) CHECK_EQ(list[i], 100 + i);
+
+    // remove an absent id -> returns 8, no OOB.
+    CHECK_EQ(CutsceneRemoveActorFromSlot(999, list), 8);
+    // remove a present id at the end.
+    CHECK_EQ(CutsceneRemoveActorFromSlot(107, list), 7);
+    CHECK_EQ(list[7], -1);
+    // now a free slot exists -> add settles there.
+    CHECK_EQ(CutsceneAddActorToSlot(999, list), 7);
+    CHECK_EQ(list[7], 999);
 }

@@ -346,24 +346,47 @@ TEST(io_save_tables, building_table_roundtrip_current) {
 
 TEST(io_save_tables, building_record_old_version_gates) {
     RwFs fs; VfsInit(&fs, false);
-    // At version 0x10013 (< all gates except baseline) the load omits +40, the
-    // +84..+104 group, +112, +108. Write at the SAME version so the streams align.
+    // gilde.exe 0x5a45bc: the WRITER is UNCONDITIONAL for +40, +112(0xE) and +108
+    // — only the +84..+104 group is version-gated (>=0x10014). The LOADER (0x5a86d0)
+    // additionally gates +40 (>=0x1002C), +112 (>=0x10015), +108 (>=0x10018). So at a
+    // pre-0x10014 version the writer still emits +40 + the 0xE +112 block + +108, and
+    // the writer stream size is the full record minus ONLY the seven-dword +84 group.
     std::vector<u8> src(kBuildStride, 0), dst(kBuildStride, 0);
     Fill(src.data(), src.size(), 0x55);
     VfsHandle* w = VfsOpenFile("br.SAV", "wb"); CHECK(w);
     CHECK(SaveWriteBuildingRecord(w, src.data(), nullptr, 0x10013)); VfsCloseStream(w);
+
+    // Writer stream size at 0x10013 (binary-accurate): every field EXCEPT the
+    //   >=0x10014 group (7 dwords = 28 bytes). Full layout emitted:
+    //   +0(2) +2(0x10) +20(4) +40(4) + (28,32,44,48,52,56,64,68,72,76,80: 11 dwords)
+    //   + +112(0xE) + +128(4) +132(0x10) +148(0xC) +160(4) + +108(4).
+    const std::vector<u8>* raw = fs.bytes("br.SAV"); CHECK(raw);
+    const u32 expect = 2 + 0x10 + 4 /*+20*/ + 4 /*+40*/ + 11 * 4 /*+28..+80*/
+                     + 0xE /*+112*/ + 4 /*+128*/ + 0x10 /*+132*/ + 0xC /*+148*/
+                     + 4 /*+160*/ + 4 /*+108*/;
+    CHECK_EQ((u32)raw->size(), expect);
+
+    // The loader at 0x10013 gates OUT +40/+112/+108, so it reads fewer bytes than the
+    // writer wrote — the original's latent old-version write/read asymmetry. The load
+    // still succeeds and leaves +40 at its default (the loader never reads it here).
     VfsHandle* r = VfsOpenFile("br.SAV", "rb"); CHECK(r);
     CHECK(SaveLoadBuildingRecord(r, dst.data(), 0x10013)); VfsCloseStream(r);
-
-    // baseline fields present:
-    CHECK(std::memcmp(src.data(), dst.data(), 2) == 0);
-    CHECK(std::memcmp(src.data() + 20, dst.data() + 20, 4) == 0);
-    // +40 NOT read at this version -> dst keeps 0.
+    CHECK(std::memcmp(src.data(), dst.data(), 2) == 0);          // +0 aligns
     std::int32_t v40; std::memcpy(&v40, dst.data() + 40, 4);
-    CHECK_EQ(v40, (std::int32_t)0);
-    // on-stream size: 2 + 0x10 + 4 (+20) + (28..80: 11 dwords =44) + 128(4)+132(0x10)+148(0xC)+160(4)
-    const std::vector<u8>* raw = fs.bytes("br.SAV"); CHECK(raw);
-    CHECK_EQ((u32)raw->size(), (u32)(2 + 0x10 + 4 + 11 * 4 + 4 + 0x10 + 0xC + 4));
+    CHECK_EQ(v40, (std::int32_t)0);                              // +40 not read by loader
+
+    // Round-trip integrity is only guaranteed at the shipping version (all gates
+    // taken on both sides) — verify a clean current-version round-trip.
+    std::vector<u8> s2(kBuildStride, 0), d2(kBuildStride, 0);
+    Fill(s2.data(), s2.size(), 0x77);
+    VfsHandle* w2 = VfsOpenFile("br2.SAV", "wb"); CHECK(w2);
+    CHECK(SaveWriteBuildingRecord(w2, s2.data(), nullptr, 0x10045)); VfsCloseStream(w2);
+    VfsHandle* r2 = VfsOpenFile("br2.SAV", "rb"); CHECK(r2);
+    CHECK(SaveLoadBuildingRecord(r2, d2.data(), 0x10045)); VfsCloseStream(r2);
+    for (int off : {0, 20, 40, 28, 32, 44, 48, 52, 56, 64, 68, 72, 76, 80,
+                    84, 88, 92, 60, 96, 100, 104, 128, 160, 108})
+        CHECK(std::memcmp(s2.data() + off, d2.data() + off, 4) == 0);
+    CHECK(std::memcmp(s2.data() + 112, d2.data() + 112, 0xE) == 0);
     VfsShutdown();
 }
 

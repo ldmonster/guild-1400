@@ -51,8 +51,15 @@ LootResult ComputeDefenderStrength(const std::vector<std::vector<LootWare>>& sto
     LootResult r;
     int cashTotal = 0;                    // v18
 
-    // The original loops over squad.productionObjects[*] (a1+256), skipping -1
-    // entries; here each populated entry is one stockpile in `stockpiles`.
+    // 0x48d33a/0x48d35f: the original loops over the squad's three production-object
+    // slots (a1+256 step 4, while v3 != a1+12 -> exactly 3 iterations), skipping
+    // -1 (empty) entries. CRITICAL: the no-commander bulk-cash command (0x48d44e)
+    // and the family credit (0x48d496) sit INSIDE the per-slot block, so they run
+    // ONCE PER NON-EMPTY PRODUCTION SLOT against the running cumulative v18 — NOT a
+    // single time at the end. We model each populated entry in `stockpiles` as one
+    // production slot and reproduce that per-slot emission exactly.
+    int familyMoney = familyMoneyBefore;  // *(FamilyRecord+7)
+    bool creditedFamily = false;
     for (const std::vector<LootWare>& stock : stockpiles) {
         for (const LootWare& w : stock) {
             // v19 = ware.quantity * rate;  qty = (v19 >= 1.0) ? (int)v19 : 1
@@ -66,20 +73,27 @@ LootResult ComputeDefenderStrength(const std::vector<std::vector<LootWare>>& sto
                          * static_cast<double>(qty) + static_cast<double>(cashTotal);
             cashTotal = static_cast<int>(v11);
         }
-    }
 
-    // No commander present -> halve the haul + emit the bulk cash command.
-    if (!hasCommander && !stockpiles.empty()) {
-        double v13 = static_cast<double>(cashTotal) * kLootDefenderFrac;
-        cashTotal = static_cast<int>(v13);
-        if (sink)
-            sink->OnCashCredit(cashTotal);
+        // 0x48d44e: per-slot — no commander present -> halve the cumulative haul
+        // and emit the bulk cash command (EnqueueCmd15).
+        if (!hasCommander) {
+            double v13 = static_cast<double>(cashTotal) * kLootDefenderFrac;
+            cashTotal = static_cast<int>(v13);
+            if (sink)
+                sink->OnCashCredit(cashTotal);
+        }
+
+        // 0x48d496: per-slot — credit the (running) cumulative haul to the
+        // attacker family record (*(FamilyRecord+7) += v18).
+        if (hasFamilyRecord) {
+            familyMoney += cashTotal;
+            creditedFamily = true;
+        }
     }
 
     r.cashTotal = cashTotal;
-    if (hasFamilyRecord && !stockpiles.empty()) {
-        r.familyCredited = familyMoneyBefore + cashTotal;   // *(family+7) += cashTotal
-    }
+    if (creditedFamily)
+        r.familyCredited = familyMoney;   // *(family+7) after the per-slot credits
     return r;
 }
 

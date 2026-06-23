@@ -40,13 +40,20 @@ struct Rec {
 
 Rec g_rec;
 
+// Person/object records store their entity id at byte offset +1 (a misaligned dword)
+// in the binary — NOT at the He_* +4 used by the h-record family (disasm 0x4de0ae,
+// 0x4df8a1). These helpers read/write that +1 id so the golden vectors model the
+// binary's actual layout.
+i32  Pid(const HeRecord* r) { i32 v; std::memcpy(&v, HeBytes(const_cast<HeRecord*>(r)) + 1, sizeof(v)); return v; }
+void SetPid(HeRecord* r, i32 id) { std::memcpy(HeBytes(r) + 1, &id, sizeof(id)); }
+
 // --- CharActionStep7Hooks --------------------------------------------------
 HeRecord* mPersonQuery(i32, int, int, i32 key) {
     g_rec.personQuery++;
     // keys 68/69 -> begin/aux endpoints (reuse start); start key / goal key map.
     if (key == 68 || key == 69) return g_rec.startToReturn;
-    if (g_rec.startToReturn && key == He_Id(g_rec.startToReturn)) return g_rec.startToReturn;
-    if (g_rec.goalToReturn && key == He_Id(g_rec.goalToReturn)) return g_rec.goalToReturn;
+    if (g_rec.startToReturn && key == Pid(g_rec.startToReturn)) return g_rec.startToReturn;
+    if (g_rec.goalToReturn && key == Pid(g_rec.goalToReturn)) return g_rec.goalToReturn;
     // first non-endpoint resolves to start, fall back to goal
     return g_rec.startToReturn ? g_rec.startToReturn : g_rec.goalToReturn;
 }
@@ -241,7 +248,7 @@ TEST(CharActionSteps7, AllocClassifiesLocalVariant) {
     Block sb{}, gb{}, cb{}, vb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp;
     g_rec.goalToReturn = gp;
     // isProd(start)=1, isProd(goal)=0 -> NOT door, NOT city-city, NOT mixed -> local(2)
@@ -249,7 +256,7 @@ TEST(CharActionSteps7, AllocClassifiesLocalVariant) {
     // cart resolve succeeds.
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cb);
     HeRecord* veh = reinterpret_cast<HeRecord*>(&vb);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = veh;
+    { HeRecord* _p = veh; std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p)); }
     g_rec.entToReturn = cart;
 
     Block hb{};
@@ -270,12 +277,12 @@ TEST(CharActionSteps7, AllocClassifiesDoorVariant) {
     Block sb{}, gb{}, cb{}, vb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     // isProd(start)=0, isProd(goal)=1 -> door(1)
     g_rec.isProdStart = 0; g_rec.isProdGoal = 1;
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cb);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = reinterpret_cast<HeRecord*>(&vb);
+    { HeRecord* _p = reinterpret_cast<HeRecord*>(&vb); std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p)); }
     g_rec.entToReturn = cart;
     Block hb{};
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
@@ -290,12 +297,12 @@ TEST(CharActionSteps7, AllocClassifiesCityCityVariant) {
     Block sb{}, gb{}, cb{}, vb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     // isProd(start)=0, isProd(goal)=0 -> city-city(3)
     g_rec.isProdStart = 0; g_rec.isProdGoal = 0;
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cb);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = reinterpret_cast<HeRecord*>(&vb);
+    { HeRecord* _p = reinterpret_cast<HeRecord*>(&vb); std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p)); }
     g_rec.entToReturn = cart;
     Block hb{};
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
@@ -313,7 +320,7 @@ TEST(CharActionSteps7, RunTransportState0ArmsNextDay) {
     Block sb{}, gb{}, cb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     g_rec.objToReturn = reinterpret_cast<HeRecord*>(&cb);   // cart present
 
@@ -337,7 +344,7 @@ TEST(CharActionSteps7, RunTransportState0NoFlagDoesNothing) {
     Block sb{}, gb{}, cb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     g_rec.objToReturn = reinterpret_cast<HeRecord*>(&cb);
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
@@ -355,7 +362,7 @@ TEST(CharActionSteps7, RunTransportMissingCartFrees) {
     Block sb{}, gb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     g_rec.objToReturn = nullptr;        // cart gone
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
@@ -370,7 +377,7 @@ TEST(CharActionSteps7, RunTransportState1WaitsUntilAppointment) {
     Block sb{}, gb{}, cb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     g_rec.objToReturn = reinterpret_cast<HeRecord*>(&cb);
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
@@ -390,10 +397,10 @@ TEST(CharActionSteps7, RunTransportState1DispatchesLocalAndBumpsLap) {
     Block sb{}, gb{}, cb{}, vb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cb);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = reinterpret_cast<HeRecord*>(&vb);
+    { HeRecord* _p = reinterpret_cast<HeRecord*>(&vb); std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p)); }
     g_rec.objToReturn = cart;
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
     Cas7_StartId(hp) = 11; Cas7_GoalId(hp) = 22; Cas7_CartId(hp) = 33;
@@ -418,16 +425,21 @@ TEST(CharActionSteps7, RunTransportStateMinus2ArmsOnEndpointMatch) {
     Block sb{}, gb{}, cb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    // binary: RunTransport state -2 compares OriginId(+196) to *(gp+1) — the person
+    // id at byte +1 (disasm 0x4df8a1..0x4df8ba), not the He_* +4 id.
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     g_rec.objToReturn = reinterpret_cast<HeRecord*>(&cb);
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
     Cas7_StartId(hp) = 11; Cas7_GoalId(hp) = 22; Cas7_CartId(hp) = 33;
     He_Flags(hp) = 0;
     He_State(hp) = -2;
-    Cas7_OriginId(hp) = 22;        // matches goal id -> arm cmd29(1)
+    Cas7_OriginId(hp) = 22;        // matches *(gp+1) -> arm cmd29(1)
     RunTransport(hp);
-    CHECK_EQ(He_CityId(hp), 9);    // currentSceneCity stamped
+    // binary VIBE_NpcAction_SetTargetCityRef @0x4c9484: *(h+8)=city (9),
+    // *(h+12)=dword_12CE914[134*city] == cityRecipientId(9) (mock returns 555).
+    CHECK_EQ(He_CityIndex(hp), 9);
+    CHECK_EQ(He_CityId(hp), 555);
     CHECK_EQ(g_rec.free29, 1);
     CHECK_EQ(g_rec.lastFree29Arg, 1);
 }
@@ -440,10 +452,10 @@ TEST(CharActionSteps7, DoorFirstLegArmsMove) {
     Block sb{}, gb{}, cb{}, vb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cb);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = reinterpret_cast<HeRecord*>(&vb);
+    { HeRecord* _p = reinterpret_cast<HeRecord*>(&vb); std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p)); }
     g_rec.objToReturn = cart;
     g_rec.isStorage = 0;
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
@@ -462,10 +474,10 @@ TEST(CharActionSteps7, DoorRunningNotAtDoorJustSwitches) {
     Block sb{}, gb{}, cb{}, vb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cb);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = reinterpret_cast<HeRecord*>(&vb);
+    { HeRecord* _p = reinterpret_cast<HeRecord*>(&vb); std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p)); }
     g_rec.objToReturn = cart;
     g_rec.nearDoor = 0;
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
@@ -481,10 +493,10 @@ TEST(CharActionSteps7, DoorAtDoorUnloadsAndArms) {
     Block sb{}, gb{}, cb{}, vb{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 11; He_Id(gp) = 22;
+    SetPid(sp, 11); SetPid(gp, 22);
     g_rec.startToReturn = sp; g_rec.goalToReturn = gp;
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cb);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = reinterpret_cast<HeRecord*>(&vb);
+    { HeRecord* _p = reinterpret_cast<HeRecord*>(&vb); std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p)); }
     g_rec.objToReturn = cart;
     g_rec.nearDoor = 1;
     g_rec.cityCat = 6;

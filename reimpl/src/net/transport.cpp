@@ -29,6 +29,7 @@ bool NetTransport::ConnectToServer(const char* host, u16 port) {
     rx_bytes_total_ = 0;       // dword_62E5D8 = 0
     tx_bytes_total_ = 0;       // dword_62E5E0 = 0
     rx_buf_     = nullptr;     // dword_764CE4 = 0
+    rx_cap_     = 0;
     tx_buf_     = nullptr;     // dword_764CE8 = 0
     tx_cursor_  = 0;           // word_764CEE = 0
     rx_cursor_  = 0;           // word_764CEC = 0
@@ -111,6 +112,13 @@ PumpResult NetTransport::ReceivePacket() {
         return PumpResult::Closed;                        // return 1
     if (!rx_buf_)                                          // !dword_764CE4
         return PumpResult::Progress;                       // return 0
+    // A buffer too small to even hold the 3-byte header is unusable; reading the
+    // header into it would overrun. Real callers pass the 153-byte command record,
+    // so this never fires on the live path. (cap==0 == "unknown" => trust caller.)
+    if (rx_cap_ != 0 && rx_cap_ < kHeaderBytes) {
+        Teardown();
+        return PumpResult::Closed;
+    }
 
     // --- Stage 1: header (3 bytes) -----------------------------------------
     if (rx_cursor_ < kHeaderBytes) {                       // word_764CEC < 3
@@ -130,6 +138,18 @@ PumpResult NetTransport::ReceivePacket() {
 
     // --- Stage 2: body up to total length ----------------------------------
     const u16 total = HdrLen(rx_buf_);                     // *(WORD*)(buf+1)
+    // Malformed-frame guard (the peer sent untrusted bytes): a frame can never be
+    // shorter than its own 3-byte header. If it claims total < kHeaderBytes, then
+    // `total - rx_cursor_` (rx_cursor_ >= 3 here) would underflow to a near-64K
+    // recv length and write far past rx_buf_. If the buffer capacity is known and
+    // `total` exceeds it, the body recv would likewise overrun. The original reads
+    // into a fixed 153-byte global record, so a valid frame is always in [3, cap];
+    // a frame outside that range is corrupt. Fail safe (tear the connection down)
+    // instead of running off the buffer — the in-bounds path is unchanged.
+    if (total < kHeaderBytes || (rx_cap_ != 0 && total > rx_cap_)) {
+        Teardown();
+        return PumpResult::Closed;
+    }
     const int n = sock_->recv(rx_buf_ + rx_cursor_,
                               static_cast<u16>(total - rx_cursor_));
     if (n < 0) {                                            // peer close or error

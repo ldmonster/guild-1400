@@ -21,6 +21,7 @@ struct Captor {
     float lastMatrixAngles[3] = {0, 0, 0};
     int   detachCalls = 0;
     int   rebindProto = -999;
+    const char* rebindMesh = nullptr;
     int   soundCalls = 0;
     float soundXYZ[3] = {0, 0, 0};
     float soundWorld[3] = {0, 0, 0};
@@ -39,7 +40,10 @@ void hMatrix(const float* a, SceneNode3*) {
     g_cap.lastMatrixAngles[2] = a[2];
 }
 void hDetach(SceneNode3*) { ++g_cap.detachCalls; }
-void hRebind(SceneNode3*, int p) { g_cap.rebindProto = p; }
+void hRebind(SceneNode3*, int p, const char* m) {
+    g_cap.rebindProto = p;
+    g_cap.rebindMesh = m;
+}
 void hSound(SceneNode3*, float x, float y, float z, float wx, float wy,
             float wz, int) {
     ++g_cap.soundCalls;
@@ -183,8 +187,10 @@ TEST(ObjLife3, MoveObjectFeedsSound) {
 TEST(ObjLife3, ReplaceAndRainThunks) {
     InstallHooks();
     SceneNode3 n;
-    CHECK_EQ(ObjectReplaceObject(&n, 42), 1);
+    CHECK_EQ(ObjectReplaceObject(&n, 42, "newmesh"), 1);
     CHECK_EQ(g_cap.rebindProto, 42);
+    CHECK(g_cap.rebindMesh != nullptr &&
+          std::strcmp(g_cap.rebindMesh, "newmesh") == 0);
     CHECK(ObjectCmdSetObjectStateThunk(&n, 0, 0) != nullptr);
     CHECK_EQ(g_cap.rainCreateCalls, 1);
     CHECK_EQ(ObjectCmdResetObjectThunk(&n), 0);

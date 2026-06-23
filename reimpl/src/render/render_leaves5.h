@@ -144,9 +144,11 @@ const RenderLeaves5Hooks& CurrentRenderLeaves5Hooks();
 // Stores the three caller colour-base dwords into sys[+0/+4/+8] and, for every
 // particle slot, clears the active bit and seeds a random colour triple:
 //   B(+0x4E) = (rand & 0x3F) - 66 ;  G(+0x4D) = (rand & 0x3F) + 100 ;
-//   R(+0x4C) = (rand & 0x3F) + 50  (the loop runs count-1 slots — verbatim).
-// `sys` is the raw 0x310 system block; `slotCount` == sys[+0xD0]. Returns the
-// last R byte the original left in al.
+//   R(+0x4C) = (rand & 0x3F) + 50  (the do-while runs all `count` slots — the
+//   post-increment compare `ecx < count` @0x42beb6 executes the body `count`
+//   times, NOT count-1). `sys` is the raw 0x310 system block; `slotCount` ==
+//   sys[+0xD0]. Returns the last R byte the original left in al (or baseW2's low
+//   byte when count <= 0).
 u8 InitColors(void* sys, i32 baseW0, i32 baseW1, i32 baseW2, i32 slotCount);
 
 // ---------------------------------------------------------------------------
@@ -178,8 +180,11 @@ ParticleSystem* SpawnBlood(int ownerA1, int hdr0, int hdr1, int hdr2, int hdr3,
 // emitter radius (hdr+4 = radius), with a sin()-shaped vertical profile and a
 // per-sextant damping. Returns the system (0 on alloc failure). `radius` is the
 // emitter radius the original reads from sys+4 (header w1); callers set it.
-ParticleSystem* SpawnExplosion(int ownerA1, int hdr0, float radius, int hdr2,
-                               float life, int hdr8, EffectHeader& hdr,
+// `ownerA1`/`ownerA2` are the eax/ebx pair: a2 is the AllocSystem owner, a1 the
+// userTag (the real caller @0x486822 passes a1=0, a2=30). `hdr0`'s float bits are
+// the sqrt's first term (sys+0 reinterpreted, NOT radius).
+ParticleSystem* SpawnExplosion(int ownerA1, int ownerA2, int hdr0, float radius,
+                               int hdr2, float life, int hdr8, EffectHeader& hdr,
                                int slotCount, u32 now);
 
 // ---------------------------------------------------------------------------

@@ -78,7 +78,11 @@ struct LoanOfferInput {
                              // term: max(prevBase*0.5, wealth*factor) feeds var_4C)
     i32  lenderRateField = 0;// *(lender+101) — the per-lender rate basis (field101)
     LoanRelationTier tier = LoanRelationTier::Default;
-    bool lenderIsBankType = false; // *(lender+2) in {6,7} -> apply the fav adjust
+    // gilde.exe 0x591dfd..0x591f0e gate for the favorability interest adjustment:
+    // applied iff (lenderClass NOT in {6,7}) AND (borrower kind v52[2] IN {6,7}),
+    // where lenderClass = byte_12CE912[536 * *(u16*)(lender+39)]. Those class/kind
+    // tables are not modeled here; the caller resolves the gate and sets this flag.
+    bool lenderIsBankType = false;
     float favorability = 0.0f;     // VIBE_Ai_ComputePersonFavorability(borrower)
     int  count = 3;          // number of offers to generate (a4)
 };

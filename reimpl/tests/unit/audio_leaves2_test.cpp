@@ -179,9 +179,12 @@ TEST(AudioLeaves2, ReacquireAllDigitalDriversPostsPerSuccess) {
     m.hooks().postMessage = [&](void*, unsigned, std::uintptr_t) { ++posts; return 3; };
     CHECK_EQ(m.reacquireAllDigitalDrivers(nullptr, 0x400), 3);
     CHECK_EQ(posts, 2);
-    // msg gate: nothing posted, result stays 0
+    // msg gate: nothing posted. The binary leaves eax == dword_62EADC (-1) after a
+    // used slot fails the msg check (disasm 449d66 mov eax,dword_62EADC; 449d79
+    // jb loc_449D4D). dword_62EADC is -1 once the driver is up, so the result is
+    // -1, not 0. (Golden corrected to match the binary.)
     posts = 0;
-    CHECK_EQ(m.reacquireAllDigitalDrivers(nullptr, 0x10), 0);
+    CHECK_EQ(m.reacquireAllDigitalDrivers(nullptr, 0x10), -1);
     CHECK_EQ(posts, 0);
 }
 

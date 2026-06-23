@@ -79,7 +79,14 @@ std::vector<guild::u8> LoadReceivedSaveStream(const SaveStreamReassembler& r) {
     std::vector<guild::u8> result;
     if (!r.complete())
         return result;
-    result.assign(r.buf.begin(), r.buf.begin() + r.total);
+    // `total` is a length declared in a remote opcode-8 packet; the alloc sizes buf
+    // to `total`, so normally total == buf.size(). Clamp defensively so a desynced
+    // total (e.g. a buf that was not (re)allocated to match) can never read past the
+    // end of buf — the in-bounds case (total == buf.size()) is unchanged.
+    guild::u32 n = r.total;
+    if (n > r.buf.size())
+        n = static_cast<guild::u32>(r.buf.size());
+    result.assign(r.buf.begin(), r.buf.begin() + n);
     return result;
 }
 

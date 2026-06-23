@@ -50,7 +50,10 @@ static inline int truncToZero(double x) {
 
 // gilde.exe 0x58a794 — VIBE_Building_EvalProductionRating
 float Building_EvalProductionRating(const BuildingRec* b, int stat) {
-    if (!b || stat >= 5)
+    // statLevel[] has 5 entries (stats 0..4). The original only guards the upper
+    // bound (stat >= 5); a negative stat would index statLevel[-1] (OOB). Valid
+    // callers pass 0..4, so adding the lower bound is behavior-identical for them.
+    if (!b || stat < 0 || stat >= 5)
         return -1.0f;
 
     // base = statLevel[stat] / 252
@@ -149,12 +152,26 @@ float Building_ComputeItemBaseValue(const BuildingRec* b, u8 typeIndex,
     extern const BuildingTypeDef* BuildingTypeDefAt(u8 typeIndex);
     const BuildingTypeDef* td = BuildingTypeDefAt(typeIndex);
 
+    // WAVE-16 1:1 FIX (verified @0x58f328 / worth loop @0x58fe68):
+    //   if (a4 != -1) v6 = byte[a4 + base + 553];   // 6-wide PRODUCTION array
+    //   else if (a3 != -1) v6 = byte[a3 + base + 563];  // 2-wide INPUT array
+    // The aggregator's output loop sweeps a4 = 0..5 (so the +553 array is 6 wide,
+    // == inputFactor[6]); the input loop sweeps a3 = 0..1 (the +563 array is 2
+    // wide, == outputFactor[2]). ComputeProductionRate @0x58f268 also reads +563
+    // for i in 0..1. inIdx maps to a4 (+553), outIdx maps to a3 (+563). The
+    // original performs NO bounds check; the arrays are sized so the live indices
+    // (0..5 for +553, 0..1 for +563) are all in-range — i.e. these reads are now
+    // byte-identical to the binary with the corrected struct widths.
+    constexpr int kProdFactorCount  = 6;   // inputFactor  @+553 (a4 path, 0..5)
+    constexpr int kInputFactorCount = 2;   // outputFactor @+563 (a3 path, 0..1)
     float v9 = 0.0f;
     if (td) {
-        if (inIdx != -1) {                                 // a4 != -1: input factor
-            v9 = static_cast<float>(896 * td->inputFactor[inIdx]);
-        } else if (outIdx != -1) {                         // a3 != -1: output factor
-            v9 = static_cast<float>(896 * td->outputFactor[outIdx]);
+        if (inIdx != -1) {                                 // a4 != -1: +553 factor
+            if (inIdx >= 0 && inIdx < kProdFactorCount)
+                v9 = static_cast<float>(896 * td->inputFactor[inIdx]);
+        } else if (outIdx != -1) {                         // a3 != -1: +563 factor
+            if (outIdx >= 0 && outIdx < kInputFactorCount)
+                v9 = static_cast<float>(896 * td->outputFactor[outIdx]);
         }
     }
 

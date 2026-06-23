@@ -239,16 +239,17 @@ TEST(SimCmdApply3, StoreCombatSlot_LocalGate) {
     Seed3();
     Apply3_SetLocalPlayerId(42);
 
+    // 0x49c777: `mov eax,[ecx+40h]` -> the local-battle gate id is a1[16] == payload +0x40.
     // not local -> rejected, nothing stored
     CommandPacket nope{};
     nope.opcode() = kOp3StoreCombatSlot;
-    nope.put32(0x10, 7);   // != local
+    nope.put32(0x40, 7);   // != local (gate field +0x40)
     CHECK_EQ(ApplyPacket3(nope, nullptr), 1);
 
     // local -> stored, ack stamped
     CommandPacket p{};
     p.opcode() = kOp3StoreCombatSlot;
-    p.put32(0x10, 42);     // == local
+    p.put32(0x40, 42);     // == local (gate field +0x40)
     p.set_cmd_id(9);
     p.put32(0x14, 13);     // unit
     for (int i = 0; i < 0x2C; ++i) p.bytes[0x14 + i] = static_cast<u8>(i + 1);
@@ -285,13 +286,15 @@ TEST(SimCmdApply3, DispatchUnitOrder_NotLocalRejected) {
 
 TEST(SimCmdApply3, EquipCombatObject_RequiresOwner) {
     Seed3();
-    // no owner -> reject
+    // no owner -> reject. 0x49b6a5: `if (!QueryBegin(...,*(a1+16))) return 1` with the
+    // ack LEFT UNTOUCHED. (The status==2 / return 2 stamp belongs only to the later
+    // target-resolve-fail path at 0x49b726, behind the deferred ResolveTargetEntityRef.)
     CommandPacket nope{};
     nope.opcode() = kOp3EquipCombatObject;
     nope.put32(0x10, 4000);
     AckEntry ack{};
     CHECK_EQ(ApplyPacket3(nope, &ack), 1);
-    CHECK_EQ((int)ack.status, 2);
+    CHECK_EQ((int)ack.status, 0); // untouched on the owner-gate return-1 path
 
     // owner exists -> equip recorded
     MakePerson(0, 4000);
@@ -330,7 +333,9 @@ TEST(SimCmdApply3, CharPlaySample_MissingActorRejected) {
     p.opcode() = kOp3CharPlaySample;
     p.put32(0x10, 321);
     AckEntry ack{};
-    CHECK_EQ(ApplyPacket3(p, &ack), 1);
+    // 0x499916: `return result` where result == the null FindByPredicate handle (0).
+    // Missing actor returns 0 (not 1) and leaves the ack untouched.
+    CHECK_EQ(ApplyPacket3(p, &ack), 0);
     CHECK_EQ((int)ack.status, 0); // untouched
 }
 
@@ -457,7 +462,9 @@ TEST(SimCmdApply3, CharApplyInteraction_NeedsPerson) {
     p.put32(0x10, 222);
     AckEntry ack{};
     CHECK_EQ(ApplyPacket3(p, &ack), 0);
-    CHECK_EQ((int)ack.status, 1);
+    // 0x49bba0: success path sets *(a2)=v52==2 (status), *(a2+1)=1 (slot),
+    // *(a2+6)=person. status stays 2, NOT 1.
+    CHECK_EQ((int)ack.status, 2);
     CHECK_EQ(Apply3_CharLog().interactionCount, 1);
 }
 

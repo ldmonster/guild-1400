@@ -120,24 +120,31 @@ MeleeResolveResult ResolveMeleeHit(CombatUnitAI& attacker, CombatUnit& victim,
                                    double distance, double weaponRange,
                                    bool connected, int damageMagnitude,
                                    double currentHp, double maxHp, i16 weaponType) {
-    (void)attacker;
     MeleeResolveResult r;
 
-    // Range re-check: out of range -> the swing whiffs (v2 = 0, v27 = 0).
+    // gilde.exe 0x48c9db: v26(inRange) starts 1; if (!objectdef || Distance > range)
+    // -> v2 = 0, v26 = 0 (out of range whiffs). (The original keeps going to clear
+    // the active target via a delta packet, which is command/presentation; for the
+    // rule we early-out — no death can happen out of range.)
     r.inRange = (weaponRange > 0.0) && (distance <= weaponRange);
     if (!r.inRange)
         return r;
 
-    bool landed = connected && damageMagnitude != 0;
+    bool landed = connected && damageMagnitude != 0;   // v2 != 0
 
-    // The death gate runs only when both units are alive, in range, and the swing
-    // landed (the original's `if (*(v1+8) && *(v28+8) && v27)` plus the per-type
-    // branches that all funnel to LABEL_20 == ApplyUnitDeath).
-    if (victim.alive) {
+    // gilde.exe 0x48cadf: the death gate runs when BOTH units are alive and the
+    // swing was in range:  if ( *(v1+8) /*victim*/ && *(v27+8) /*attacker*/ && v26 ).
+    // (v1 == a1[95] is the struck/victim unit; v27 == a1[96] is the attacker. The
+    // per-weapon-type voice switch all funnels to LABEL_20 == ApplyUnitDeath(v1).)
+    bool attackerAlive = attacker.unit && attacker.unit->alive;
+    if (victim.alive && attackerAlive) {
+        // LABEL_20: result = ApplyUnitDeath(v1 == victim).
         r.killed = ApplyUnitDeath(victim, currentHp, maxHp);
-        if (r.killed && landed && static_cast<u16>(weaponType) == kWpnStab2) {
-            // Banner stab (weapon 366): mark the victim defeated (+8 = 4) and the
-            // original raises a "<attacker> defeats <victim>" banner (deferred).
+        // gilde.exe 0x48cb3b: the banner / defeat-marker runs ONLY when
+        // ApplyUnitDeath returned 0 (the unit SURVIVED the ratio gate) AND the
+        // swing landed (v2) AND the weapon is the banner stab 366. A banner stab
+        // "defeats"/captures rather than kills:  *(v1+8) = 4.
+        if (!r.killed && landed && static_cast<u16>(weaponType) == kWpnStab2) {
             victim.alive = kUnitDefeatedMarker;   // *(v1+8) = 4
             r.defeated = true;
         }

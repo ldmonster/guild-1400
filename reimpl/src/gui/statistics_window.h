@@ -52,18 +52,23 @@ inline constexpr int kStatGenSlotHeader  = 0; // header + inhabitant/ratio summa
 inline constexpr int kStatGenSlotColLeft = 2; // flt_1234758 column ("%s$A" stacked)
 inline constexpr int kStatGenSlotColRight = 3; // flt_123475C column ("%s" + "$A")
 
-// The header text-id sweep at window 0 (do { Render(id); Render("$A"); } while id!=2123).
-inline constexpr int kStatGenHeaderFirst = 2096;
-inline constexpr int kStatGenHeaderLast  = 2123;
+// The header text-id sweep at window 0. DISASM 0x57a667: edx=2096; render(edx); inc edx;
+// while (edx != 2123). The inc precedes the test, so the RENDERED ids are 2096..2122 (27
+// ids); 2123 is the loop-exit sentinel and is NEVER rendered.
+inline constexpr int kStatGenHeaderFirst = 2096;       // first rendered id
+inline constexpr int kStatGenHeaderLast  = 2123;       // exit sentinel (NOT rendered)
+inline constexpr int kStatGenHeaderCount = 27;         // 2096..2122 inclusive
 
 inline constexpr int kStatGenModeTextBase = 2095; // RenderRichString(byte_641DA0 + 2095)
 
-// The two stacked float columns: 28 floats each, byte-stride 16, end at byte offset 448.
-//   v6 starts at 0; each pass reads flt[v6], then v6 += 16, until v6 == 448. The pass
-//   for v6 == 432 (the 28th) runs, then v6 becomes 448 and the do/while exits -> 28.
-inline constexpr int kStatGenColCount  = 28;  // 448 / 16 passes (v6 = 0,16,..,432)
+// The two stacked float columns: byte-stride 16. DISASM (0x57a7d7 `mov edx,10h`;
+// loop at 0x57a7e4: fld flt[edx]; add edx,10h; cmp edx,1C0h; jnz) — v6 STARTS AT 16
+// (the byte-0 element is skipped), reads flt[16], flt[32], ..., flt[432], then v6 hits
+// 448 and the do/while exits. That is 27 passes, reading stride-elements 1..27.
+inline constexpr int kStatGenColStart  = 16;  // v6 = 0x10 (first read at byte 16, NOT 0)
 inline constexpr int kStatGenColStride = 16;  // (char*)flt + v6, v6 += 16 up to 448
 inline constexpr int kStatGenColEnd    = 448; // while (v6 != 448)
+inline constexpr int kStatGenColCount  = 27;  // (448 - 16) / 16 passes (v6 = 16,32,..,432)
 
 // Recovered markup / format strings (byte-for-byte; German extended chars preserved).
 inline constexpr const char* kStatCenter      = "$C";   // aC_6

@@ -58,10 +58,19 @@ extern const double kPickWeightFactor;   // dbl_61F938 = 0.0125 (PickClosestByWe
 //   destBld  : dword_12CEA94 (+388) — current destination building ptr; its
 //              +44 / +48 dwords are the dest universe/object ids the search
 //              results are compared against (no-op if already there)
-//   turnBits : dword_12CEAD8 (+456) — per-turn bitfield. bit 0x1000 = "skip this
-//              person this round"; bit 0x100000 (BYTE1|=0x10) = "dispatched to
-//              work"; bit 0x80000 (BYTE1|=8) = "dispatched social"; bit 0x800 =
-//              "social already requested".
+//   turnBits : dword_12CEAD8 (+456) — per-turn bitfield. VERIFIED against the
+//              disasm (2026-06-11, IDA back online): every dispatch writeback in
+//              0x4e7e88 targets BYTE 1 of the dword (`or byte ptr
+//              ds:(dword_12CEAD8+1)[esi], 10h` @0x4e8184/0x4e82a5, `mov byte ptr
+//              ds:(dword_12CEAD8+1)[..]` @0x4e8578/0x4e8767/0x4e89ab), i.e. bits
+//              8..15: work-dispatch sets bit 0x1000, social sets bit 0x800 —
+//              the SAME bits the entry gates test (`& 0x1000` / `& 0x800`). The
+//              sweeps are therefore self-limiting: a dispatched person is gated
+//              out of the rest of the round. (The pre-verification model used
+//              0x100000/0x80000 — a BYTE1-vs-BYTE2 misread; fixed.) The bits are
+//              cleared each round by BeginPlayerRound's per-NPC mask
+//              dword_12CEAD8[i] &= 0xE0874703 (@0x5331b7: bits 11 and 12 are
+//              NOT in the persist mask).
 //   personId : dword_12CE914 (+4) — the id used in every command emission.
 // ===========================================================================
 struct DailyPersonRow {
@@ -75,12 +84,13 @@ struct DailyPersonRow {
     bool valid;      // false => slot does not exist (treated as not-live)
 };
 
-// turnBits bit masks (recovered from the BYTE1(..)|= and &-test sites).
+// turnBits bit masks (disasm-verified: the BYTE1(..)|= writebacks land on the
+// same bits the gates test — see the column table above).
 enum DailyTurnBit : u32 {
-    kDailySkip       = 0x1000,    // & 0x1000 -> skip this person this round
-    kDailyDispWork   = 0x100000,  // BYTE1 |= 0x10 -> dispatched to work
-    kDailyDispSocial = 0x80000,   // BYTE1 |= 8    -> dispatched to social
-    kDailySocialReq  = 0x800,     // & 0x800       -> social already requested
+    kDailySkip       = 0x1000,  // & 0x1000 gate — "already work-dispatched"
+    kDailyDispWork   = 0x1000,  // BYTE1 |= 0x10 @0x4e8132/0x4e8184/0x4e82a5
+    kDailyDispSocial = 0x800,   // BYTE1 |= 8    @0x4e8578/0x4e8767/0x4e89ab
+    kDailySocialReq  = 0x800,   // & 0x800 gate — "already social-dispatched"
 };
 
 // The activity the director assigns to a person this round (the RULE outcome).
@@ -126,9 +136,14 @@ struct NpcDailyHooks {
     // aiPlayerClass(i): *(byte*)(dword_13CE294 + 589 * *homeBld) — the faction/
     //   type-def class byte (4/16/19 == skip social dispatch).
     u8   (*aiPlayerClass)(int i);
-    // workDistanceOk(i): the bone-chain distance probe between homeBld and the
-    //   FindById(destBld->+44) building; the original gates "go to work" on
-    //   distance < ~960 (SLODWORD(v69) < 1171963904). Returns true if within range.
+    // workDistanceOk(i): the bone-chain distance probe between homeBld's scene
+    //   node (+97, PointThroughBoneChain @0x5c8b38 over node +76) and the node of
+    //   Building_FindById(charPtr(+388)->+44) — the char's CURRENT building. When
+    //   either node is missing the distance stays 0.0 (passes). DISASM-VERIFIED
+    //   gate @0x4e80b2: `cmp [esp+..var_40], 45DAC000h; jge skip` — i.e.
+    //   distance < 7000.0f (0x45DAC000), int-compare of the positive float bits.
+    //   (The pre-verification "~960 / 1171963904" note misdecoded the constant;
+    //   1171963904 == 0x45DAC000 == 7000.0f.) Returns true if within range.
     bool (*workDistanceOk)(int i);
     // characterBudget(): VIBE_Character_CountByOwner(0,0) < 32 (the live-actor cap).
     bool (*characterBudgetOk)();
@@ -176,8 +191,16 @@ HeRecord* NpcDaily_DailyRoutineStep(HeRecord* h);
 DailyActivity SelectDailyActivity(int state, int season, int hour,
                                   const DailyPersonRow& row, bool tavernEligible);
 
-// Convenience: the season for a given day counter (day % 4), matching
-// VIBE_GameTime_GetSeasonFromDay.
-inline int SeasonFromDay(i32 day) { return static_cast<int>(day % 4); }
+// VIBE_GameTime_GetSeasonFromDay @0x58339c — 1:1.
+//   disasm: idiv ecx(=4) ; mov al, dl  -> returns the SIGNED remainder day % 4,
+//   truncated to a char (al). For day>=0 this is 0..3; for a negative day it is a
+//   negative season (-3..-1) — and the caller (DailyRoutineStep @0x4e80c3:
+//   `mov eax,[var]; sar eax,18h; fld flt_6476FC[eax*4]`) SIGN-EXTENDS that char and
+//   indexes the 4-entry season tables with it, so a negative day genuinely indexes
+//   the table negatively in the original. We reproduce that exactly: char-truncate
+//   here, and index the season tables with the raw signed value (no `& 3` mask).
+inline int SeasonFromDay(i32 day) {
+    return static_cast<int>(static_cast<signed char>(day % 4));
+}
 
 } // namespace guild::sim

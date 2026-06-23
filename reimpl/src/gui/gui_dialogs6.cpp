@@ -3,6 +3,7 @@
 #include "gui/gui_dialogs5.h" // Panel_RunUseObject (real sibling), g_forceQuitLatch
 #include "gui/object.h"       // g_widgets, g_widgetCache, Widget_AllocSlot
 #include "gui/window.h"       // g_currentWindowId (dword_62D230)
+#include "util/coord.h"       // util::ConvertX (VIBE_Coord_ConvertX @0x5c6b08, TRUNCATE)
 
 #include <cstdint>
 #include <cstdio>
@@ -20,10 +21,16 @@ i32 g_thiefGridIds[32];
 i32 g_inventoryActiveWindow = -1;
 i32 g_plantPrevPanel = -1;
 
+// gilde.exe dbl_624490 — plant-bar price scale.  get_bytes(0x624490,8) =
+// 00 00 00 00 00 00 E0 3F == 0.5 (the truncated market price is halved).
+inline constexpr double kPlantPriceHalf = 0.5;
+
 // g_forceQuitLatch is defined in gui_dialogs5.cpp; we declare it extern in the
 // header and link against it. (The original dword_631614 lives once.)
 
-namespace { inline Widget& W(int slot) { return g_widgets[slot]; } }
+namespace { inline Widget& W(int slot) { return g_widgets[slot]; }
+// Unaligned by-value dword load — byte-identical to the original's unaligned x86 read.
+inline int LdI32(const void* p) { int v; std::memcpy(&v, p, sizeof(v)); return v; } }
 
 // ===========================================================================
 // Hooks (inert defaults). Defaults make every builder observable without the
@@ -251,7 +258,10 @@ void Panel_RunInventory(unsigned short city) {
     if (!g_hooks->interactionTestHandlerFlagDword(4096)) return;
 
     g_hooks->interactionDispatchPanelEvent(0x14, 0, 0, 0);
-    int v1 = g_hooks->gameTickFinalize(0, 0, "panel\\inventory");
+    // gilde.exe @0x54f6c1: GameTick_Finalize(HIWORD(dword_69FFBC)-344, dword_69FFBC-264,
+    // "panel\inventory_2"). dword_69FFBC is BSS (0) -> args (-344, -264).
+    int v1 = g_hooks->gameTickFinalize(static_cast<i16>(-344), static_cast<i16>(-264),
+                                       "panel\\inventory_2");
     g_hooks->formSelectWindow(v1, 0);
     SetWindowBorder(24);
     g_hooks->formSelectWindow(v1, 0);
@@ -305,19 +315,27 @@ void Panel_RunInventory(unsigned short city) {
 // RunBuildingDetail, then spins the loop until a control-state edge fires.
 // ===========================================================================
 int Panel_RunBuildingRoundEnd(char* a1, unsigned short city) {
-    int v2 = g_hooks->gameTickFinalize(60, 0, "Runden\\spielerr2");
+    // v1 = 589*(*a1) + dword_13CE294 (building-type record; type table out of tree, a1-modeled).
+    char* v1 = a1;
+    int v2 = g_hooks->gameTickFinalize(60, 0, "Runden\\Spielerrunde_Ende_geb");
     g_hooks->formCenterChildWindows(v2);
     g_hooks->formSelectWindow(v2, 0);
+    // *(word*)(dword_62D298 + 636) = 69 — window-record write (out of tree).
     g_hooks->buildingMapTypeToCategory(a1 ? a1[0] : 0);
 
-    int worth[16];
+    // ComputeProductionWorth (@0x58fe68) writes a contiguous dword array; here the output
+    // base IS &v11 (idx0 = v11, unlike RunBuildingDetail which uses &v13+4). Stack-aliased
+    // locals -> a2[] indices:  v11=a2[0] v12=a2[1] v13=a2[2] v14=a2[4] v15=a2[5] v16=a2[6]
+    //   v17=a2[8] v18=a2[12] v19=a2[13] v20=a2[14] v21=a2[15] v22=a2[18] v23=a2[19] v24=a2[20].
+    int worth[24];
     std::memset(worth, 0, sizeof(worth));
     g_hooks->buildingValueComputeWorth(a1, city, worth);
-    int v11 = worth[0],  v13 = worth[1],  v14 = worth[2],  v15 = worth[3],  v16 = worth[4];
-    int v17 = worth[5],  v18 = worth[6],  v19 = worth[7],  v20 = worth[8],  v21 = worth[9];
-    int v22 = worth[10], v12 = worth[11], v23 = worth[12], v24 = worth[13];
+    int v11 = worth[0],  v12 = worth[1],  v13 = worth[2],  v14 = worth[4],  v15 = worth[5];
+    int v16 = worth[6],  v17 = worth[8],  v18 = worth[12], v19 = worth[13], v20 = worth[14];
+    int v21 = worth[15], v22 = worth[18], v23 = worth[19], v24 = worth[20];
 
-    // building-name line (v5[5] = optional owner suffix); inert when no record.
+    // building-name line: v5[5] (owner suffix) selects "$A$Z%1s >%s<$2A" vs "$A$Z%1s$2A".
+    // Record (v5) out of tree -> inert (no suffix).
     RichStr(0u /*"$A$Z%1s$2A"*/);
 
     int upg = g_hooks->buildingGetUpgradeLevel(reinterpret_cast<std::intptr_t>(a1));
@@ -325,7 +343,7 @@ int Panel_RunBuildingRoundEnd(char* a1, unsigned short city) {
     if (v11) RichStr(0xA1u, v11);
     if (v13) RichStr(0xA2u, v13);
     if (v16) {
-        int catBase = a1 ? (static_cast<unsigned char>(a1[547]) + 294) : 294;
+        int catBase = v1 ? (static_cast<unsigned char>(v1[547]) + 294) : 294;
         RichStr(0xA3u, catBase, v16);
     }
     if (v15 + v14) RichStr(0xA4u, v15 + v14);
@@ -336,7 +354,7 @@ int Panel_RunBuildingRoundEnd(char* a1, unsigned short city) {
     if (v20) RichStr(0xA9u, v20);
     if (v23) RichStr(0xAAu, v23);
     if (v22) {
-        char t = a1 ? a1[0] : 0;
+        char t = v1 ? v1[0] : 0;
         if (t == 4 || t == 16 || t == 19) RichStr(0xB0u, v22);
         else                              RichStr(0xABu, v22);
     }
@@ -344,9 +362,10 @@ int Panel_RunBuildingRoundEnd(char* a1, unsigned short city) {
     if (v24 > 0)      RichStr(0xADu, v24);
     else if (v24 < 0) RichStr(0xAEu, v22 + v24);
 
+    // gilde.exe @0x552f42: RunFrameLoop(423879, (int)VIBE_Panel_RunBuildingRoundEnd, v2(form)).
     while (g_hooks->gameLogicRunFrameLoop(423879,
-               reinterpret_cast<std::intptr_t>(&Panel_RunBuildingRoundEnd) & 0,
-               reinterpret_cast<const void*>(&Panel_RunBuildingRoundEnd))) {
+               static_cast<int>(reinterpret_cast<std::intptr_t>(&Panel_RunBuildingRoundEnd)),
+               reinterpret_cast<const void*>(static_cast<std::intptr_t>(v2)))) {
         // The original compares a cached vs current control word; any change -> quit.
         if (g_hooks->readMouseRelease()) g_forceQuitLatch = 1;
     }
@@ -384,9 +403,9 @@ int Panel_ShowUniversity(int a1, unsigned short* a2) {
         char buf[256];
         g_hooks->textRenderFormattedMessage(buf, 0 /*"%s"*/, 0, 0, 0);
         g_hooks->objectAddTextLabel(190, static_cast<i16>(v44 + 30), g_currentWindowId, buf);
-        g_hooks->textRenderFormattedMessage(buf, 0, (*reinterpret_cast<int*>(&weights[v7 + 1]) >> 24) + 4810, 0, 0);
+        g_hooks->textRenderFormattedMessage(buf, 0, (LdI32(&weights[v7 + 1]) >> 24) + 4810, 0, 0);
         g_hooks->objectAddTextLabel(190, static_cast<i16>(v44 + 40), g_currentWindowId, buf);
-        g_hooks->textRenderFormattedMessage(buf, 0, (*reinterpret_cast<int*>(&weights[v7 + 2]) >> 24) + 4810, 0, 0);
+        g_hooks->textRenderFormattedMessage(buf, 0, (LdI32(&weights[v7 + 2]) >> 24) + 4810, 0, 0);
         g_hooks->objectAddTextLabel(190, static_cast<i16>(v44 + 50), g_currentWindowId, buf);
         g_hooks->textRenderFormattedMessage(buf, 0 /*"%T"*/,
                                             *reinterpret_cast<int*>(&weights[v7]), 0, 0);
@@ -540,7 +559,9 @@ short* Panel_RunPlantBar(int a1) {
                 node = g_hooks->gameObjectIterNext();
             } while (node);
         }
-        int v52 = g_hooks->gameTickFinalize(0, 266, "misc\\plantbar");
+        // gilde.exe @0x54e0f4: GameTick_Finalize(HIWORD(dword_69FFBC) - 95, 266, "Misc\\PlantBar").
+        // dword_69FFBC is BSS (0 at load) so HIWORD-95 == -95.
+        int v52 = g_hooks->gameTickFinalize(static_cast<i16>(-95), 266, "Misc\\PlantBar");
         if (v52 == -1) return result;
         if (g_plantPrevPanel != -1) g_hooks->formSetObjectsVisible(g_plantPrevPanel, 0);
         g_hooks->formSelectWindow(v52, 1);
@@ -582,9 +603,18 @@ short* Panel_RunPlantBar(int a1) {
                     g_hooks->gameLogicRunFrameLoop(423879, 0, nullptr);
                 int seq = g_hooks->cmdGetPacketSeqById(pkt);
                 if (seq) {
+                    // gilde.exe 0x54e6.. : market price is truncated, halved, truncated
+                    // again, then floored at 1024.  TWO VIBE_Coord_ConvertX @0x5c6b08
+                    // truncation passes with a *dbl_624490 (==0.5) scale between them:
+                    //   p1 = (int)trunc(marketPrice)
+                    //   p2 = (int)trunc((double)p1 * 0.5)   [dbl_624490 == 0.5]
+                    //   v26 = max(p2, 1024)
                     double price = g_hooks->buildingComputeMarketPrice(0, 0x64u);
                     g_hooks->coordConvertX();
-                    int p = static_cast<int>(price);
+                    int p1 = static_cast<int>(util::ConvertX(price));      // (int)v24
+                    double scaled = static_cast<double>(p1) * kPlantPriceHalf; // *dbl_624490
+                    g_hooks->coordConvertX();
+                    int p = static_cast<int>(util::ConvertX(scaled));     // (int)v25
                     int v26 = (p <= 1024) ? 1024 : p;
                     g_hooks->cmdEnqueueCmd15(-1, 0, v26, 0);
                     g_hooks->plantLoadVegetationModel(&seq);
@@ -750,7 +780,8 @@ force_quit:
 // confirm key (258) or a right-click-with-items resets the dragged item slots.
 // ===========================================================================
 int Panel_RunThievesGuildTrain(int a1, int a2, char* a3, int a4) {
-    int v4 = g_hooks->gameTickFinalize(0, 0, "Locations\\diebe10");
+    int v4 = g_hooks->gameTickFinalize(0, 0,
+                 "locations\\diebesgilde\\diebesgilde_trainieren");
     g_hooks->formCenterChildWindows(v4);
     g_hooks->dragSlotResetGridTable();
     g_hooks->dragCursorSetSprite(0, 0);
@@ -793,10 +824,16 @@ namespace { void RobberCampRaidCb() {} } // VIBE_Location_RobberCampRaid (inert)
 
 void Dialog_RobberRaidConfirm(int target) {
     if (g_hooks->dialogCheckActiveCharFlag()) return;
-    int v4[1];
+    // gilde.exe @0x5130e8: Light_SetGrayColorThunk(0, 40, &v4) zeros a 40-byte blob;
+    // then v5(+4)=1024, v7(+0xC byte)=6, v6(+8)=&unk_7443A0, v8(+0x24)=1689.
+    unsigned char v4[40];
+    std::memset(v4, 0, sizeof(v4));
     g_hooks->lightSetGrayThunk(0, 40, reinterpret_cast<std::intptr_t>(v4));
+    { int t = 1024; std::memcpy(v4 + 4, &t, 4); }   // v5 (unconditional)
     if (target) {
         g_hooks->playerBarCreate(target, 0);
+        v4[0x0C] = 6;                                    // v7
+        { int t = 1689; std::memcpy(v4 + 0x24, &t, 4); } // v8
         char text[1024];
         g_hooks->textRenderFormattedMessage(text, 5776, 0, 0, 0);
         g_hooks->mapViewPanelDispatcher(1, reinterpret_cast<std::intptr_t>(v4),
@@ -813,10 +850,16 @@ namespace { void BriberyMenuCb() {} } // VIBE_Location_BriberyMenu (inert)
 
 void Dialog_BriberyConfirm(int target) {
     if (g_hooks->dialogCheckActiveCharFlag()) return;
-    int v4[1];
+    // gilde.exe @0x512e34: same 40-byte blob; v5(+4)=1024, v6(+8)=0, v7(+0xC byte)=6,
+    // v8(+0x24)=1689, message 5637.
+    unsigned char v4[40];
+    std::memset(v4, 0, sizeof(v4));
     g_hooks->lightSetGrayThunk(0, 40, reinterpret_cast<std::intptr_t>(v4));
+    { int t = 1024; std::memcpy(v4 + 4, &t, 4); }   // v5 (unconditional)
     if (target) {
         g_hooks->playerBarCreate(target, 0);
+        v4[0x0C] = 6;                                    // v7
+        { int t = 1689; std::memcpy(v4 + 0x24, &t, 4); } // v8
         char text[1024];
         g_hooks->textRenderFormattedMessage(text, 5637, 0, 0, 0);
         g_hooks->mapViewPanelDispatcher(1, reinterpret_cast<std::intptr_t>(v4),

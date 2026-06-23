@@ -284,9 +284,10 @@ TEST(CharActionMisc, FadeMathEndpoints) {
     CHECK(std::fabs(FadeParam(100, 0.0f, false) - 1.0) < 1e-9);
     CHECK(std::fabs(FadeParam(100, 0.0f, true) - 0.0) < 1e-9);
 
-    // Alpha byte mapping (round-to-nearest * 255).
+    // Alpha byte mapping: (int)(t*255) via VIBE_Coord_ConvertX = TRUNCATE toward
+    // zero (decompiled wave-15 @0x5c6b08 + the 0x40b998 call site), not round.
     CHECK_EQ(FadeAlpha(0.0), 0);
-    CHECK_EQ(FadeAlpha(0.5), 128);             // round(127.5) -> 128
+    CHECK_EQ(FadeAlpha(0.5), 127);             // trunc(127.5) -> 127
     CHECK_EQ(FadeAlpha(1.0), 255);
 }
 

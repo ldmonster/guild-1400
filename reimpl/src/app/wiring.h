@@ -293,6 +293,8 @@
 #include "shim/IGraphicsDevice.h"
 #include "shim/INetSocket.h"
 #include "shim/IPlatform.h"
+#include "shim/IVideo.h"             // IVideoDecoder (pl_mpeg-backed movie playback)
+#include "play/video_movie_backing.h" // VideoMovieBacking / MakeVideoMovieHooks
 
 #include "app/real_boot.h"   // RealGameAssets (real-asset boot mode)
 
@@ -328,6 +330,21 @@ public:
     bool firedReal(const char* hook) const;
     int  presentCount() const { return presentCount_; }
     int  frameCount() const { return frameCount_; }
+
+    // ---- movie / video (pl_mpeg via IVideo) -------------------------------
+    // Observable wiring state for the intro/outro video path (see loadMovieDll /
+    // moviePlayIntroSequence). movieFrameCap_ bounds the per-play decode for
+    // tests; 0 = play the whole clip (the faithful boot behaviour).
+    int  movieFramesDecoded() const { return movieFramesDecoded_; }
+    bool videoBackendPresent() const { return videoDecoder_ != nullptr; }
+    void setMovieFrameCap(int cap) { movieFrameCap_ = cap; }
+
+    // ---- live world (LoadWorld populated the entity tables) ---------------
+    // True once the start-city .cty's full table load ran (g_persons / g_objects
+    // populated), so the wired per-entity sim/turn/event hooks run over real data.
+    bool worldLoaded() const { return worldLoaded_; }
+    int  livePersonCount() const { return livePersonCount_; }
+    int  liveObjectCount() const { return liveObjectCount_; }
     bool quitRequested() const override { return quitRequested_; }
 
     // ---- inspectable real subsystem state ---------------------------------
@@ -347,6 +364,9 @@ public:
     int  shapeBankCount() const;
     int  lastClickedId() const { return lastClickedId_; }
     int  scriptCmdResult() const { return scriptCmdResult_; }
+    // The result of the wired VIBE_Character_RegisterScriptCommands @0x43dfb0
+    // (1 == the final ImportCommand succeeded; 0 before scriptRegisterCommands ran).
+    int  scriptCharCmdResult() const { return scriptCharCmdResult_; }
     bool fadeDone() const { return fadeDone_; }
     // Third-wave inspection: weather intensity, HUD layout, character/cutscene/
     // economy state advanced by the newly-wired per-frame + init steps.
@@ -579,6 +599,7 @@ private:
     // Token program + last command result for the script register/invoke ABI.
     std::vector<sim::ScriptToken_t> scriptProgram_;
     i32 scriptCmdResult_ = 0;
+    i32 scriptCharCmdResult_ = 0;
 
     // Wall clock advanced each frame (drives day-cycle brightness).
     sim::GameTime clock_{};
@@ -688,6 +709,18 @@ private:
     const RealGameAssets* assets_ = nullptr;
     std::string gameDir_;
     bool realAssets_ = false;
+
+    // pl_mpeg-backed movie player (rule-6 video). Null in the portable build
+    // (CreateVideoDecoder() returns nullptr) -> the movie path is a silent skip,
+    // exactly the prior STUB behaviour.
+    std::unique_ptr<shim::IVideoDecoder> videoDecoder_;
+    int movieFramesDecoded_ = 0;
+    int movieFrameCap_ = 0;
+
+    // Live-world load state (set by worldLoadBuildingAndObjectData via io::LoadWorld).
+    bool worldLoaded_ = false;
+    int  livePersonCount_ = 0;
+    int  liveObjectCount_ = 0;
     int  gfxObjectCount_ = 0;
     int  buildingTypeCount_ = 0;
     int  sceneTypeCount_ = 0;
@@ -751,6 +784,10 @@ HeadlessResult RunHeadless(int displayMode = 1, bool showIntro = false,
 // If `gameDir` is empty or the four key assets are absent, `r.assetsPresent` is
 // false and NO spine run happens (caller should skip); otherwise the lifecycle
 // runs and `r.exitCode` is the GameApp::Run result (0 on a clean run).
+// Install EVERY reconstructed gameplay hook bridge into its global hook table
+// (rule 13). Reusable by the live spine and by tests wanting the full wired system.
+void InstallAllRealGameplayHooks();
+
 struct RealHeadlessResult {
     HeadlessResult base;            // exit/frame/present + tracker/vfs/sound flags
     bool assetsPresent = false;     // the real game dir + key assets resolved
@@ -763,6 +800,9 @@ struct RealHeadlessResult {
     int  sceneTypeCount = 0;        // A_Obj.dat records (expected 731)
     bool cityLoaded = false;        // <Stadt>.cty parsed
     std::string cityName;           // parsed .cty header name
+    bool worldLoaded = false;       // LoadWorld populated the live entity tables
+    int  livePersonCount = 0;       // populated g_persons slots (marker != -1)
+    int  liveObjectCount = 0;       // populated g_objects slots (alive != 0)
 };
 
 RealHeadlessResult RunHeadlessRealAssets(const std::string& gameDir,

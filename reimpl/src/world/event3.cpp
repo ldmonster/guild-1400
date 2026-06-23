@@ -349,7 +349,9 @@ i32 SetActorAnimById(HeRecord* h) {
     Time(h, 82) = Clock();   // +82 <- clock
     Time(h, 68) = Clock();   // +68 <- clock
     Dword(h, 172) = static_cast<i32>(static_cast<u16>(RandomModulo(5))) - 5;
-    int season = Clock().day % 4;  // VIBE_GameTime_GetSeasonFromDay == day % 4
+    // VIBE_GameTime_GetSeasonFromDay 0x58339c: signed idiv ecx(=4); returns dl (signed
+    // remainder). C++ signed % 4 truncates toward zero => identical (incl. negative day).
+    int season = Clock().day % 4;
     float base = kSeasonAnimBase[season];
     Dword(h, 88) = 0;
     Word(h, 86) = static_cast<u16>(static_cast<int>(base));

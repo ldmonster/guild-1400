@@ -121,9 +121,15 @@ TEST(Meisterai3Choice, WeightDistribution) {
     CHECK_EQ(w.weight[0], 62);
     CHECK_EQ(w.weight[1], 125);
     CHECK_EQ(w.weight[2], 250);
+    // base bytes (dword_4664B8[k][0]): row0=4, row1=3, row2=2.
+    CHECK_EQ(w.base[0], 4);
+    CHECK_EQ(w.base[1], 3);
+    CHECK_EQ(w.base[2], 2);
+    // pick = row[1 + RandomModulo(3)] with rng seq {0,1,2}:
+    //   row0[1+0]=0, row1[1+1]=2, row2[1+2]=1.
     CHECK_EQ(w.pick[0], 0);
-    CHECK_EQ(w.pick[1], 1);
-    CHECK_EQ(w.pick[2], 2);
+    CHECK_EQ(w.pick[1], 2);
+    CHECK_EQ(w.pick[2], 1);
 }
 
 TEST(Meisterai3Weather, ActivityRoll) {

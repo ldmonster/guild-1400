@@ -77,18 +77,21 @@ bool MissionTypeIsTrackable(u8 crimeType) {
 }
 
 // gilde.exe 0x539054 — progress-advance portion.
+// Mirrors the tail of VIBE_Mission_TrackCrimeProgress exactly: once a slot has
+// been found (FindBySource != 0) and the crime type is trackable, the original
+// ALWAYS returns 1 — it only conditionally bumps the progress counter when the
+// slot's type byte equals the crime type ((u8)*result == v2 -> ++*(result+7)).
+// The not-found / not-trackable paths are the only ones that return 0.
 bool MissionRequirementAdvance(int slot, u8 crimeType) {
     if (slot < 0 || slot >= kMissionSlotCount)
         return false;
-    if (g_missionSlots[slot].type == 0)        // slot must be occupied
+    if (g_missionSlots[slot].type == 0)        // FindBySource missed -> return 0
         return false;
-    if (!MissionTypeIsTrackable(crimeType))
+    if (!MissionTypeIsTrackable(crimeType))    // type-gate failed -> return 0
         return false;
-    if (g_missionSlots[slot].type == crimeType) {  // (u8)*result == v2
+    if (g_missionSlots[slot].type == crimeType)  // (u8)*result == v2
         ++g_missionSlots[slot].fieldAt28;          // ++*((_DWORD*)result + 7)
-        return true;
-    }
-    return false;
+    return true;                                 // mov eax, 1 (unconditional)
 }
 
 } // namespace guild::world

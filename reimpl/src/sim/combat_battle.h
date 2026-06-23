@@ -169,10 +169,14 @@ struct AttackEval {
 // `selfSkill` is the unit's skill byte (*(self+131)); `accuracyByte` is def[2];
 // `skillMod` is dword_631200 (1.0 when dword_6311E4 unset); `distance` and
 // `weaponRange` are world units. `rng` is the cutscene LCG (damage roll).
+// `alwaysFires` mirrors the binary's weaponClass==2 short-circuit (def[88]==2):
+// such weapons FIRE without rolling Math_RandomModulo(255) — the hit-chance roll
+// is skipped entirely (so the CRT LCG is NOT advanced for that path). Defaults to
+// false (the rolling melee/class-0/1 path).
 AttackEval EvaluateAttack(double distance, double weaponRange, u8 accuracyByte,
                           u8 selfSkill, double skillMod, bool hasUnitTarget,
                           float targetWorth, u8 weaponMinDmg, u8 weaponMaxDmg,
-                          CutsceneRng& rng);
+                          CutsceneRng& rng, bool alwaysFires = false);
 
 constexpr double kAccuracyScale   = 0.01;  // dbl_61BBB4
 constexpr double kRangeApproach   = 0.1;   // dbl_61BBAC (close-approach gate frac)

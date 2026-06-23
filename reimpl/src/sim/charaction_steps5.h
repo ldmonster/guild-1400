@@ -90,6 +90,11 @@ struct CharActionStep5Hooks {
     // VIBE_He_SendQuickjumpMessage(recipient, fromId, textId) — deliver a rendered
     // quickjump message. The render is opaque; textId is the template id.
     void (*sendQuickjumpMessage)(i32 recipient, i32 fromId, int textId);
+    // VIBE_Command_QueueRequestFlagBlob32(4, &blob) — the purchase-finalize cmd the
+    // original always emits at the tail of RunBuyObject's apply phase (selector 4,
+    // payload = {buyer_id_dword @ self+1, object_id_dword @ obj+2}). Opaque host-
+    // owned command queue; inert default is a no-op.
+    void (*queuePurchaseFinalize32)(i32 buyerBlob, i32 objBlob);
     // dword_12CE914[134*cityIndex] — the city's person/entity recipient id.
     i32 (*cityPersonId)(u16 cityIndex);
     // byte_12CE912[536*cityIndex] — the city category byte (6 == has-market path).
@@ -112,14 +117,14 @@ const CharActionStep5Hooks& GetCharActionStep5Hooks();
 // ===========================================================================
 // Recovered .rdata float constants (gilde.exe). The transport-speed scaler
 // multiplies the actor's base speed by these framerate-compensation factors.
-//   dbl_61F288 — the slow-tier factor (also the "type 2" doubling factor).
+//   dbl_61F288 — the slow-tier factor (also the "type 2" multiply factor).
 //   dbl_61F290 — the fast-tier factor.
-// The values themselves are not load-bearing for the control-flow golden tests
-// (they flow into an opaque vehicle-speed field), so we name them and document
-// the address; the exact magnitudes are not asserted.
+// Exact magnitudes recovered via get_bytes (imagebase 0x400000):
+//   dbl_61F288 = 0x3FE999999999999A = 0.8
+//   dbl_61F290 = 0x3FE6666666666666 = 0.7
 // ===========================================================================
-constexpr double kTransportSlowFactor = 0.5;   // dbl_61F288
-constexpr double kTransportFastFactor = 2.0;    // dbl_61F290
+constexpr double kTransportSlowFactor = 0.8;   // dbl_61F288 (0x3FE999999999999A)
+constexpr double kTransportFastFactor = 0.7;   // dbl_61F290 (0x3FE6666666666666)
 
 // ===========================================================================
 // Additional He / record field accessors (byte-faithful offsets) used here.
@@ -171,7 +176,8 @@ HeRecord* InitOfficeGuardState(HeRecord* h);
 i32 CopyGoalToTargetDup(HeRecord* h);
 
 // gilde.exe 0x4e0d54 — VIBE_CharAction_CopyGoalToTargetState2Dup(h@eax).
-//   Same copy, then advance by 2 days. Returns the resulting hour-of-day.
+//   Same copy, then advance by 2 hours (Advance(rec, 2, 0, 0): the edx=2 arg adds
+//   to the hour count, wrapping at 24 into days). Returns the resulting hour-of-day.
 i32 CopyGoalToTargetState2Dup(HeRecord* h);
 
 // gilde.exe 0x4d1674 — VIBE_CharAction_RestorePosFinishAlt(h@eax).

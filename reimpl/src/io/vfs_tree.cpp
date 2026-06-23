@@ -350,7 +350,9 @@ VfsNode* NormalizeDirPath(const char* path, VfsNode* start) {
         dir = match;
         if (!dir)
             return nullptr;
-        std::strcpy(comp, sep + 1);
+        // sep points into comp; this is an in-place left-shift of the tail.
+        // strcpy with overlapping src/dst is UB — memmove is byte-identical here.
+        std::memmove(comp, sep + 1, std::strlen(sep + 1) + 1);
         sep = std::strchr(comp, '/');
         if (!sep)
             return dir;
@@ -557,6 +559,12 @@ void VfsTreeShutdown() {
 // File-array accessors. The internal id registry stays private; these expose just
 // enough for the save-browser enumerator / WalkFileTree to read a dir's files.
 VfsFileEntry* ArrayOf(guild::u32 arrayId) { return ArrayById(arrayId); }
+
+void FreeNodeArray(VfsNode* dir) {
+    if (!dir || !dir->arrayOrArch) return;
+    FreeArray(dir->arrayOrArch);
+    dir->arrayOrArch = 0;
+}
 
 int DirFileCount(VfsNode* dir) {
     return dir ? static_cast<int>(dir->countOrTime) : 0;   // +0x100

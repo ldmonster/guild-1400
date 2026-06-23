@@ -35,9 +35,13 @@ static i32 EmitPair(CommandQueue& q, u8 op, i32 a1, i32 a2) {
     put32(p, 0x14, a2);
     return q.EnqueuePacket(p);
 }
+// gilde.exe 0x494b74 — VIBE_Command_QueueRequestPair35 (v4=a1@+0x10, v5=a2@+0x14, op=35).
 i32 QueueRequestPair35(CommandQueue& q, i32 a1, i32 a2) { return EmitPair(q, 35, a1, a2); }
+// gilde.exe 0x494c80 — VIBE_Command_QueueRequestPair41.
 i32 QueueRequestPair41(CommandQueue& q, i32 a1, i32 a2) { return EmitPair(q, 41, a1, a2); }
+// gilde.exe 0x494ca4 — VIBE_Command_QueueRequestPair42 (v4=a1@+0x10, v5=a2@+0x14, op=42).
 i32 QueueRequestPair42(CommandQueue& q, i32 a1, i32 a2) { return EmitPair(q, 42, a1, a2); }
+// gilde.exe 0x494ec0 — VIBE_Command_QueueRequestPair51.
 i32 QueueRequestPair51(CommandQueue& q, i32 a1, i32 a2) { return EmitPair(q, 51, a1, a2); }
 
 // --- opcodes 37/43/52/54: a1@+0x10, a2@+0x14, a4@+0x18 (a3 not on wire) -----
@@ -49,9 +53,14 @@ static i32 EmitQuad3(CommandQueue& q, u8 op, i32 a1, i32 a2, i32 a4) {
     put32(p, 0x18, a4);
     return q.EnqueuePacket(p);
 }
+// gilde.exe 0x494bbc — VIBE_Command_QueueRequestQuad37 (a3 -> ebp-4, off-wire).
 i32 QueueRequestQuad37(CommandQueue& q, i32 a1, i32 a2, i32 a3, i32 a4) { (void)a3; return EmitQuad3(q, 37, a1, a2, a4); }
+// gilde.exe 0x494cc8 — VIBE_Command_QueueRequestQuad43 (a3 off-wire).
 i32 QueueRequestQuad43(CommandQueue& q, i32 a1, i32 a2, i32 a3, i32 a4) { (void)a3; return EmitQuad3(q, 43, a1, a2, a4); }
+// gilde.exe 0x494ee4 — VIBE_Command_QueueRequestQuad52 (a3 off-wire).
 i32 QueueRequestQuad52(CommandQueue& q, i32 a1, i32 a2, i32 a3, i32 a4) { (void)a3; return EmitQuad3(q, 52, a1, a2, a4); }
+// gilde.exe 0x495070 — VIBE_Command_QueueRequestQuad54 (v6=a1@+0x10, v7=a2@+0x14,
+// v8=a4@+0x18, op=54; v9=a3 stored at ebp-4 OUTSIDE the packet, not on wire).
 i32 QueueRequestQuad54(CommandQueue& q, i32 a1, i32 a2, i32 a3, i32 a4) { (void)a3; return EmitQuad3(q, 54, a1, a2, a4); }
 
 // --- opcodes 46/60: a1@+0x10, a2@+0x14, a4@+0x18, a3@+0x1C (all on wire) ----
@@ -64,7 +73,10 @@ static i32 EmitQuad4(CommandQueue& q, u8 op, i32 a1, i32 a2, i32 a3, i32 a4) {
     put32(p, 0x1C, a3);
     return q.EnqueuePacket(p);
 }
+// gilde.exe 0x494d68 — VIBE_Command_QueueRequestQuad46 (v6=a1@+0x10, v7=a2@+0x14,
+// v8=a4@+0x18, v9=a3@+0x1C, op=46; all four on wire).
 i32 QueueRequestQuad46(CommandQueue& q, i32 a1, i32 a2, i32 a3, i32 a4) { return EmitQuad4(q, 46, a1, a2, a3, a4); }
+// gilde.exe 0x495124 — VIBE_Command_QueueRequestQuad60 (same layout as Quad46, op=60).
 i32 QueueRequestQuad60(CommandQueue& q, i32 a1, i32 a2, i32 a3, i32 a4) { return EmitQuad4(q, 60, a1, a2, a3, a4); }
 
 // --- opcodes 58/59: single dword (a1@+0x10) --------------------------------

@@ -227,28 +227,19 @@ int ExCutsceneReady(CommandPacket& pkt, AckEntry* ack) {
     i32 slotId = static_cast<i32>(pkt.get32(0x10));
     g_cutsceneTable.FindById(slotId); // probe (return value unused by orig)
 
-    // Walk the 4 participant id dwords at payload +16,+20,+24,+28 ... the orig
-    // loops v7 from (a1+16) to (a1+16)+16, i.e. ids at +16,+20,+24,+28 — wait the
-    // loop bound is v6+16 where v6=(a1+16) as int*, so 4 dwords: payload +16..+28.
-    for (int i = 0; i < 4; ++i) {
-        i32 personId = static_cast<i32>(pkt.get32(0x10 + 4 * i));
+    // gilde.exe 0x49d011-0x49d029: edx walks from (a1+0x10) to (a1+0x50) stepping
+    // +4 (16 iterations); each iteration reads the person id at [edx+4], i.e. the
+    // 16 dwords at payload +0x14, +0x18, ... +0x50. The slot id written to each
+    // found record's +520 is [esi] == *(a1+0x10). The kind==6/7 branches only add
+    // an int3 (debug trap) before the SAME write, so the net effect for every
+    // resolved person is record[+520] = slotId (regardless of prior value/kind).
+    for (int i = 0; i < 16; ++i) {
+        i32 personId = static_cast<i32>(pkt.get32(0x14 + 4 * i));
         Person* p = PersonFindRecordById(personId);
         if (!p)
             continue;
         u8* base = reinterpret_cast<u8*>(p);
-        i32 cur;
-        std::memcpy(&cur, base + kPfCutsceneId, 4);
-        if (cur == -1) {
-            std::memcpy(base + kPfCutsceneId, &slotId, 4); // LABEL_16
-            continue;
-        }
-        u8 kind = base[kPfKindByte];
-        if (kind == 6 || kind == 7) {
-            // original __debugbreak() then LABEL_16: still writes the id.
-            std::memcpy(base + kPfCutsceneId, &slotId, 4);
-        } else {
-            std::memcpy(base + kPfCutsceneId, &slotId, 4);
-        }
+        std::memcpy(base + kPfCutsceneId, &slotId, 4);
     }
     AckStamp(ack, 1, 0, 0);
     return 0;
@@ -274,7 +265,7 @@ int ExSetObjectField(CommandPacket& pkt, AckEntry* ack) {
 int ExCharPlaySample(CommandPacket& pkt, AckEntry* ack) {
     void* actor = FindActor(pkt);
     if (!actor)
-        return 1; // original returns the (zero) find result
+        return 0; // gilde.exe 0x499916: `return result` (the null find handle == 0)
     // InsertActionVararg(actor | 0x2D<<32, +20, +24, +28) — action type 0x2D (45).
     NoteAction(static_cast<i32>(pkt.get32(0x10)), 0x2D,
                static_cast<i32>(pkt.get32(0x14)));
@@ -404,8 +395,9 @@ int ExCharApplyInteraction(CommandPacket& pkt, AckEntry* ack) {
     // record the interaction and stamp the success ack.
     ++g_charLog.interactionCount;
     NoteAction(p->id, -8 /*interaction*/, 0);
-    AckStamp(ack, 2, 1, p->id); // v52=2 then *(a2)=1 on success
-    AckOk(ack);
+    // gilde.exe 0x49bba0: success stamps *(a2)=v52==2, *(a2+1)=1, *(a2+6)=record.
+    // The status stays 2 (NOT 1) on the success path.
+    AckStamp(ack, 2, 1, p->id);
     return 0;
 }
 
@@ -522,9 +514,12 @@ int ExEquipCombatObject(CommandPacket& pkt, AckEntry* ack) {
     // and assigns guard targets — all deep combat + render + person leaves. We
     // gate on the owner id existing (the original's first failure), record the
     // equip, and stamp the success ack.
+    // gilde.exe 0x49b6a0: PersonQueryBegin(...,*(a1+16)); `if (!Begin) return 1;`
+    // The owner-not-found path returns 1 and DOES NOT touch the ack (the ack(2,1,0)
+    // stamp belongs only to the later target-resolve-fail path, which returns 2 —
+    // that path lives behind the deferred VIBE_Combat_ResolveTargetEntityRef leaf).
     if (!BuildingFindById(static_cast<i32>(pkt.get32(0x10))) &&
         !PersonFindRecordById(static_cast<i32>(pkt.get32(0x10)))) {
-        AckStamp(ack, 2, 1, 0); // failure path: +0=2,+1=1,+6=0
         return 1;
     }
     ++g_charLog.equipCount;
@@ -538,13 +533,16 @@ int ExEquipCombatObject(CommandPacket& pkt, AckEntry* ack) {
 // (0x51, dword +20). Both copy a 0x2C record from payload +20. Gated on the
 // packet being for the local battle (cutscene id column == local player's).
 static int StoreCombatSlot(CommandPacket& pkt, AckEntry* ack, bool update) {
-    // local-battle gate: payload +16 == the local battle id (modeled via the
-    // local-player id; the original compares dword_12CEB18[134*localPlayer]).
-    if (static_cast<i32>(pkt.get32(0x10)) != g_localPlayerId)
+    // gilde.exe 0x49c777: `mov eax,[ecx+40h]` -> the local-battle gate id is at
+    // payload +0x40 (a1[16], a1 is _DWORD*), compared to dword_12CEB18[134*local].
+    // (Modeled via the local-player id.)
+    if (static_cast<i32>(pkt.get32(0x40)) != g_localPlayerId)
         return 1;
-    i32 squad = static_cast<i32>(pkt.cmd_id());          // a1[4] (+4)
-    i32 unit  = static_cast<i32>(pkt.get32(0x14));        // a1[5] (+20)
-    const u8* rec = pkt.bytes + 0x14;                      // payload +20, 0x2C bytes
+    // gilde.exe 0x49c78f: `mov edi,[ecx+10h]` -> the battle/squad ring key is the
+    // dword at payload +0x10 (a1[4]), NOT cmd_id (+4).
+    i32 squad = static_cast<i32>(pkt.get32(0x10));        // a1[4] (+0x10)
+    i32 unit  = static_cast<i32>(pkt.get32(0x14));        // a1[5] (+0x14)
+    const u8* rec = pkt.bytes + 0x14;                      // payload +0x14, 0x2C bytes
     g_combatStore(squad, unit, rec, update);
     AckStamp(ack, 1, 8, 0);
     return 0;

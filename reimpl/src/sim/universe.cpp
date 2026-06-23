@@ -93,7 +93,8 @@ bool UniverseInitCameraNode(UniverseRecord* rec) {
     rec->objListTail = node;
     rec->nearPlane = 4;        // rec+972 = 4 (dword_649D8C default)
     rec->farPlane  = 15;       // rec+976 = 15 (dword_649D90 default)
-    rec->visGuard  = 0;        // rec+983 (byte_649D70 mirror)
+    rec->reloadFlags = 0;      // rec+982 = 0 (0x5b47b0 *(a1+982)=0)
+    rec->visGuard  = static_cast<u8>(g_render.visGuard); // rec+983 = byte_649D70 (0x5b4854)
     return true;
 }
 

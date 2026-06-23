@@ -41,6 +41,8 @@ struct CityScreenConfig {
     int fbW = 800, fbH = 600;
     int maxFrames  = -1;          // -1 = until confirm/back/close; tests bound it
     int frameCapMs = 16;          // per-frame sleep (~60fps); 0 = uncapped
+    int introFrames = 90;         // 3D screen: frames of the A_Stadtwahl camera flight
+                                  // (A0->A1->A2) played before the pick settles; 0 = none
     // The selectable cities: {displayName, ctyPath relative to the game dir},
     // mirroring SdlMenuConfig.cities.  Empty -> a "no cities" screen that only
     // accepts Back.

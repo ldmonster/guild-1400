@@ -118,6 +118,61 @@ TEST(MissionSave, SaveFailsOnShortBuffer) {
     CHECK(!MissionSaveSlotTable(s));   // can't even fit slot 0
 }
 
+// Wave-12 hardening: a save/load against a NULL stream and a zero-sized stream
+// must fail cleanly (no deref). The full table is 1 + 128*28 = 3585 bytes; any
+// buffer short of that aborts mid-stream without over-running it (ASAN-checked).
+TEST(MissionSave, LoadFailsOnNullStream) {
+    MissionSlotTableReset();
+    MissionStream s{nullptr, 0, 0};
+    CHECK(!MissionLoadSlotTable(s));
+    CHECK(!MissionSaveSlotTable(s));
+}
+
+TEST(MissionSave, LoadFailsOnTruncatedMidSlot) {
+    MissionSlotTableReset();
+    // Big enough for the mode byte + a few whole slots, then truncated mid-slot.
+    constexpr int kSlotBytes = 28;                  // 1+4+14+4+4+1
+    std::vector<u8> buf(1 + 3 * kSlotBytes + 5, 0); // mode + 3 slots + partial 4th
+    MissionStream r{buf.data(), buf.size(), 0};
+    CHECK(!MissionLoadSlotTable(r));                 // runs out inside slot 4
+}
+
+TEST(MissionSave, LoadExactSizeSucceeds) {
+    MissionSlotTableReset();
+    constexpr std::size_t kFull = 1 + kMissionSlotCount * 28;
+    std::vector<u8> buf(kFull, 0);
+    MissionStream r{buf.data(), buf.size(), 0};
+    CHECK(MissionLoadSlotTable(r));                  // exact fit -> ok
+    CHECK_EQ(r.pos, kFull);                          // consumed the whole stream
+}
+
+// Wave-12 hardening: the requirement-advance index guard. An out-of-range slot
+// index (negative, == count, far past count) must be rejected before any array
+// access (the function bounds [0, kMissionSlotCount) explicitly).
+TEST(MissionRequirement, AdvanceRejectsOutOfRangeSlot) {
+    MissionSlotTableReset();
+    // type 11 is a trackable mission type; register it so the in-range path is live.
+    g_missionSlots[0].type = 11;
+    g_missionSlots[0].owner = 7;
+    CHECK(!MissionRequirementAdvance(-1, 11));                 // negative
+    CHECK(!MissionRequirementAdvance(kMissionSlotCount, 11));  // == count
+    CHECK(!MissionRequirementAdvance(kMissionSlotCount + 100, 11));
+    CHECK(!MissionRequirementAdvance(1000000, 11));
+    CHECK(MissionRequirementAdvance(0, 11));                   // in-range, trackable
+    MissionSlotTableReset();
+}
+
+// Wave-12 hardening: filling every slot then registering once more returns -1
+// (the full-table sentinel) instead of writing past the 128-slot table.
+TEST(MissionSlot, RegisterFullTableReturnsMinusOne) {
+    MissionSlotTableReset();
+    g_missionSlotMode = 0;                            // multi-slot mode
+    for (int i = 0; i < kMissionSlotCount; ++i)
+        CHECK(MissionSlotRegister(1000 + i, 9) >= 0); // 9 != 0 occupies the slot
+    CHECK_EQ(MissionSlotRegister(9999, 9), -1);       // table full -> -1, no OOB
+    MissionSlotTableReset();
+}
+
 // ---------------------------------------------------------------------------
 // DialogDispatcher routing
 // ---------------------------------------------------------------------------

@@ -86,7 +86,11 @@ int CutsceneTable::AddParticipant(i32 id, i32 person) {
     CutsceneSlot* s = FindById(id);
     if (!s) return 0;
     int count = s->partCount;
-    for (int i = 0; i < count; ++i) {
+    // Clamp the dedup scan to partIds[]'s capacity. A well-formed slot never has
+    // count > 16 (the full check below rejects that), but a malformed slot must
+    // not make the dedup loop read past partIds[] (OOB).
+    int scan = (count > kMaxParticipants) ? kMaxParticipants : count;
+    for (int i = 0; i < scan; ++i) {
         if (s->partIds[i] == person)         // duplicate
             return 0;
     }
@@ -101,7 +105,12 @@ int CutsceneTable::AddParticipant(i32 id, i32 person) {
 int CutsceneTable::RemoveParticipant(i32 id, i32 person) {
     CutsceneSlot* s = FindById(id);
     if (!s) return 0;
-    for (int i = 0; i < s->partCount; ++i) {
+    // partCount is a u8; partIds[] holds kMaxParticipants (16). AddParticipant
+    // bounds it, but a malformed slot could carry a larger count — clamp so the
+    // scan never reads past partIds[] (OOB). Valid slots are unaffected.
+    int count = s->partCount;
+    if (count > kMaxParticipants) count = kMaxParticipants;
+    for (int i = 0; i < count; ++i) {
         if (s->partIds[i] == person) {
             s->partIds[i] = -1;              // SlotById[13+i] = -1
             break;

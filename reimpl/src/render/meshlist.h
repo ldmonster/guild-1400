@@ -23,15 +23,39 @@
 //   - otherwise rasterizes the polygon directly through the dispatch slot,
 //   - DDraw lock/unlock bracket the flush (routed through the present shim).
 //
-// THE PATCHED-SPAN DISPATCH TABLE  dword_13D8780[...]  (recovered)
+// THE SPAN DISPATCH TABLE  dword_13D8780[...]  (VERIFIED wave-5)
 // ---------------------------------------------------------------------------
-// VIBE_Render_InitEngineDevice (0x5AF984) initialises all seven slots
-//   dword_13D8780,8784,8788,878C,8790,8794  (and the 7th used by the flush)
-// to VIBE_Raster_NullStub13 (0x5F6EE8, an empty fn). The texture-bind path then
-// patches the live slots to the real raster variants. The flush only ever
-// indexes slots 4 (opaque) and 3 (translucent). We model the table as an
-// explicit 7-entry function-pointer array (default = NullStub) and plug in the
-// reconstructed textured-triangle raster fns at slots 3/4.
+// The table is SIX dword slots: dword_13D8780,8784,8788,878C,8790,8794 (indices
+// 0..5). The flush indexes it with `(*(int*)&v45[1]) >> 24`, where v45[4] = 4
+// (opaque) by default and 3 when the bound texture is translucent
+// (*(tex+108) - (*(tex+110)&1) < 0xFF) — so the live index is 3 or 4.
+//
+// SLOT-MAP / installer audit (xrefs_to 0x13D8780..0x13D8794, wave-5):
+//   * The ONLY writer of any of the six slots is VIBE_Render_InitEngineDevice
+//     @0x5AF984 (0x5AFB87..0x5AFBA5), which sets ALL six to
+//     VIBE_Raster_NullStub13 (0x5F6EE8, `retn`).
+//   * There is NO second installer. Nothing ever patches a real raster leaf
+//     into slot 3/4/etc. The wave-4 belief that "the texture-bind path patches
+//     the live slots" is FALSE — grep/xrefs confirm no such writer exists, and
+//     0x5F6C30 (RasterizeMirrorTriangle) / 0x5F721A (masked span) have no static
+//     refs precisely because they are NOT reached through this table.
+//   => In the real binary the software flush 0x5AEC88 dispatches slots 3/4 to
+//      NullStub13: it draws NOTHING. The actual textured triangle rendering goes
+//      through the D3D path VIBE_Render_DrawTexturedTriangles @0x5AE434 (builds
+//      vertex buffers, calls VIBE_Render_DrawTriangleList) — which does NOT use
+//      this table at all. 0x5AEC88 is the alternate software/DDraw-Lock flush.
+//
+// NOTE: dword_13D8798 (which follows slot 5) is NOT a 7th dispatch slot. It is
+// the 3-entry CLIP-INPUT vertex-pointer array dword_13D8798[0]/879C/87A0, seeded
+// with the poly's three vertices before VIBE_Render_ClipPolygonToPlane in both
+// 0x5AEC88 and 0x5AE434 (xrefs: 0x5AD813/0x5AD87A in the clipper, 0x5AE989,
+// 0x5AED8F). It happens to be adjacent in memory; it is not a function pointer.
+//
+// For this reconstruction we model the table as an explicit 6-entry pointer
+// array (default = NullStub). Slots 3/4 are wired to the reconstructed textured
+// leaf as a HOST CHOICE so the software flush actually produces pixels for the
+// portable/headless renderer (the binary's own slots are NullStub — see above);
+// this is documented and behaviour is otherwise the 1:1 flush control flow.
 //
 // THE PROJECTION SCALARS (recovered; runtime values, 0 at static time)
 // ---------------------------------------------------------------------------
@@ -68,9 +92,12 @@ int SpanFillTexturedOpaque(Surface* fb, const Polygon& tri);
 // inner span op, which the existing raster module models as a span variant).
 int SpanFillTexturedBlend(Surface* fb, const Polygon& tri);
 
-// The 7-entry dispatch table (indexed by key>>24 ∈ {3,4} in the flush).
+// The 6-entry dispatch table (indexed by key>>24 ∈ {3,4} in the flush).
+// dword_13D8780[0..5]; the binary fills all six with NullStub13 and never
+// patches them (wave-5). slot[3]/slot[4] are wired to the textured leaf here as
+// the host renderer choice so the software flush produces pixels.
 struct SpanDispatch {
-    SpanFillFn slot[7];   // dword_13D8780[0..6]
+    SpanFillFn slot[6];   // dword_13D8780[0..5]
     SpanDispatch();       // all = NullStub, slot[4]=opaque, slot[3]=blend
 };
 

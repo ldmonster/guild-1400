@@ -92,8 +92,10 @@ public:
     int ShapeCount(int index) const;
 
     // Decode shape `shapeNr` of record `index` (depth-2 codec above) into `out`.
+    // Handles both RLE shapes (the row-stream codec) and FULL uncompressed RGB
+    // bitmaps (shape field@0x26 == -1, e.g. _MOUSE_CURSOR; black == transparent).
     // Returns false on any range/format error (out is left empty). 8bpp/depth<=1
-    // shapes are not handled here (the menu art is all depth 2).
+    // shapes are not handled here.
     bool DecodeShape(int index, int shapeNr, DecodedShape& out) const;
 
     // Convenience: decode shape `shapeNr` of the record named `name`.

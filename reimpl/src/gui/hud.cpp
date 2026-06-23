@@ -150,11 +150,16 @@ int Hud_FindModeIndex(int modeId, int curIndex, const int* modeTable) {
         while (tag != modeTable[result]) {
             result -= 2;
             --v2;
+            // 0x4bea4f: not-found exit returns `result * 4` where `result` is now the
+            // negative loop counter (e.g. -2 -> -8), NOT 4*modeId.  (disasm-confirmed)
             if (result < 0)
-                return modeId * 4; // fallback: tag unchanged
+                return result * 4;
         }
+        // 0x4bea5b: side effect dword_631614 = dword_631610 - v2 (the depth); the live
+        // process shares one global, modeled by the return value here.
         return curIndex - v2;      // depth from the top
     }
+    // curIndex < 0: `result` (eax) is still the input modeId, so this returns 4*modeId.
     return modeId * 4;
 }
 

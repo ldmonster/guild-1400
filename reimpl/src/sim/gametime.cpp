@@ -70,4 +70,18 @@ int GameTimeDiffMinutes(const GameTime* a, const GameTime* b) {
          + 60 * (static_cast<i32>(b->hour) - static_cast<i32>(a->hour));
 }
 
+// gilde.exe 0x5831f0 — VIBE_GameTime_Set. Sets hour/minute/second (day kept).
+// The hour word is composed exactly as the original: v5 = (i16)second (zero-
+// extended cl), then LOBYTE(v5) = hour — since `second` is a byte the high byte
+// is always 0, so the stored word is plain `hour`. Returns the minute argument
+// (the original returns a4 in eax).
+int GameTimeSet(GameTime* rec, u8 hour, u8 second, u8 minute) {
+    rec->second = static_cast<i32>(second);              // *(a1+10) = a3
+    u16 v5 = static_cast<u16>(second);                   // v5 = a3
+    v5 = static_cast<u16>((v5 & 0xFF00u) | hour);        // LOBYTE(v5) = a2
+    rec->hour = v5;                                      // *(WORD*)(a1+4) = v5
+    rec->minute = static_cast<i32>(minute);              // *(a1+6) = a4
+    return static_cast<int>(minute);
+}
+
 } // namespace guild::sim

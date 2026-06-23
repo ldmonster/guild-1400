@@ -117,6 +117,134 @@ TEST(ConfigIni, ResolutionTable) {
     CHECK_EQ(h, 0);
 }
 
+// ---------------------------------------------------------------------------
+// Wave-11 hardening: malformed / truncated / oversized INI inputs. The tokenizer
+// is std::string-based; these drive it with adversarial text so ASAN+UBSAN
+// confirms the line/section/key/value slicing never indexes out of bounds and
+// degenerate input fails soft (default returned, no crash).
+// ---------------------------------------------------------------------------
+TEST(ConfigIniMalformed, EmptyAndWhitespaceOnly) {
+    IniFile e1("");
+    CHECK_EQ(e1.getInt("Gfx", "x", 7), 7);
+    CHECK_EQ(e1.getString("Gfx", "x", "def"), std::string("def"));
+    IniFile e2("   \t  ");          // whitespace, no newline
+    CHECK_EQ(e2.getInt("S", "k", 3), 3);
+    IniFile e3("\r\n\r\n\n");       // only line breaks
+    CHECK_EQ(e3.getString("S", "k", "d"), std::string("d"));
+}
+
+TEST(ConfigIniMalformed, NoTrailingNewline) {
+    // Last line has no '\n' — getline must still yield it.
+    IniFile ini("[S]\nk=v");        // no newline after the value
+    CHECK_EQ(ini.getString("S", "k", "X"), std::string("v"));
+    IniFile h("[S]");               // section header with no newline, no keys
+    CHECK_EQ(h.getString("S", "k", "X"), std::string("X"));
+}
+
+TEST(ConfigIniMalformed, UnterminatedSection) {
+    // '[' with no closing ']' — the line is skipped, the prior section stays.
+    IniFile ini("[Good]\na=1\n[Unterminated\nb=2\n");
+    CHECK_EQ(ini.getInt("Good", "a", -1), 1);
+    // 'b' was parsed while the section was still [Good] (the broken header was
+    // skipped and did NOT change the current section).
+    CHECK_EQ(ini.getInt("Good", "b", -1), 2);
+    // The mangled name is not a real section.
+    CHECK_EQ(ini.getInt("Unterminated", "b", 55), 55);
+    // A lone '[' as the entire file must not index past the end.
+    IniFile lone("[");
+    CHECK_EQ(lone.getString("x", "y", "z"), std::string("z"));
+}
+
+TEST(ConfigIniMalformed, EmptySectionBrackets) {
+    IniFile ini("[]\nk=v\n");       // empty section name -> "" current section
+    // Stored under the empty section; not reachable as a named section.
+    CHECK_EQ(ini.getString("", "k", "X"), std::string("v"));
+    CHECK_EQ(ini.getString("S", "k", "X"), std::string("X"));
+}
+
+TEST(ConfigIniMalformed, KeyWithNoEquals) {
+    // A line with no '=' is ignored (not a key).
+    IniFile ini("[S]\njust_a_word\nreal=ok\n");
+    CHECK_EQ(ini.getString("S", "just_a_word", "MISS"), std::string("MISS"));
+    CHECK_EQ(ini.getString("S", "real", "MISS"), std::string("ok"));
+    // '=' as the very first char -> empty key.
+    IniFile eq("[S]\n=value\n");
+    CHECK_EQ(eq.getString("S", "", "X"), std::string("value"));
+}
+
+TEST(ConfigIniMalformed, DuplicateKeysLastWins) {
+    IniFile ini("[S]\nk=1\nk=2\nk=3\n");
+    CHECK_EQ(ini.getInt("S", "k", -1), 3);   // last assignment wins (Win32)
+    // Duplicate sections merge; last value of each key wins.
+    IniFile two("[S]\nk=1\n[S]\nk=9\nj=4\n");
+    CHECK_EQ(two.getInt("S", "k", -1), 9);
+    CHECK_EQ(two.getInt("S", "j", -1), 4);
+}
+
+TEST(ConfigIniMalformed, HugeValueAndKey) {
+    // A very long value and key must parse without any fixed-buffer overflow.
+    std::string big(200000, 'Z');
+    std::string text = "[S]\nhuge=" + big + "\n";
+    IniFile ini(text);
+    CHECK_EQ(ini.getString("S", "huge", "X").size(), big.size());
+    std::string bigkey(100000, 'k');
+    IniFile ki("[S]\n" + bigkey + "=v\n");
+    CHECK_EQ(ki.getString("S", bigkey, "X"), std::string("v"));
+    // ParseProfileInt on a digit run far past the int range must NOT invoke
+    // signed-overflow UB (caught by UBSAN). Unsigned accumulation makes the
+    // value well-defined garbage; the contract is only "no UB, no crash".
+    int over = ParseProfileInt(std::string(40, '9'));
+    (void)over;
+    // Values that DO fit are still exact (regression: the UB fix must not move
+    // in-range results).
+    CHECK_EQ(ParseProfileInt("2147483647"), 2147483647); // INT_MAX
+    CHECK_EQ(ParseProfileInt("-2147483648"), (-2147483647 - 1)); // INT_MIN
+    CHECK_EQ(ParseProfileInt("000123"), 123);            // leading zeros
+    CHECK_EQ(ParseProfileInt("  -0  "), 0);
+}
+
+TEST(ConfigIniMalformed, NonAsciiBytes) {
+    // High-bit bytes in section/key/value must be handled without UB in the
+    // ctype calls (we cast to unsigned char before tolower/isspace).
+    std::string text;
+    text += "[\xC3\xA9]\n";                       // 'é' section
+    text += "key\xC2\xA0=v\xE2\x82\xAC\n";        // NBSP in key, euro in value
+    IniFile ini(text);
+    // No crash; the value round-trips (lookups use the same lowering).
+    std::string sec = "\xC3\xA9";
+    std::string key = "key\xC2\xA0";
+    std::string got = ini.getString(sec, key, "MISS");
+    CHECK(got == std::string("v\xE2\x82\xAC") || got == std::string("MISS"));
+    // Embedded NUL byte mid-line (stringstream stops the line at it? cast-safe).
+    std::string nul = std::string("[S]\nk=a\x00z\n", 11);
+    IniFile ni(nul);
+    CHECK_EQ(ni.getInt("Nope", "x", 4), 4); // smoke: parse completed, no UB
+}
+
+TEST(ConfigIniMalformed, MissingSectionAndKeyLookups) {
+    IniFile ini("[Only]\na=1\n");
+    CHECK_EQ(ini.getInt("Absent", "a", 11), 11);     // section missing
+    CHECK_EQ(ini.getInt("Only", "absent", 22), 22);  // key missing
+    CHECK_EQ(ini.getString("Absent", "absent", "d"), std::string("d"));
+    // ReadGfxAndSoundSettings against an empty provider yields all defaults
+    // (exercises the bulk getInt path with every key absent).
+    IniFile empty("");
+    GfxSettings gfx; SoundSettings snd; GameSettings game;
+    ReadGfxAndSoundSettings(empty, gfx, snd, game);
+    CHECK_EQ((int)gfx.characterDetail, 1);
+    CHECK_EQ((int)game.nachtwaechter, 1);
+    CHECK_EQ(game.stadt, std::string("Augsburg"));
+}
+
+TEST(ConfigIniMalformed, ResolutionIndexBounds) {
+    int w = 0, h = 0;
+    // Every u8 index, including past the table, must stay in-bounds.
+    for (int idx = 0; idx <= 255; ++idx) {
+        ResolutionForIndex((guild::u8)idx, &w, &h);
+        if (idx >= 6) { CHECK_EQ(w, 0); CHECK_EQ(h, 0); }
+    }
+}
+
 // ===========================================================================
 // Command-line parsing
 // ===========================================================================

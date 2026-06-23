@@ -186,8 +186,9 @@ i32 DuelIntroMessage(HeRecord* h, HeRecord* combatantA, HeRecord* combatantB);
 // gilde.exe 0x4d0918 — VIBE_CharAction_NotifyMessageInit.
 //   +132 := -1. If (flags & 4) return the record. Stamp the clock into +82
 //   (+24 days). If (flags & 2) == 0: cmd29(0). Else resolve the two persons at +176
-//   and +172; if both resolve and the +172 person's byte+2 is 6 or 7, send the
-//   notify message; then cmd29(0). If either fails to resolve, restamp the clock
+//   and +172; if both resolve and the +176 person's byte+2 is 6 or 7, send the
+//   notify message (name = +172 person word@0, to = +176 person id@+4); then
+//   cmd29(0). If either fails to resolve, restamp the clock
 //   into +82 (no advance) and cmd29(-1). Returns the cmd29 handle.
 i32 NotifyMessageInit(HeRecord* h);
 

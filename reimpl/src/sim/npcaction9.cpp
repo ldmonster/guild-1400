@@ -426,7 +426,10 @@ static int RecruitCandidate(const NpcAction9Hooks& hk, const u16* record,
         RbByte0(reqA, 4);
         RbDw(reqA, 1, RdI32(targetRec, 1));
         RbDw(reqA, 2, 1);
-        u8 mood = targetRec[92];
+        // 0x472950: `mov dl,[eax+5Ch]; cmp dl,21h; jge` and 0x472a3f `cmp dl,42h; jge`
+        //   are SIGNED byte compares — the mood byte is read as a signed char, so a
+        //   value with bit7 set (>=128) is negative and falls into the 50 bucket.
+        i8 mood = static_cast<i8>(targetRec[92]);
         int moodVal = (mood >= 33) ? (mood >= 66 ? 10 : 30) : 50;
         RbDw(reqA, 4, moodVal);
         RbByte0(reqB, 1);

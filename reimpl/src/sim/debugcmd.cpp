@@ -67,10 +67,13 @@ i32 DebugCmdSpawnEntityScaledA(i32 personId) {
     int roll = DebugCmdRandomModulo(3);                     // RandomModulo(3u)
     i32 gold = DebugCmdScaledGold(p.wealth, roll, 1.0, kScale01);
 
-    if (h.sendEntityMessage)
-        h.sendEntityMessage(p.id, p.id, /*textId base*/ 3881);
+    // Binary emit ORDER (0x571323..0x57138d): RenderFormattedMessage ->
+    // QueueRequest16 -> He_SendEntityMessage. So the cmd16 is queued BEFORE the
+    // entity message is sent.
     if (h.queueRequest16)
-        h.queueRequest16(personId, -1, gold, h.market);     // cmd16
+        h.queueRequest16(personId, -1, gold, h.market);     // cmd16 (0x57133a)
+    if (h.sendEntityMessage)
+        h.sendEntityMessage(p.id, p.id, /*textId base*/ 3881);  // 0x57138d
     return kDbgHandled;
 }
 
@@ -188,23 +191,34 @@ HandlerFn DebugCmdNpcTableEntry(int npcActionIndex) {
 // ===========================================================================
 // gilde.exe 0x5711ec — VIBE_DebugCmd_DispatchByType.
 //   char Dispatch(type@al, Person*@edx, ctx@ebx):
-//     if (type >= 46 || rec == 0) return 64;
-//     if (rec->kind /* +2 */ < 10) return funcs_57120D[type](rec, ctx);
-//     return 1;
+//     if ((signed char)type >= 46) return 64;          (cmp cl,0x2E; jge -> 0x40)
+//     if (rec == 0) return 64;                          (test eax,eax; jz -> 0x40)
+//     if ((signed char)rec[+2] >= 10) return 1;         (cmp [eax+2],0xA; jl call)
+//     movsx ecx, cl; return funcs_57120D[ecx](rec,ctx); (signed index!)
 //   funcs_57120D is the 46-entry ContextAction table; its handlers are deferred
-//   here (host-side). We faithfully reproduce the range/null/kind gates.
+//   here (host-side).
+//
+// FIDELITY (disasm 0x5711f3/0x57120a): the type gate is the SIGNED comparison
+// `type >= 46`; a NEGATIVE type is NOT rejected — it falls through and the
+// `movsx ecx, cl; call funcs_57120D[ecx*4]` indexes the table with a sign-
+// extended (negative) index, i.e. an out-of-bounds call into whatever precedes
+// the table. That OOB call is a genuine BOUNDARY (out-of-tree data); we do not
+// fake it. We reproduce the exact gate decision (negatives are NOT 64) and route
+// negatives/in-range types to the deferred-handler stub.
 // ===========================================================================
 i8 DebugCmdDispatchByType(i8 type, i32 personId) {
-    if (type >= kDebugCmdCount || type < 0)     // type >= 46 (signed) -> bad
+    if (type >= kDebugCmdCount)                 // SIGNED: type >= 46 -> bad (0x40)
         return 64;
     const auto& h = GetDebugCmdHooks();
     DebugCmdPerson p;
     if (!h.findPerson || !h.findPerson(personId, &p))
         return 64;                              // rec == 0 -> 64
 
-    if (p.kind < 10)                            // *(char*)(rec+2) < 10
-        return static_cast<i8>(kDbgHandled);    // ContextAction handler (deferred)
-    return 1;                                   // not a real person -> 1
+    if (p.kind >= 10)                           // *(signed char*)(rec+2) >= 10
+        return 1;                               // not a real person -> 1
+    // kind < 10: the binary calls funcs_57120D[type] (a deferred ContextAction
+    // handler; host-installed). For type < 0 this is the documented OOB BOUNDARY.
+    return static_cast<i8>(kDbgHandled);
 }
 
 } // namespace guild::sim

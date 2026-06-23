@@ -138,22 +138,37 @@ int DistributePlanQty(int sourceFreeCap, int destRoom, int budget, float unitPri
 }
 
 namespace {
-// The per-slot seller affordability test shared by CheckCapacity / Reserve.
-// need = the slot's required input count; returns the best affordable supply.
-int AffordableSupply(const StockSeller& sl, int need, int budget, float unitPrice) {
-    if (sl.sameOwner)
-        return need; // free transfer within the faction: full need available
-    // v23 = max(need>>1, 1); demandQty = v23*need - 0 (the +9/+10 terms are the
-    // already-satisfied amounts; for a fresh feasibility check they are 0). Then
-    // the affordable quantity is min(budget/price, need) clamped to deficit.
-    float inv = 1.0f / unitPrice;
-    float budgetQty = static_cast<float>(budget) * inv;
-    float needF = static_cast<float>(need);
-    float chosen = (budgetQty >= needF) ? needF : budgetQty;
-    int qty = static_cast<int>(static_cast<double>(chosen));
-    if (qty >= sl.deficit)
-        qty = sl.deficit;
-    return qty;
+// The per-slot seller affordability test (0x45bc62..0x45bd3f). Returns the
+// affordable supply v25 (= min(deficit, trunc(min(budgetQty, chainQty)))). The
+// caller decides feasibility via `need <= v25`. sameOwner is handled by the
+// caller (goto LABEL_25 = immediate feasible) before this is reached.
+//   v23     = max(station.freeCap >> 1, 1)                 [ecx+40h sar 1]
+//   chainQty= need*v23 - (item.reserved + item.stock)      [ebx+24h,+28h]
+//   chainQty= max(chainQty, (item.freeCap>>1) - reserved)  [ebx+2Ch sar 1]
+//   chainQty= min(chainQty, item.freeCap - reserved - 1)
+//   budgetQty = budget * (1.0f/unitPrice)
+//   chosen  = (budgetQty >= (float)chainQty) ? (float)chainQty : budgetQty
+//   v25     = min(deficit, ConvertX(chosen))   (ConvertX truncates toward zero)
+int AffordableSupply(const StockSeller& sl, int need, int stationFreeCap,
+                     int itemReserved, int itemStock, int itemFreeCap,
+                     int budget, float unitPrice) {
+    int v23 = stationFreeCap >> 1;       // sar eax,1 (arithmetic)
+    if (v23 < 1)
+        v23 = 1;
+    int chainQty = need * v23 - (itemReserved + itemStock);
+    int floor1 = (itemFreeCap >> 1) - itemReserved;   // sar arithmetic
+    if (chainQty <= floor1)
+        chainQty = floor1;
+    int cap1 = itemFreeCap - itemReserved - 1;
+    if (chainQty > cap1)
+        chainQty = cap1;
+    float budgetQty = static_cast<float>(budget) * (1.0f / unitPrice);
+    float chosen = (budgetQty >= static_cast<float>(chainQty))
+                       ? static_cast<float>(chainQty)
+                       : budgetQty;
+    int v16 = static_cast<int>(static_cast<double>(chosen)); // ConvertX truncate
+    int v25 = (sl.deficit >= v16) ? v16 : sl.deficit;
+    return v25;
 }
 } // namespace
 
@@ -169,15 +184,19 @@ bool CheckWorkstationCapacity(std::vector<WsStation>& stations, std::size_t stat
             continue;
         WsItem& it = items[static_cast<std::size_t>(idx)];
         int need = td->inputNeed[k];
-        // only slots whose need exceeds what's already on hand (reserved+stock).
-        if (need <= it.reserved)
+        // gate: need vs STOCK (0x45bace cmp eax,[ebx+28h]; +0x2A from id = +42 =
+        // dword_B54478 = stock). Only slots whose need exceeds stock proceed.
+        if (need <= it.stock)
             continue;
         if (topLevel)
             return false;          // top level cannot dig into the supply chain
-        if (it.flags50 == 0)
+        // freeCap == 0 -> infeasible (0x45badb mov edx,[ebx+2Ch]; +0x2E = +46 =
+        // dword_B5447C = free capacity).
+        if (it.freeCap == 0)
             return false;          // no free-capacity headroom -> infeasible
-        // already-satisfied? (the original's *((DWORD*)v6+9) == 0 gate).
-        if (it.stock != 0)
+        // already-reserved? (0x45bae2 cmp [ebx+24h],0; +0x26 = +38 =
+        // dword_B54474 = reserved/incoming). reserved != 0 -> already feasible.
+        if (it.reserved != 0)
             continue;
         // skip the special "service" item ids (449..454) — always feasible.
         u16 id = it.id;
@@ -191,10 +210,16 @@ bool CheckWorkstationCapacity(std::vector<WsStation>& stations, std::size_t stat
             for (const StockSeller& sl : sellers) {
                 if (sl.isSelf || sl.category == 2 || !sl.hasObject)
                     continue;
-                if (need > sl.deficit)
+                if (need > sl.deficit)     // cmp eax,deficit; jg skip (0x45bbca)
                     continue;
-                int supply = AffordableSupply(sl, need, needs.budget, it.unitPrice);
-                if (sl.sameOwner || need <= supply) {
+                if (sl.sameOwner) {        // owner match -> LABEL_25 feasible
+                    feasible = true;
+                    break;
+                }
+                int v25 = AffordableSupply(sl, need, s.freeCap, it.reserved,
+                                           it.stock, it.freeCap, needs.budget,
+                                           it.unitPrice);
+                if (need <= v25) {         // cmp need,v25; jle LABEL_25 (0x45bd3f)
                     feasible = true;
                     break;
                 }

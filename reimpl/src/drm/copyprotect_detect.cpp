@@ -1,0 +1,475 @@
+// =============================================================================
+// guild::drm::detect — CopyProtect drive-detection + signature/checksum verify
+//
+// FAITHFUL 1:1 reconstruction of the gilde.exe CopyProtect sub-cluster.
+// See copyprotect_detect.h for the address map, the relationship to drm_stub,
+// and the reasoning behind the DiscDevice hook boundary (CLAUDE.md rules 1,2,8).
+//
+// All drive model/vendor table bytes below were recovered byte-for-byte with the
+// IDA Pro MCP `get_bytes` over .rdata 0x14522F0..0x145297F. They are stored in
+// the binary in an XOR-obfuscated form; the matcher compares the (de-obfuscated)
+// INQUIRY fields against these raw stored bytes via VIBE_Mem_Compare (memcmp
+// equality) or VIBE_Util_MemFindPattern (substring). We reproduce both the exact
+// bytes and the exact compare semantics, so matching is bit-identical.
+// =============================================================================
+#include "drm/copyprotect_detect.h"
+
+#include "compress/md5.h"
+
+namespace guild {
+namespace drm {
+namespace detect {
+
+// -----------------------------------------------------------------------------
+// gilde.exe 0x1422010 — VIBE_Mem_Compare
+// The original is a hand-rolled dword/word/byte memcmp returning -1/0/+1 in the
+// low bits; every CopyProtect call site only tests `== 0`. The byte-by-byte form
+// below produces an identical zero/nonzero result and the same ordering sign.
+// -----------------------------------------------------------------------------
+int MemCompare(const u8* a, const u8* b, unsigned n) {
+    for (unsigned i = 0; i < n; ++i) {
+        if (a[i] != b[i]) {
+            return a[i] < b[i] ? -1 : 1; /*0x1422083 sign convention*/
+        }
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// gilde.exe 0x140b000 — VIBE_Util_MemFindPattern
+// Exact translation: a stateful scan that advances the needle cursor on match
+// and resets it to 0 on mismatch (a naive substring search that, on mismatch,
+// re-tests the current haystack byte only after the cursor reset on the *next*
+// iteration — this is the original's behaviour, preserved verbatim).
+// -----------------------------------------------------------------------------
+const u8* MemFindPattern(const u8* haystack, const u8* needle, int hayLen,
+                         int needleLen) {
+    int v6 = 0; // haystack cursor
+    int v5 = 0; // needle cursor
+    while (v6 < hayLen && v5 < needleLen) {           /*0x140b022*/
+        if (haystack[v6] == needle[v5]) {             /*0x140b03a*/
+            ++v5;                                     /*0x140b042*/
+        } else {
+            v5 = 0;                                   /*0x140b047*/
+        }
+        ++v6;                                         /*0x140b054*/
+    }
+    if (v5 == needleLen) {                            /*0x140b05f*/
+        return haystack + v6 - needleLen;             /*0x140b06e*/
+    }
+    return nullptr;                                   /*0x140b061*/
+}
+
+// Convenience predicates mirroring the call-site idioms.
+static inline bool Eq(const u8* buf, const u8* tbl, unsigned n) {
+    return MemCompare(buf, tbl, n) == 0; // "!VIBE_Mem_Compare(...)" / "== 0"
+}
+static inline bool Find(const u8* hay, const u8* needle, int hayLen, int n) {
+    return MemFindPattern(hay, needle, hayLen, n) != nullptr;
+}
+
+// =============================================================================
+// Recovered .rdata tables (byte-exact). Each array is one table entry; its
+// address and the comparison length used at the call site are in the comment.
+// =============================================================================
+
+// ---- Model table (0x141fe70 references) -------------------------------------
+static const u8 t_14526F4[] = {0x63,0x11,0x16,0x69,0x15,0x0b,0x01,0x00,0x70};      // find,9
+static const u8 t_14526EC[] = {0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d};                // find,7
+static const u8 t_14526E4[] = {0x12,0x12,0x16,0x1d,0x02,0x6d};                     // find,6
+static const u8 t_14526E0[] = {0x64,0x12,0x12};                                    // find,3
+static const u8 t_14526D0[] = {0x12,0x06,0x06,0x73,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x65,0x73}; // cmp,0xE
+static const u8 t_14526C8[] = {0x10,0x11,0x7f,0x1e,0x01,0x01};                     // find,6
+static const u8 t_14526C0[] = {0x07,0x77,0x01,0x01,0x02,0x74};                     // find,6
+static const u8 t_14526B8[] = {0x01,0x7f,0x15,0x0d,0x0d};                          // find,5
+static const u8 t_14526A8[] = {0x15,0x15,0x11,0x19,0x69,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x15,0x05,0x68}; // cmp,0xF
+static const u8 t_1452698[] = {0x15,0x15,0x11,0x19,0x69,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x13,0x05,0x6e}; // cmp,0xF
+static const u8 t_1452684[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x00,0x63,0x07,0x71,0x07,0x01,0x00,0x76}; // cmp,0x10
+static const u8 t_1452670[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x00,0x63,0x07,0x69,0x7f,0x05,0x77,0x72,0x05}; // cmp,0x11
+static const u8 t_145265C[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x63,0x07,0x69,0x7f,0x05,0x77,0x72,0x05}; // cmp,0x10
+static const u8 t_1452654[] = {0x05,0x6f,0x0c,0x07,0x0b,0x7d};                      // find,6 (shared w/ vendor)
+static const u8 t_145263C[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x12,0x12,0x75,0x03,0x06}; // cmp,0x16
+static const u8 t_1452624[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x12,0x12,0x7c,0x0c,0x04}; // cmp,0x16
+static const u8 t_1452608[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x12,0x12,0x76,0x00,0x06,0x04,0x75}; // cmp,0x18
+static const u8 t_14525EC[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x12,0x12,0x71,0x07,0x06,0x04,0x75}; // cmp,0x18
+static const u8 t_14525DC[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x64,0x12,0x12,0x71,0x07,0x06}; // cmp,0xE
+static const u8 t_14525C8[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65,0x64,0x12,0x12,0x72,0x00,0x05,0x03,0x75}; // cmp,0x10
+static const u8 t_14525B4[] = {0x00,0x61,0x15,0x15,0x11,0x19,0x69,0x15,0x07,0x6a,0x78,0x63,0x07,0x16,0x1d,0x02,0x6d}; // cmp,0x11
+static const u8 t_14525A0[] = {0x00,0x61,0x15,0x15,0x11,0x19,0x69,0x14,0x0c,0x60,0x78,0x63,0x07,0x16,0x1d,0x02,0x6d}; // cmp,0x11
+static const u8 t_145258C[] = {0x00,0x61,0x15,0x15,0x11,0x19,0x69,0x14,0x00,0x6c,0x78,0x63,0x07,0x16,0x1d,0x02,0x6d}; // cmp,0x11
+static const u8 t_1452578[] = {0x00,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x00,0x00,0x00,0x00,0x00,0x00,0x00}; // cmp,0x10
+static const u8 t_145256C[] = {0x12,0x05,0x73,0x64,0x12,0x12,0x69,0x7f};            // cmp,8
+static const u8 t_1452558[] = {0x01,0x1d,0x15,0x02,0x0b,0x01,0x69,0x63,0x07,0x16,0x7f,0x1a,0x00,0x04,0x03,0x10,0x00}; // cmp,0x11
+static const u8 t_1452544[] = {0x18,0x70,0x63,0x07,0x69,0x7a,0x25,0x1b,0x1d,0x11,0x17,0x52,0x16,0x06,0x02,0x02,0x10}; // cmp,0x11
+static const u8 t_1452530[] = {0x18,0x70,0x63,0x07,0x69,0x7a,0x25,0x1b,0x1d,0x11,0x17,0x59,0x0b,0x18,0x09,0x01,0x00,0x10}; // cmp,0x12
+static const u8 t_145251C[] = {0x0d,0x01,0x68,0x6e,0x07,0x64,0x72,0x7d,0x7d,0x05,0x77,0x18,0x40,0x4c,0x4c,0x4b,0x01}; // cmp,0x11
+static const u8 t_1452508[] = {0x06,0x02,0x08,0x02,0x06,0x61,0x7a,0x13,0x19,0x13,0x07,0x64,0x14,0x4c,0x4e,0x03,0x05}; // cmp,0x11
+static const u8 t_1452500[] = {0x0e,0x0b,0x19,0x18,0x00,0x0b,0x64};                 // cmp,7 (shared w/ vendor)
+static const u8 t_14524F8[] = {0x05,0x1d,0x11,0x0a,0x01,0x6e};                      // cmp,6
+static const u8 t_14524EC[] = {0x0c,0x15,0x07,0x1b,0x01,0x1d,0x15,0x61,0x75,0x1f,0x0e}; // cmp,0xB
+static const u8 t_14524DC[] = {0x0c,0x15,0x07,0x1b,0x01,0x1d,0x15,0x61,0x75,0x1f,0x0e,0x05,0x72,0x02,0x01}; // cmp,0xF
+static const u8 t_14524CC[] = {0x04,0x1d,0x07,0x06,0x18,0x04,0x69,0x63,0x11,0x7f,0x19,0x0c,0x08}; // cmp,0xD
+static const u8 t_14524BC[] = {0x04,0x1d,0x07,0x06,0x18,0x04,0x69,0x63,0x11,0x7f,0x19,0x0c,0x60}; // cmp,0xD
+static const u8 t_14524A8[] = {0x0b,0x06,0x63,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x16,0x1b,0x1f,0x13,0x7f,0x0f,0x05}; // cmp,0x12
+static const u8 t_1452494[] = {0x0c,0x15,0x07,0x1b,0x01,0x1d,0x15,0x61,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d}; // cmp,0x10
+static const u8 t_1452480[] = {0x19,0x06,0x01,0x0b,0x00,0x17,0x72,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x16,0x7f}; // cmp,0x11
+static const u8 t_1452468[] = {0x19,0x06,0x01,0x0b,0x00,0x17,0x72,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x16,0x7f,0x6c,0x71,0x04,0x67}; // cmp,0x15
+static const u8 t_145245C[] = {0x19,0x06,0x01,0x0b,0x00,0x17,0x72,0x64,0x12,0x12,0x69}; // cmp,0xB
+static const u8 t_1452444[] = {0x0c,0x02,0x1d,0x11,0x10,0x71,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x12,0x12,0x69,0x1c,0x00}; // cmp,0x14
+static const u8 t_145242C[] = {0x2c,0x02,0x1d,0x11,0x10,0x51,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x12,0x12,0x69,0x1c,0x00}; // cmp,0x14
+static const u8 t_1452414[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x10,0x6e,0x1c,0x05,0x04}; // cmp,0x14
+static const u8 t_14523FC[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x63,0x07,0x16,0x05,0x78,0x6b,0x12,0x12,0x64,0x73,0x1e,0x60,0x1e,0x03}; // cmp,0x15
+static const u8 t_14523E4[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x63,0x07,0x16,0x05,0x78,0x6b,0x12,0x12,0x64,0x73,0x1d,0x63,0x1e,0x03}; // cmp,0x15
+static const u8 t_14523D0[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x63,0x0c,0x02,0x0f,0x0d,0x6f,0x73,0x1e,0x60,0x1e,0x03}; // cmp,0x12
+static const u8 t_14523BC[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x17}; // cmp,0x11
+static const u8 t_14523A8[] = {0x0c,0x02,0x1d,0x11,0x10,0x71,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x17}; // cmp,0x10
+static const u8 t_1452394[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x73,0x10,0x11,0x7f,0x1c,0x03,0x01,0x02,0x11}; // cmp,0x10
+static const u8 t_1452384[] = {0x1c,0x01,0x17,0x79,0x63,0x07,0x69,0x7f,0x05,0x77,0x00,0x63,0x11,0x0a}; // cmp,0xE
+static const u8 t_1452378[] = {0x11,0x04,0x02,0x63,0x63,0x07,0x69,0x18,0x07,0x06,0x71}; // cmp,0xB
+static const u8 t_1452364[] = {0x1b,0x1c,0x1b,0x01,0x0b,0x03,0x61,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x78,0x15,0x60}; // cmp,0x11
+static const u8 t_145234C[] = {0x1b,0x1c,0x1b,0x01,0x0b,0x03,0x61,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x17,0x69,0x7f,0x63,0x01,0x00,0x02}; // cmp,0x17
+static const u8 t_1452334[] = {0x1b,0x1c,0x1b,0x01,0x0b,0x03,0x61,0x63,0x07,0x69,0x7f,0x1d,0x02,0x6d,0x78,0x15,0x60,0x1c,0x04,0x05,0x02,0x70}; // cmp,0x16
+static const u8 t_1452318[] = {0x1b,0x1c,0x1b,0x01,0x0b,0x03,0x61,0x64,0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x17,0x69,0x60,0x7c,0x01,0x00,0x02,0x32}; // cmp,0x18
+static const u8 t_1452310[] = {0x16,0x07,0x76,0x02,0x7a,0x6a};                      // cmp,6
+static const u8 t_1452300[] = {0x18,0x0c,0x0c,0x09,0x09,0x61,0x63,0x11,0x05,0x6f,0x0c,0x06,0x06}; // cmp,0xD
+static const u8 t_14522F0[] = {0x18,0x0c,0x0c,0x09,0x09,0x61,0x63,0x11,0x05,0x6f,0x00,0x0a,0x06}; // cmp,0xD
+
+// ---- Vendor table (0x14207b0 references) ------------------------------------
+static const u8 t_145297C[] = {0x12,0x06,0x06,0x73};                               // cmp,4 (vendor)
+static const u8 t_1452970[] = {0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x65,0x73};       // cmp,9 (product)
+static const u8 t_1452964[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x65};            // cmp,8 (vendor)
+static const u8 t_145295C[] = {0x63,0x07,0x71,0x07,0x01,0x00,0x76};                 // cmp,7 (product)
+static const u8 t_1452950[] = {0x63,0x07,0x69,0x7f,0x05,0x77,0x72,0x05};            // cmp,8 (product)
+static const u8 t_1452944[] = {0x11,0x17,0x04,0x15,0x1d,0x1f,0x13,0x06};            // cmp,8 (vendor)
+static const u8 t_145293C[] = {0x07,0x69,0x7f,0x05,0x77,0x72,0x05};                 // cmp,7 (product)
+static const u8 t_145292C[] = {0x15,0x15,0x11,0x19,0x69,0x64,0x12,0x12,0x16,0x1d,0x02,0x6d,0x00,0x00,0x00}; // cmp,0xF
+static const u8 t_1452920[] = {0x00,0x61,0x15,0x15,0x11,0x19,0x69,0x15};            // cmp,8
+static const u8 t_1452914[] = {0x07,0x6a,0x78,0x63,0x07,0x16,0x1d,0x02,0x6d};       // cmp,9
+static const u8 t_1452908[] = {0x00,0x61,0x15,0x15,0x11,0x19,0x69,0x14};            // cmp,8
+static const u8 t_14528FC[] = {0x0c,0x60,0x78,0x63,0x07,0x16,0x1d,0x02,0x6d};       // cmp,9
+static const u8 t_14528F0[] = {0x00,0x6c,0x78,0x63,0x07,0x16,0x1d,0x02,0x6d};       // cmp,9
+static const u8 t_14528E4[] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x64};            // cmp,8
+static const u8 t_14528D4[] = {0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}; // cmp,0xF
+static const u8 t_14528C8[] = {0x12,0x05,0x73,0x00,0x00,0x00,0x00,0x64};            // cmp,8
+static const u8 t_14528C0[] = {0x12,0x12,0x69,0x7f,0x1d,0x02};                      // cmp,6
+static const u8 t_14528B4[] = {0x11,0x16,0x69,0x15,0x0b,0x01,0x00,0x70};            // find,8
+static const u8 t_14528A8[] = {0x28,0x03,0x08,0x37,0x27,0x15,0x13,0x31};            // cmp,8
+static const u8 t_1452898[] = {0x07,0x69,0x7f,0x1d,0x02,0x6d,0x67,0x04,0x07,0x69,0x7f,0x67,0x0d,0x08,0x72}; // cmp,0xF
+static const u8 t_145288C[] = {0x01,0x1d,0x15,0x02,0x0b,0x01,0x69,0x63};            // cmp,8
+static const u8 t_1452880[] = {0x07,0x16,0x7f,0x1a,0x00,0x04,0x03,0x10};            // cmp,8
+static const u8 t_145287C[] = {0x18,0x70};                                         // cmp,2
+static const u8 t_145286C[] = {0x07,0x69,0x7a,0x25,0x1b,0x1d,0x11,0x17,0x52,0x16,0x06,0x02,0x02,0x10}; // cmp,0xE
+static const u8 t_1452860[] = {0x0d,0x01,0x68,0x6e,0x07,0x64,0x00,0x72};            // cmp,8
+static const u8 t_1452854[] = {0x7d,0x7d,0x05,0x77,0x18,0x40,0x4c,0x4c,0x4b,0x01};  // cmp,0xA
+static const u8 t_145284C[] = {0x06,0x02,0x08,0x02,0x06,0x61};                      // cmp,6
+static const u8 t_1452840[] = {0x13,0x19,0x13,0x07,0x64,0x14,0x4c,0x4e,0x03,0x05};  // cmp,0xA
+static const u8 t_1452834[] = {0x0c,0x15,0x07,0x1b,0x01,0x1d,0x15,0x14};            // cmp,8
+static const u8 t_145282C[] = {0x1f,0x0e,0x05,0x72,0x02,0x01};                      // cmp,6
+static const u8 t_1452820[] = {0x04,0x1d,0x07,0x06,0x18,0x04,0x69,0x63};            // cmp,8
+static const u8 t_1452818[] = {0x11,0x7f,0x19,0x0c,0x08};                           // cmp,5
+static const u8 t_1452810[] = {0x11,0x7f,0x19,0x0c,0x60};                           // cmp,5
+static const u8 t_1452804[] = {0x19,0x06,0x01,0x0b,0x00,0x17,0x72,0x63};            // cmp,8
+static const u8 t_14527F4[] = {0x07,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x16,0x7f,0x6c,0x71,0x04,0x67}; // cmp,0xD
+static const u8 t_14527E8[] = {0x19,0x06,0x01,0x0b,0x00,0x17,0x72,0x64};            // cmp,8
+static const u8 t_14527E4[] = {0x12,0x12,0x69};                                    // cmp,3
+static const u8 t_14527D8[] = {0x0c,0x02,0x1d,0x11,0x10,0x71,0x00,0x64};            // cmp,8
+static const u8 t_14527C8[] = {0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x64,0x12,0x12,0x69,0x1c,0x00}; // cmp,0xD
+static const u8 t_14527BC[] = {0x2c,0x02,0x1d,0x11,0x10,0x51,0x00,0x64};            // cmp,8
+static const u8 t_14527B0[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x63};            // cmp,8
+static const u8 t_14527A0[] = {0x07,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x10,0x6e,0x1c,0x05,0x04}; // cmp,0xC
+static const u8 t_1452790[] = {0x07,0x16,0x05,0x78,0x6b,0x12,0x12,0x64,0x73,0x1e,0x60,0x1e,0x03}; // cmp,0xD
+static const u8 t_1452780[] = {0x07,0x16,0x05,0x78,0x6b,0x12,0x12,0x64,0x73,0x1d,0x63,0x1e,0x03}; // cmp,0xD
+static const u8 t_1452774[] = {0x0c,0x02,0x0f,0x0d,0x6f,0x73,0x1e,0x60,0x1e,0x03};  // cmp,0xA
+static const u8 t_1452768[] = {0x12,0x0c,0x1e,0x06,0x1b,0x09,0x67,0x64};            // cmp,8
+static const u8 t_145275C[] = {0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x17};       // cmp,9
+static const u8 t_1452754[] = {0x1c,0x01,0x17,0x79};                               // cmp,4
+static const u8 t_1452748[] = {0x07,0x69,0x7f,0x05,0x77,0x00,0x63,0x11,0x0a};       // cmp,9
+static const u8 t_1452744[] = {0x10,0x0f,0x6b};                                    // cmp,3
+static const u8 t_1452738[] = {0x07,0x16,0x05,0x66,0x07,0x07,0x01,0x04,0x04,0x68};  // cmp,0xA
+static const u8 t_145272C[] = {0x1b,0x1c,0x1b,0x01,0x0b,0x03,0x61,0x64};            // cmp,8
+static const u8 t_145271C[] = {0x12,0x12,0x69,0x7f,0x1d,0x02,0x6d,0x73,0x17,0x69,0x7f,0x63,0x01,0x00,0x02}; // cmp,0xF
+static const u8 t_1452710[] = {0x18,0x0c,0x0c,0x09,0x09,0x61,0x00,0x63};            // cmp,8
+static const u8 t_1452708[] = {0x11,0x05,0x6f,0x0c,0x06,0x06};                      // cmp,6
+static const u8 t_1452700[] = {0x11,0x05,0x6f,0x00,0x0a,0x06};                      // cmp,6
+
+// =============================================================================
+// gilde.exe 0x141fe70 — VIBE_CopyProtect_MatchDriveModelTable
+// =============================================================================
+void MatchDriveModelTable(const u8* m, DriveFlags& o) {
+    o.a145A084 = Find(m, t_14526F4, 64, 9) ? 1 : 0;                 /*0x141fe88*/
+    if (Find(m, t_14526EC, 64, 7) || Find(m, t_14526E4, 64, 6)
+        || Find(m, t_14526E0, 64, 3)) {                            /*0x141fedc*/
+        if (Eq(m, t_14526D0, 0xE)) {                               /*0x141fef1*/
+            o.a145A04C = 1;                                        /*0x141ff09*/
+        } else {
+            o.a145A050 = 1;                                        /*0x141fefd*/
+        }
+    } else {
+        o.a145A050 = 0;                                            /*0x141ff15*/
+        o.a145A04C = 0;                                            /*0x141ff1f*/
+    }
+    o.a145A0F0 = (Find(m, t_14526C8, 64, 6) || Find(m, t_14526C0, 64, 6)) ? 1 : 0; /*0x141ff57*/
+    o.a145A0D0 = Find(m, t_14526B8, 64, 5) ? 1 : 0;                /*0x141ff82*/
+    o.a145A074 = (Eq(m, t_14526A8, 0xF) || Eq(m, t_1452698, 0xF)) ? 1 : 0; /*0x141ffd6*/
+    o.a145A0F8 = Eq(m, t_1452684, 0x10) ? 1 : 0;                   /*0x141fff6*/
+    if (!Eq(m, t_1452670, 0x11) && !Eq(m, t_145265C, 0x10)) {      /*0x1420032*/
+        o.a145A0E4 = 0;                                            /*0x142006b*/
+        o.a145A0D4 = 0;                                            /*0x1420075*/
+    } else {
+        o.a145A0E4 = 1;                                            /*0x142003e*/
+        if (Find(m, t_1452654, 64, 6)) {                          /*0x1420056*/
+            o.a145A0D4 = 1;                                        /*0x142005f*/
+        }
+    }
+    o.a145A0E8 = (Eq(m, t_145263C, 0x16) || Eq(m, t_1452624, 0x16)) ? 1 : 0; /*0x14200bb*/
+    o.a145A0CC = (Eq(m, t_1452608, 0x18) || Eq(m, t_14525EC, 0x18)
+                  || Eq(m, t_14525DC, 0xE) || Eq(m, t_14525C8, 0x10)) ? 1 : 0; /*0x1420131*/
+    o.a145A0C0 = (Eq(m, t_14525B4, 0x11) || Eq(m, t_14525A0, 0x11)
+                  || Eq(m, t_145258C, 0x11)) ? 1 : 0;             /*0x142018f*/
+    o.a145A0D8 = Eq(m, t_1452578, 0x10) ? 1 : 0;                  /*0x14201af*/
+    o.a145A0A4 = Eq(m, t_145256C, 8) ? 1 : 0;                     /*0x14201dd*/
+    o.a145A080 = Eq(m, t_1452558, 0x11) ? 1 : 0;                  /*0x142020b*/
+    o.a145A058 = Eq(m, t_1452544, 0x11) ? 1 : 0;                  /*0x1420239*/
+    o.a145A0F4 = Eq(m, t_1452530, 0x12) ? 1 : 0;                  /*0x1420267*/
+    o.a145A0AC = Eq(m, t_145251C, 0x11) ? 1 : 0;                  /*0x1420295*/
+    o.a145A0B0 = Eq(m, t_1452508, 0x11) ? 1 : 0;                  /*0x14202c3*/
+    o.a145A09C = Eq(m, t_1452500, 7) ? 1 : 0;                     /*0x14202f1*/
+    o.a145A054 = Eq(m, t_14524F8, 6) ? 1 : 0;                     /*0x142031f*/
+    o.a145A0C8 = Eq(m, t_14524EC, 0xB) ? 1 : 0;                   /*0x142034d*/
+    o.a145A0C4 = Eq(m, t_14524DC, 0xF) ? 1 : 0;                   /*0x142037b*/
+    o.a145A070 = Eq(m, t_14524CC, 0xD) ? 1 : 0;                   /*0x14203a9*/
+    o.a145A0B4 = Eq(m, t_14524BC, 0xD) ? 1 : 0;                   /*0x14203d7*/
+    o.a145A068 = Eq(m, t_14524A8, 0x12) ? 1 : 0;                  /*0x1420405*/
+    o.a145A0EC = Eq(m, t_1452494, 0x10) ? 1 : 0;                  /*0x1420433*/
+    o.a145A060 = Eq(m, t_1452480, 0x11) ? 1 : 0;                  /*0x1420461*/
+    o.a145A1B0 = Eq(m, t_1452468, 0x15) ? 1 : 0;                  /*0x142048f*/
+    o.a145A0E0 = (Eq(m, t_145245C, 0xB) || Eq(m, t_1452444, 0x14)
+                  || Eq(m, t_145242C, 0x14)) ? 1 : 0;            /*0x14204fb*/
+    o.a145A0A8 = Eq(m, t_1452414, 0x14) ? 1 : 0;                  /*0x142051b*/
+    o.a145A07C = (Eq(m, t_14523FC, 0x15) || Eq(m, t_14523E4, 0x15)
+                  || Eq(m, t_14523D0, 0x12)) ? 1 : 0;            /*0x1420587*/
+    o.a145A08C = (Eq(m, t_14523BC, 0x11) || Eq(m, t_14523A8, 0x10)) ? 1 : 0; /*0x14205cd*/
+    o.a145A064 = Eq(m, t_1452394, 0x10) ? 1 : 0;                  /*0x14205ed*/
+    o.a145A0DC = Eq(m, t_1452384, 0xE) ? 1 : 0;                   /*0x142061b*/
+    o.a145A0B8 = Eq(m, t_1452378, 0xB) ? 1 : 0;                   /*0x1420649*/
+    // a145A05C: exact-match miss AND a byte test on m[0x16]==0x62 ('b') or m[0x15]==0x66 ('f')
+    o.a145A05C = (!Eq(m, t_1452364, 0x11) && (m[0x16] == 98 || m[0x15] == 102)) ? 1 : 0; /*0x1420691*/
+    o.a145A0A0 = Eq(m, t_145234C, 0x17) ? 1 : 0;                  /*0x14206bd*/
+    o.a145A06C = Eq(m, t_1452334, 0x16) ? 1 : 0;                  /*0x14206eb*/
+    o.a145A094 = Eq(m, t_1452318, 0x18) ? 1 : 0;                  /*0x1420719*/
+    o.a145A098 = Eq(m, t_1452310, 6) ? 1 : 0;                     /*0x1420747*/
+    o.a145A0BC = (Eq(m, t_1452300, 0xD) || Eq(m, t_14522F0, 0xD)) ? 1 : 0; /*0x142079b*/
+}
+
+// =============================================================================
+// gilde.exe 0x14207b0 — VIBE_CopyProtect_MatchDriveVendorTable
+// `v` = 8-byte vendor id (byte_145CB28), `p` = 16-byte product id (byte_145CB30)
+// =============================================================================
+void MatchDriveVendorTable(const u8* v, const u8* p, DriveFlags& o) {
+    o.a145A050 = (Eq(v, t_145297C, 4) && Eq(p, t_1452970, 9)) ? 1 : 0;        /*0x14207ef*/
+    o.a145A0F8 = (Eq(v, t_1452964, 8) && Eq(p, t_145295C, 7)) ? 1 : 0;        /*0x1420835*/
+    if ((!Eq(v, t_1452964, 8) || !Eq(p, t_1452950, 8))
+        && (!Eq(v, t_1452944, 8) || !Eq(p, t_145293C, 7))) {                  /*0x1420893*/
+        o.a145A0E4 = 0;                                                        /*0x14208cc*/
+    } else {
+        o.a145A0E4 = 1;                                                        /*0x142089f*/
+        if (Find(p, t_1452654, 16, 6)) {                                      /*0x14208b7*/
+            o.a145A0D4 = 1;                                                    /*0x14208c0*/
+        }
+    }
+    o.a145A088 = Eq(p, t_145292C, 0xF) ? 1 : 0;                                /*0x14208ec*/
+    o.a145A0C0 = ((Eq(v, t_1452920, 8) && Eq(p, t_1452914, 9))
+                  || (Eq(v, t_1452908, 8) && Eq(p, t_14528FC, 9))
+                  || (Eq(v, t_1452908, 8) && Eq(p, t_14528F0, 9))) ? 1 : 0;    /*0x14209a0*/
+    o.a145A0D8 = (Eq(v, t_14528E4, 8) && Eq(p, t_14528D4, 0xF)) ? 1 : 0;       /*0x14209e6*/
+    o.a145A0A4 = (Eq(v, t_14528C8, 8) && Eq(p, t_14528C0, 6)) ? 1 : 0;         /*0x1420a2c*/
+    o.a145A084 = Find(p, t_14528B4, 16, 8) ? 1 : 0;                            /*0x1420a4b*/
+    o.a145A090 = (Eq(v, t_14528A8, 8) && Eq(p, t_1452898, 0xF)) ? 1 : 0;       /*0x1420a9f*/
+    o.a145A080 = (Eq(v, t_145288C, 8) && Eq(p, t_1452880, 8)) ? 1 : 0;         /*0x1420ae5*/
+    o.a145A058 = (Eq(v, t_145287C, 2) && Eq(p, t_145286C, 0xE)) ? 1 : 0;       /*0x1420b2b*/
+    o.a145A0AC = (Eq(v, t_1452860, 8) && Eq(p, t_1452854, 0xA)) ? 1 : 0;       /*0x1420b71*/
+    o.a145A0B0 = (Eq(v, t_145284C, 6) && Eq(p, t_1452840, 0xA)) ? 1 : 0;       /*0x1420bb7*/
+    o.a145A09C = Eq(v, t_1452500, 7) ? 1 : 0;                                  /*0x1420bd7*/
+    o.a145A0C4 = (Eq(v, t_1452834, 8) && Eq(p, t_145282C, 6)) ? 1 : 0;         /*0x1420c2b*/
+    o.a145A070 = (Eq(v, t_1452820, 8) && Eq(p, t_1452818, 5)) ? 1 : 0;         /*0x1420c71*/
+    o.a145A0B4 = (Eq(v, t_1452820, 8) && Eq(p, t_1452810, 5)) ? 1 : 0;         /*0x1420cb7*/
+    o.a145A1B0 = (Eq(v, t_1452804, 8) && Eq(p, t_14527F4, 0xD)) ? 1 : 0;       /*0x1420cfd*/
+    o.a145A0E0 = ((Eq(v, t_14527E8, 8) && Eq(p, t_14527E4, 3))
+                  || (Eq(v, t_14527D8, 8) && Eq(p, t_14527C8, 0xD))
+                  || (Eq(v, t_14527BC, 8) && Eq(p, t_14527C8, 0xD))) ? 1 : 0;  /*0x1420da3*/
+    o.a145A0A8 = (Eq(v, t_14527B0, 8) && Eq(p, t_14527A0, 0xC)) ? 1 : 0;       /*0x1420de9*/
+    o.a145A0F0 = (Find(p, t_14526C8, 16, 6) || Find(p, t_14526C0, 16, 6)) ? 1 : 0; /*0x1420e21*/
+    o.a145A07C = (Eq(v, t_14527B0, 8)
+                  && (Eq(p, t_1452790, 0xD) || Eq(p, t_1452780, 0xD)
+                      || Eq(p, t_1452774, 0xA))) ? 1 : 0;                      /*0x1420ea3*/
+    o.a145A08C = ((Eq(v, t_1452768, 8) && Eq(p, t_145275C, 9))
+                  || (Eq(v, t_14527D8, 8) && Eq(p, t_145275C, 9))) ? 1 : 0;    /*0x1420f19*/
+    o.a145A0DC = (Eq(v, t_1452754, 4) && Eq(p, t_1452748, 9)) ? 1 : 0;         /*0x1420f5f*/
+    o.a145A078 = (Eq(v, t_1452744, 3) && Eq(p, t_1452738, 0xA)) ? 1 : 0;       /*0x1420fa5*/
+    o.a145A0A0 = (Eq(v, t_145272C, 8) && Eq(p, t_145271C, 0xF)) ? 1 : 0;       /*0x1420feb*/
+    o.a145A0BC = ((Eq(v, t_1452710, 8) && Eq(p, t_1452708, 6))
+                  || (Eq(v, t_1452710, 8) && Eq(p, t_1452700, 6))) ? 1 : 0;    /*0x1421061*/
+}
+
+// =============================================================================
+// gilde.exe 0x141c3b0 — VIBE_CopyProtect_SetSpeedParams
+// Exact branch ladder. Note the last `else if (a145A058)` is a duplicate test of
+// an earlier branch and is therefore unreachable when reached only through the
+// `flag_1459FEC == 0` path — preserved verbatim from the decompile.
+// =============================================================================
+SpeedParams SetSpeedParams(const DriveFlags& f) {
+    SpeedParams r;
+    if (f.flag_1459FEC) {                       /*0x141c3ba*/
+        if (f.a145A058) {                       /*0x141c3c3*/
+            r.speed = 50; r.retry = 1;          /*0x141c3c5 / 0x141c3cf*/
+        } else if (f.a145A078) {                /*0x141c3e2*/
+            r.speed = 10; r.retry = 10;         /*0x141c3e4 / 0x141c3ee*/
+        } else {
+            r.speed = 0; r.retry = 1;           /*0x141c3fa / 0x141c404*/
+        }
+    } else if (f.a145A04C) {                    /*0x141c41a*/
+        r.speed = 10; r.retry = 10;             /*0x141c41c / 0x141c426*/
+    } else if (f.a145A05C) {                    /*0x141c43c*/
+        r.speed = 10;                           /*0x141c43e*/ // retry left at default 1
+    } else if (f.a145A068) {                    /*0x141c454*/
+        r.speed = 10; r.retry = 1;              /*0x141c456 / 0x141c460*/
+    } else if (f.a145A074) {                    /*0x141c476*/
+        r.speed = 10; r.retry = 10;             /*0x141c478 / 0x141c482*/
+    } else if (f.a145A060) {                    /*0x141c498*/
+        r.speed = 10;                           /*0x141c49a*/
+    } else if (f.a145A064) {                    /*0x141c4b0*/
+        r.speed = 10;                           /*0x141c4b2*/
+    } else if (f.a145A054) {                    /*0x141c4c5*/
+        r.speed = 10; r.retry = 1;              /*0x141c4c7 / 0x141c4d1*/
+    } else if (f.a145A06C) {                    /*0x141c4e4*/
+        r.speed = 5; r.retry = 1;               /*0x141c4e6 / 0x141c4f0*/
+    } else if (f.a145A058) {                    /*0x141c503 (duplicate, see note)*/
+        r.speed = 10; r.retry = 10;             /*0x141c505 / 0x141c50f*/
+    } else {
+        r.speed = 0; r.retry = 1;               /*0x141c51b / 0x141c525*/
+    }
+    return r;
+}
+
+// =============================================================================
+// Checksum / signature constant tables (recovered byte-exact).
+// =============================================================================
+// dword_142DD70 — 8 dwords; only [0] is nonzero (0x39530FE4) in the shipped EXE.
+static const u32 kSectorChecksumTable[8] = {
+    0x39530FE4u, 0, 0, 0, 0, 0, 0, 0,
+};
+// dword_142DD90 — 8 dwords; all zero in the shipped EXE.
+static const u32 kDiscSignatureTable[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+const u32* SectorChecksumTable() { return kSectorChecksumTable; }
+const u32* DiscSignatureTable() { return kDiscSignatureTable; }
+
+// gilde.exe 0x141c980 — sum of dwords [21..512) with 32-bit wraparound.
+u32 SectorChecksumSum(const u32* s) {
+    u32 sum = 0;
+    for (int i = 21; i < 512; ++i) {            /*0x141c9b8*/
+        sum += s[i];                            /*0x141c9f8*/
+    }
+    return sum;
+}
+
+bool SectorChecksumMatches(u32 sum) {
+    int i = 0;
+    for (; i < 8; ++i) {                        /*0x141caba*/
+        if (sum == kSectorChecksumTable[i]) {  /*0x141cae1*/
+            break;
+        }
+    }
+    return i != 8;                              /*match found before exhausting*/
+}
+
+// gilde.exe 0x141c720 — signature table match.
+bool DiscSignatureMatches(u32 sig) {
+    // First loop: "are all 8 entries zero?" (the original walks until a nonzero
+    // entry or i>=8). If all zero -> genuine.
+    int i = 0;
+    for (; !kDiscSignatureTable[i] && i < 8; ++i) {   /*0x141c855*/
+    }
+    if (i == 8) {                                     /*0x141c890*/
+        return true;                                  /*all-zero -> genuine*/
+    }
+    // Otherwise: does `sig` equal any entry?
+    for (i = 0; i < 8 && sig != kDiscSignatureTable[i]; ++i) { /*0x141c8a3*/
+    }
+    return i != 8;                                    /*0x141c8e7 / 0x141c907*/
+}
+
+// =============================================================================
+// EXE footer (gilde.exe 0x141cb90)
+// =============================================================================
+static const char kMasterDiscId[] = "UKD_548520-001.001"; // aUkd54852000100 @0x142DD28
+const char* MasterDiscId() { return kMasterDiscId; }
+
+u32 ExeFooterFold(const u8* footer132) {
+    guild::compress::Md5Context ctx;
+    guild::compress::Md5Init(&ctx);
+    guild::compress::Md5Update(&ctx, footer132, 0x84);  /*0x141d036 — 132 bytes*/
+    u8 digest[16];
+    guild::compress::Md5Final(digest, &ctx);            /*0x141d043*/
+    // Reinterpret the 16-byte digest as four little-endian dwords and XOR-fold.
+    auto ld = [&](int k) -> u32 {
+        return (u32)digest[k] | ((u32)digest[k + 1] << 8)
+             | ((u32)digest[k + 2] << 16) | ((u32)digest[k + 3] << 24);
+    };
+    u32 fold = ld(0) ^ ld(4) ^ ld(8) ^ ld(12);          /*0x141d06c: v3^v4^v5^v6*/
+    // The original then byte-reverses the fold before comparing it (the
+    // shift/recombine expression at 0x141d0c8 is a 32-bit byte swap).
+    u32 swapped = ((fold & 0x000000FFu) << 24)
+                | ((fold & 0x0000FF00u) << 8)
+                | ((fold & 0x00FF0000u) >> 8)
+                | ((fold & 0xFF000000u) >> 24);
+    return swapped;
+}
+
+bool VerifyExeFooter(const ExeFooter& f) {
+    if (ExeFooterFold(f.bytes) != f.expectedFold) {     /*0x141d0c8*/
+        return false;
+    }
+    return f.statusField == kExeFooterMagic;            /*0x141d0d5 (== 9)*/
+}
+
+// =============================================================================
+// gilde.exe 0x141c540 — VIBE_CopyProtect_ProbeDriveGeometry
+// The original guards on a set of blocking flags + a TOC/SPTI selector, reads
+// the TOC bounds twice (it discards the first read), then if both bounds clear
+// fixed thresholds it folds their high bytes into a 16-bit accumulator.
+// Thresholds recovered from the decompile: startLba >= 0x5F0000, endLba >= 0x4A0000
+// (these appear as `&loc_5F0000` / `&loc_4A0000` address-immediates).
+// =============================================================================
+GeometryResult ProbeDriveGeometry(const DriveFlags& f, DiscDevice& dev,
+                                  u16 foldSeed) {
+    GeometryResult g;
+    g.fold = foldSeed;
+    const bool gateOpen =
+        !f.a145A0B4 && !f.a145A0B0 && !f.a145A0AC && !f.a145A070
+        && !f.a145A09C && !f.a145A0A0 && !f.a145A0A4
+        && (f.a145A14C || f.flag_1459FEC);              /*0x141c5ae*/
+    if (!gateOpen) {
+        return g;
+    }
+    g.startLba = 0;                                     /*0x141c5b4 etc.*/
+    g.endLba = 0;
+    g.ioOk = 0;
+    // Original issues the read twice (resetting start/end between); we mirror it.
+    dev.ReadTocBounds(g.startLba, g.endLba);            /*discarded first read*/
+    g.startLba = 0;
+    g.endLba = 0;
+    g.ioOk = dev.ReadTocBounds(g.startLba, g.endLba);   /*0x141c62c / 0x141c699*/
+    if (g.ioOk) {                                       /*0x141c6a5*/
+        g.inRange = (g.startLba >= 0x5F0000u && g.endLba >= 0x4A0000u) ? 1 : 0; /*0x141c6cb*/
+        if (g.inRange) {                                /*0x141c6dc*/
+            g.fold = (u16)(g.fold ^ (u16)(g.startLba >> 16)); /*0x141c6f8 XOR HIWORD*/
+            g.fold = (u16)(g.fold + (u16)(g.endLba >> 8));    /*0x141c714 += endLba>>8*/
+        }
+    }
+    return g;
+}
+
+} // namespace detect
+} // namespace drm
+} // namespace guild

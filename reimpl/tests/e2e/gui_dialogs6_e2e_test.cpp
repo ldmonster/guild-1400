@@ -84,7 +84,7 @@ TEST(GuiDialogs6E2E, ThreePanelSession) {
     CHECK_EQ(g_flow.destroyed, 3);
     CHECK_EQ((int)g_flow.forms.size(), 3);
     if (g_flow.forms.size() == 3) {
-        CHECK(g_flow.forms[0] == "Runden\\spielerr2");
+        CHECK(g_flow.forms[0] == "Runden\\Spielerrunde_Ende_geb");
         CHECK(g_flow.forms[1] == "special\\gelage");
         CHECK(g_flow.forms[2] == "special\\amt2");
     }

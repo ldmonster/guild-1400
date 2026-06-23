@@ -122,9 +122,8 @@ static const char kErrCharAtDummyInvalid[] = "CreateCharacterAtDummy(): invalid 
 static const char kErrCharAtDummyLoad[]    = "CreateCharacterAtDummy(): Could not load character";
 
 // flt_5CA2B0 — the reference axis vector passed to RotateVectorByHierarchy /
-// VectorAngleBetween.  Reconstructed as a unit +Z axis (the exact constant is a
-// data ref @0x5ca2b0; its value is opaque, modeled as {0,0,1} so the inert
-// angleBetween default stays deterministic).
+// VectorAngleBetween.  get_bytes @0x5ca2b0 = 00 00 00 00 | 00 00 00 00 | 00 00
+// 80 3F  ==  {0.0f, 0.0f, 1.0f} (a unit +Z axis) — VERIFIED exact constant.
 static const float kRefAxis[3] = {0.0f, 0.0f, 1.0f};
 
 // ===========================================================================
@@ -178,9 +177,11 @@ i32 ImportCommand(const char* name, ScriptCmdFn fn, u8 kind, int argc) {
 // ===========================================================================
 ScriptHandle AddEventToken(const char* name, i32 handler, u8 typeNibble) {
     auto& T = EventTokens();
-    // Grow when the next record would exceed capacity:
-    //   if ( count*48 + 48 > capBytes ) reallocate to (count+16)*48.
-    if (T.count * kEventTokenStride + kEventTokenStride > T.capBytes) {   /*0x44115b*/
+    // Grow when the next record would exceed capacity.  gilde.exe 0x441148-0x44115b
+    // is literally `count + 48 > capBytes` (disasm: `mov eax,count; add eax,30h;
+    // cmp eax,capBytes; ja grow`) — the test uses the raw RECORD COUNT plus the
+    // 48-byte stride, NOT count*48.  Reallocate to (count+16)*48 bytes.
+    if (T.count + kEventTokenStride > T.capBytes) {                       /*0x44115b*/
         const std::size_t newBytes =
             static_cast<std::size_t>(kEventTokenStride) * (T.count + kEventTokenGrowRecords);
         u8* nb = static_cast<u8*>(HostAllocDebug(newBytes, "evt:t"));     /*0x441213*/
@@ -224,7 +225,7 @@ i32 RegisterCommands() {
     { const u8 t[] = {6};       ImportCommand("Print",      Tok(1), 5, 1, t); }          /*0x43c876 CmdReturnFalse*/
     { const u8 t[] = {1};       ImportCommand("PrintInt",   Tok(1), 5, 1, t); }          /*0x43c88e*/
     { const u8 t[] = {7};       ImportCommand("PrintFloat", Tok(1), 5, 1, t); }          /*0x43c8a6*/
-    { const u8 t[] = {1};       ImportCommand("Random",     Tok(2), 1, 1, t); }          /*0x43c8be RandModulo*/
+    { const u8 t[] = {1};       ImportCommand("rnd",        Tok(2), 1, 1, t); }          /*0x43c8be off_61688C=&"rnd" (value 0x646e72), RandModulo*/
     ImportCommand("GetTime",                Tok(3),  1, 0);                              /*0x43c8d4 GetScaledDelay*/
     { const u8 t[] = {6};       ImportCommand("RunScript",       Tok(4), 1, 1, t); }     /*0x43c8ec LoadAndRunMain*/
     { const u8 t[] = {6,1};     ImportCommand("RunScriptInt",    Tok(5), 1, 2, t); }     /*0x43c906 LoadAndRunWithArg*/
@@ -275,27 +276,27 @@ i32 RegisterObjectCommands() {
     { const u8 t[]={1,1,1,1,1};     ImportCommand("RotateObject",            Tok(47), 5, 5, t); } /*0x4406f6*/
     { const u8 t[]={1,1,1,1,1};     ImportCommand("MoveObjectRelative",      Tok(48), 5, 5, t); } /*0x440716*/
     { const u8 t[]={1,1,1,1,1};     ImportCommand("RotateObjectRelative",    Tok(49), 5, 5, t); } /*0x440736*/
-    { const u8 t[]={1,1,1};         ImportCommand("SetAmbientE",             Tok(50), 5, 3, t); } /*0x440752*/
+    { const u8 t[]={1,1,1};         ImportCommand("SetAmbiente",             Tok(50), 5, 3, t); } /*0x440752*/
     { const u8 t[]={1};             ImportCommand("LightCalc",               Tok(51), 5, 1, t); } /*0x44076a*/
     { const u8 t[]={1,6};           ImportCommand("ReplaceObject",           Tok(52), 1, 2, t); } /*0x440784*/
     { const u8 t[]={6};             ImportCommand("LoadScene",               Tok(53), 5, 1, t); } /*0x44079c*/
     { const u8 t[]={1,6,1};         ImportCommand("AttachAnim",              Tok(54), 1, 3, t); } /*0x4407b8*/
     { const u8 t[]={1,6};           ImportCommand("PreloadAnim",             Tok(55), 1, 2, t); } /*0x4407d2*/
-    { const u8 t[]={1,6,1};         ImportCommand("AttachAnimLoopedVerified",Tok(56), 1, 3, t); } /*0x4407ee*/
-    { const u8 t[]={6,6,1,1};       ImportCommand("AttachAnimLooped2",       Tok(57), 1, 4, t); } /*0x44080c PlaySampleAt*/
-    { const u8 t[]={6};             ImportCommand("DetachAnimFrom",          Tok(58), 5, 1, t); } /*0x440824 PlaySampleLooped*/
+    { const u8 t[]={1,6,1};         ImportCommand("AttachAnimLooped",       Tok(56), 1, 3, t); } /*0x4407ee*/
+    { const u8 t[]={6,6,1,1};       ImportCommand("AttachAnimLoopedToAll",  Tok(57), 1, 4, t); } /*0x44080c PlaySampleAt*/
+    { const u8 t[]={6};             ImportCommand("DetachAnimFromAll",       Tok(58), 5, 1, t); } /*0x440824 PlaySampleLooped*/
     { const u8 t[]={6};             ImportCommand("GetObjectHandle",         Tok(59), 1, 1, t); } /*0x44083c*/
     { const u8 t[]={6};             ImportCommand("GetRndObjectHandle",      Tok(60), 1, 1, t); } /*0x440854*/
-    { const u8 t[]={1,6};           ImportCommand("GetRndSubObject",         Tok(61), 1, 2, t); } /*0x44086e*/
+    { const u8 t[]={1,6};           ImportCommand("GetRndSubObjectHandle",   Tok(61), 1, 2, t); } /*0x44086e*/
     { const u8 t[]={1,6};           ImportCommand("GetSubObjectHandle",      Tok(62), 1, 2, t); } /*0x440888*/
     { const u8 t[]={1};             ImportCommand("SetNoTextures",           Tok(63), 5, 1, t); } /*0x4408a0*/
     { const u8 t[]={1};             ImportCommand("SetLightSet",             Tok(64), 5, 1, t); } /*0x4408b8*/
     { const u8 t[]={1,1,1};         ImportCommand("SetFogSet",               Tok(65), 5, 3, t); } /*0x4408d4*/
     { const u8 t[]={1,6,6};         ImportCommand("CameraFlight",            Tok(66), 5, 3, t); } /*0x4408f0*/
     { const u8 t[]={1,6};           ImportCommand("ZoomOnObject",            Tok(67), 5, 2, t); } /*0x44090a*/
-    { const u8 t[]={1,6,6,6,6,6,6}; ImportCommand("CameraFlightEnd",         Tok(68), 5, 7, t); } /*0x44092e*/
+    { const u8 t[]={1,6,6,6,6,6,6}; ImportCommand("CameraFlightEnhanced",    Tok(68), 5, 7, t); } /*0x44092e*/
     { const u8 t[]={1,6,6,6,6,6,6}; ImportCommand("NewCameraFlight",         Tok(69), 5, 7, t); } /*0x440952*/
-    { const u8 t[]={1,1,6,6,6,6,6}; ImportCommand("ObjectFlightTimed",       Tok(70), 5, 7, t); } /*0x440976*/
+    { const u8 t[]={1,1,6,6,6,6,6}; ImportCommand("ObjectFlight",            Tok(70), 5, 7, t); } /*0x440976*/
     { const u8 t[]={1};             ImportCommand("CreateRain",              Tok(71), 1, 1, t); } /*0x44098e*/
     { const u8 t[]={1};             ImportCommand("DeleteRain",              Tok(72), 1, 1, t); } /*0x4409a6*/
     { const u8 t[]={1};             ImportCommand("CreateParticle",          Tok(73), 5, 1, t); } /*0x4409be*/
@@ -315,9 +316,9 @@ i32 RegisterObjectCommands() {
     { const u8 t[]={1,1,1,1};       ImportCommand("SetEmitterAcceleration",  Tok(87), 1, 4, t); } /*0x440b4a*/
     { const u8 t[]={1,1,1,1};       ImportCommand("SetEmitterRndVelocity",   Tok(88), 1, 4, t); } /*0x440b68*/
     { const u8 t[]={1,1,1,1,1};     ImportCommand("SetEmitterPlane",         Tok(89), 1, 5, t); } /*0x440b88*/
-    { const u8 t[]={1,1,1,1,1};     ImportCommand("SetEmitterTime",          Tok(90), 1, 5, t); } /*0x440ba8*/
+    { const u8 t[]={1,1,1,1,1};     ImportCommand("SetEmitterTimeAndAlpha",  Tok(90), 1, 5, t); } /*0x440ba8*/
     { const u8 t[]={1,1,1,1,1};     ImportCommand("SetEmitterColor",         Tok(91), 1, 5, t); } /*0x440bc8*/
-    { const u8 t[]={1,1,1,1,1,1};   ImportCommand("SetEmitterFlags",         Tok(92), 1, 7, t); } /*0x440bec note: argc 7*/
+    { const u8 t[]={1,1,1,1,1,1,1}; ImportCommand("SetEmitterFlags",         Tok(92), 1, 7, t); } /*0x440bec argc 7, 7 type bytes*/
     { const u8 t[]={1,1};           ImportCommand("SetEmitterInitFill",      Tok(93), 1, 2, t); } /*0x440c06*/
     { const u8 t[]={1,1};           ImportCommand("SetEmitterRebirthFill",   Tok(94), 1, 2, t); } /*0x440c20*/
     { const u8 t[]={1,1};           ImportCommand("SetEmitterTextureMode",   Tok(95), 1, 2, t); } /*0x440c3a*/
@@ -327,7 +328,7 @@ i32 RegisterObjectCommands() {
     { const u8 t[]={1};             ImportCommand("TriggerEmitter",          Tok(99), 1, 1, t); } /*0x440ca0*/
     { const u8 t[]={1,1,1,1};       ImportCommand("SetParticlePos",          Tok(100),1, 4, t); } /*0x440cbe*/
     const u8 tlast[]={6,1};
-    return ImportCommand("SelectAllTextures", Tok(101), 1, 2, tlast);                            /*0x440ce0*/
+    return ImportCommand("SelectAllTextureSets", Tok(101), 1, 2, tlast);                         /*0x440ce0*/
 }
 
 // ===========================================================================

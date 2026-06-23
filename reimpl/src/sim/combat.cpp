@@ -8,9 +8,11 @@ namespace guild::sim {
 
 // ---------------------------------------------------------------------------
 // Recovered constant: the cutscene-RNG RandFloat fixed-point scale.
-//   flt_61D934 = 2^-15 (3.0518509e-05)
+//   flt_61D934 bytes = 00 01 00 38 == float 0x38000100 == 3.0518509447574615e-05
+//   (this is float(1/32767), NOT 2^-15 == 0x38000000). Confirmed via get_bytes.
+//   The original does `fild int; fmul flt_61D934` -> (double)int * (double)float.
 // ---------------------------------------------------------------------------
-static constexpr float kRandFloatScale = 1.0f / 32768.0f; // flt_61D934 == 2^-15
+static constexpr float kRandFloatScale = 3.0518509447574615e-05f; // flt_61D934 (0x38000100)
 
 // ===========================================================================
 // RNG helpers

@@ -63,6 +63,14 @@ struct LoopFrame {
     int condition     = 0;   // +4  (=+52) last evaluated condition
     u8  type          = 0;   // +8  (=+56) 1 = while, 2 = for/once
     u8  hasBrace      = 0;   // +9  (=+57) body is a { } block (vs single stmt)
+    // Brace-nesting depth INSIDE the loop body (== braceDepth_ just after the
+    // loop's own '{' was consumed). The loop's closing '}' is the one that drops
+    // braceDepth_ back to this value; deeper '}' (e.g. a nested if-block) belong
+    // to inner blocks and must NOT re-test the loop. (The original tracks this via
+    // the per-frame block-scope counter `*(frame+8)` / dword_62E8E0 in
+    // ExecuteStatement; without it, an inner if's '}' would prematurely pop the
+    // enclosing while — the exit() teardown loop of Schornstein_dunkel.esc.)
+    int bodyDepth     = 0;
 };
 
 // The source-text-driven executor: drives ScriptLexer over a CompiledScript and
@@ -103,14 +111,23 @@ private:
     void SkipBraceBlock();
     void SkipToSemicolon();
 
+    // Advance past the next '{' and increment braceDepth_ (the "enter block"
+    // transition). Returns true if a '{' was consumed.
+    bool StepIntoBlock();
+
     i32  ReadVar(int idx, int elemIndex) const;
     void WriteVar(int idx, int elemIndex, i32 value);
+
+    // Collect a parenthesised command-call argument list `(a, b, ...)`; shared by
+    // the value-position and statement-position command-call paths.
+    std::vector<i32> CollectCallArgs();
 
     CompiledScript& cs_;
     std::vector<std::string> commands_;   // declared before lexer_ (init order)
     ScriptLexer lexer_;
     ScriptHost  host_;
     std::vector<LoopFrame> loopStack_;   // +2472 frame array
+    int  braceDepth_ = 0;                // dword_62E8E0 — current { } nesting depth
     bool runnable_ = true;               // +164 bit0
     bool finished_ = false;
     u8   stmtMode_ = 0;                   // +2564

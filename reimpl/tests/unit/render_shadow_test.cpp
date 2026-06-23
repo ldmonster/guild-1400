@@ -97,7 +97,7 @@ TEST(RenderMip, BlockSizeAndWidth) {
     CHECK_EQ(MipBlockSize(4096, 16), 64); // ratio 256 -> clamp 64
     CHECK_EQ(MipWidth(256, 0), 256);
     CHECK_EQ(MipWidth(256, 2), 64);
-    CHECK_EQ(MipWidth(2, 4), 1);          // saturate to 1
+    CHECK_EQ(MipWidth(2, 4), 0);          // 0x5db350 `shr eax,cl`: 2>>4==0, no clamp
     CHECK_EQ(MipLevelCount(256), 9);      // 256..1
     CHECK_EQ(MipLevelCount(1), 1);
 }

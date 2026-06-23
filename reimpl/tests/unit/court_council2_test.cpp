@@ -86,8 +86,11 @@ TEST(CourtCouncil2Tally, BucketsByBookCategoryOracle) {
     MakePerson(5, 15, 8, 3,    0);   // kind 8 (>7) -> SKIPPED
     MakePerson(6, 16, 6, 0,    0);   // office 0 -> bucket 0
 
-    int hist[256];
-    OfficeTallyCategoryCounts(hist);
+    // WAVE-16 (binary truth, 0x47fdfc): the tally increments the module GLOBAL
+    // histogram (dword_B59820) and RETURNS it; the `out`/this pointer is only the
+    // 40-dword scratch the original zeroes. The no-arg overload zeroes+tallies the
+    // global, so check the returned pointer (the global), not a caller buffer.
+    int* hist = OfficeTallyCategoryCounts();
 
     // Oracle: recompute the same way the implementation must.
     int expect[256] = {0};
@@ -119,10 +122,26 @@ TEST(CourtCouncil2Tally, BucketsByBookCategoryOracle) {
 
 TEST(CourtCouncil2Tally, EmptyArrayAllZero) {
     ResetPersons();
-    int hist[256];
-    int* r = OfficeTallyCategoryCounts(hist);
-    CHECK_EQ(r, hist);
-    for (int b = 0; b < 40; ++b) CHECK_EQ(hist[b], 0);
+    // No-arg overload tallies into (and zeroes) the module global and returns it.
+    int* r = OfficeTallyCategoryCounts();
+    for (int b = 0; b < 40; ++b) CHECK_EQ(r[b], 0);
+}
+
+// WAVE-16: pin the binary's actual contract for the int* overload (0x47fdfc).
+// The `out` buffer is ONLY zeroed (40 dwords); the tally lands in the GLOBAL and
+// the return value IS the global (NOT the passed buffer).
+TEST(CourtCouncil2Tally, OutBufferIsScratchTallyIsGlobal) {
+    ResetPersons();
+    MakePerson(0, 10, 5, 0, 0);   // kind 5, office 0 -> ++global[0]
+    int sentinel[256];
+    for (int b = 0; b < 256; ++b) sentinel[b] = 777;
+    int* r = OfficeTallyCategoryCounts(sentinel);
+    // The first 40 dwords of the caller buffer are zeroed; the rest untouched.
+    for (int b = 0; b < 40; ++b) CHECK_EQ(sentinel[b], 0);
+    CHECK_EQ(sentinel[40], 777);
+    // The return value is the GLOBAL, not the caller buffer, and holds the tally.
+    CHECK(r != sentinel);
+    CHECK(r[0] >= 1);             // the office-0 person was counted into the global
 }
 
 // ---------------------------------------------------------------------------

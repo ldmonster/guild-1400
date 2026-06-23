@@ -63,10 +63,15 @@ TEST(RealFormsDriverE2E, DriveEveryFormThroughFrm2Parser) {
     CHECK_EQ(r.frm2Forms, 321);   // FRM2 layout
     CHECK_EQ(r.oldForms, 2);      // help.form + "ToolTip Geldsack.form"
 
-    // The build produced real, non-trivial widget trees (observed: 918 windows /
-    // 592 child links / 609 widgets / 1085 object records over the 323 forms).
+    // The build produced real, non-trivial widget trees. Observed with the
+    // BYTE-EXACT per-object strides recovered from gilde.exe 0x41c4d6 (type/aux base
+    // +4*o, x/y +2*o, name +64*o, slider-range +1*o): 918 windows / 592 child links /
+    // 493 widgets [sprite=404 label=13 input=5 slider=45] / 1085 object records over
+    // the 323 forms. (An earlier reconstruction used a +8 type/aux stride, which
+    // mis-read object type bytes and inflated the widget count to ~609; the +4 stride
+    // is what the binary actually uses.)
     CHECK(r.totalWindows > 800);     // most forms have several windows
-    CHECK(r.totalWidgets > 500);     // hundreds of controls across all forms
+    CHECK(r.totalWidgets > 450);     // hundreds of controls across all forms (493)
     CHECK(r.totalObjectRecords > 1000);
     CHECK(r.totalChildWindows > 400);// many nested child-window links
     CHECK(r.totalSprites > 400);

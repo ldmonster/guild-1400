@@ -109,6 +109,39 @@ bool RuleEvalToggleVariant(const RuleBuilding& b, const RuleEnv& env,
     return true;
 }
 
+// gilde.exe 0x465ac8 — RuleEvalDemandToggle. Market-scored like SettingToggle but
+// with only base/high trends (no mid) and the inverse first-branch test.
+bool RuleEvalDemandToggle(const RuleBuilding& b, const RuleEnv& env,
+                          const RuleConfig& cfg, int* out) {
+    int group = env.group_from_code(b.typeCode);
+    u8  scalar = env.rate_scalar(cfg.goodColumn);
+
+    float baseline = (static_cast<double>(scalar) + 1.0) * cfg.c0;  // v8
+    float score = (env.eval_rating(b, cfg.goodColumn) - baseline) * cfg.c1; // v11
+
+    float base = (b.setting61 + cfg.bias) * b.weight63; // v10 (setting61 trend)
+    float high = (b.setting67 + cfg.bias) * b.weight69; // v9  (setting67 trend)
+
+    // group multiplier is the unconditional 0.8 default (the disasm always does
+    // `score *= flt_61A0D8`); GroupMul returns mulDefault here for every group.
+    score *= GroupMul(cfg, group);
+
+    int law = env.law_value(cfg.lawId);
+
+    if (score < 1.0f && law == 0) {
+        if (base > high) {        // INVERSE of SettingToggle: base > high
+            *out = 1;
+            return true;
+        }
+        return false;
+    }
+    // else branch: requires score > 1.0, law == 1, high > base.
+    if (score <= 1.0f || law != 1 || high <= base)
+        return false;
+    *out = 0;
+    return true;
+}
+
 // --- recovered per-rule configs ---------------------------------------------
 // Each block: {goodColumn, c0, c1, bias, lawId, groupA,groupB,mulA,
 //              groupC,groupD,mulB, mulDefault}.
@@ -153,6 +186,10 @@ const RuleConfig& RuleConfigToggleB() {
 
 const RuleConfig& RuleConfigDemandToggle() {
     // 0x465ac8: col 4, law 18. unconditional * 0.8 (flt_61A0D8).
+    // NOTE: this rule's DECISION shape differs from the SettingToggle core (it has
+    // no mid trend and inverts the base/high test) — it must be evaluated through
+    // RuleEvalDemandToggle, NOT RuleEvalSettingToggle. The config carries only the
+    // shared coefficients + the 0.8 group default + law id.
     static const RuleConfig c{4, kC0, kC1, kBias, 18,
         -1, -1, 0.800000011920929f,
         -1, -1, 0.0f,

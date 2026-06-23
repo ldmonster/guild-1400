@@ -310,10 +310,14 @@ int ObjectSearchFindMatchingColor(const u16* refId, void* filter, float minR,
 // City / road-network map builders.
 // ===========================================================================
 
-// Find the node (other than self) whose nodeId equals `targetId`; -1 if none.
-static int RoadFindByNodeId(const RoadNetwork& net, int targetId, int selfIdx) {
+// Find the FIRST node (by index) whose nodeId hi-word equals `targetId`; -1 if none.
+// gilde.exe 0x592ce0 / 0x592d3a: the original loops v7/v9 from index 0 with NO
+// self-skip — it returns the first matching index even if that is `selfIdx`
+// itself. `selfIdx` is therefore unused (the game guarantees parentFromId/
+// parentToId never equal the node's own nodeId so the recursion still terminates).
+static int RoadFindByNodeId(const RoadNetwork& net, int targetId, int /*selfIdx*/) {
     for (int slot = 0; slot < net.nodeCount; ++slot) {
-        if (slot != selfIdx && net.nodes[slot].nodeId == targetId) {
+        if (net.nodes[slot].nodeId == targetId) {
             return slot;
         }
     }
@@ -461,29 +465,40 @@ int MapRasterizeBauplatzEdge(const float* quad, int fillTerrain, int fillCell) {
 
     // Walk the two edges in lockstep across outerSteps, and for each, walk the
     // cross segment in innerSteps. The grid writes (terrain/cell) go through the
-    // opaque grid in the original; with no grid we count the samples written.
-    int samples = 0;
+    // opaque grid in the original; with no grid the writes are hook-modelled.
+    //
+    // 0x5778d5/0x577927: `result` counts the inner-loop iterations of EACH outer
+    // step and is returned as-is from the last outer step — i.e. the function
+    // returns the inner step count of the final outer iteration, UNCONDITIONALLY
+    // (the fill==-1 / cell==255 gates only skip the grid writes, never the count).
     float ax = quad[0], ay = quad[1];   // v30/v31 (edge0 cursor)
     float bx = quad[6], by = quad[7];   // v28/v29 (edge1 cursor)
-    float dax = ex0 / outerSteps, day = ey0 / outerSteps;
-    float dbx = ex1 / outerSteps, dby = ey1 / outerSteps;
+    double invOuter = 1.0 / static_cast<double>(outerSteps);  // v7
+    float dax = static_cast<float>(ex0 * invOuter), day = static_cast<float>(ey0 * invOuter);
+    float dbx = static_cast<float>(ex1 * invOuter), dby = static_cast<float>(ey1 * invOuter);
+    int result = 0;  // v32-counted inner steps of the last outer iteration
     for (int o = 0; o < outerSteps; ++o) {
         float cx = bx - ax, cy = by - ay;       // v35/v33
         int innerSteps = MapRasterEdgeStepCount(cx * cx + cy * cy);  // v10/v32
         float px = ax, py = ay;                  // v37/v38
-        float dpx = cx / innerSteps, dpy = cy / innerSteps;  // v36/v34
-        for (int i = 0; i < innerSteps; ++i) {
-            if (fillTerrain != -1 || fillCell != 255) {
-                ++samples;  // a grid write would happen here (hook-modelled)
+        double invInner = 1.0 / static_cast<double>(innerSteps);  // v11
+        float dpx = static_cast<float>(cx * invInner), dpy = static_cast<float>(cy * invInner);  // v36/v34
+        result = 0;
+        do {
+            if (fillTerrain != -1) {
+                // grid terrain write (hook-modelled): *(grid->terrain + ...) = fill
+            }
+            if (fillCell != 255) {
+                // grid cell write (hook-modelled)
             }
             px += dpx;
             py += dpy;
-        }
+            ++result;  // 0x5778d5: unconditional
+        } while (result < innerSteps);  // 0x5778dc
         ax += dax; ay += day;
         bx += dbx; by += dby;
     }
-    (void)fillCell;
-    return samples;
+    return result;  // 0x577927
 }
 
 int MapLoadCityFile(int loadNet, const char* cityName) {

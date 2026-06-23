@@ -179,12 +179,16 @@ bool BuildingDialog_DispatchSellLand(const DialogLayout& l, const BuildingState&
 }
 
 // Renovate: clicking child [0]/[1]/[2] confirms a renovate (label "renovieren");
-// child [3] (or 1155) cancels.
+// child [3] cancels.  gilde.exe 0x54a908: the loop tests dword_75BF38 == -1 (no widget
+// hit -> keep looping) and otherwise compares dword_62D22C against the four child ids.
+// There is NO 1155 branch here (unlike SellPreview/ConfirmSell/SellLand/ExtinguishFire);
+// the cancel is purely child[3] plus the right-click global (dword_672230), so we model
+// clicks via clickedObj only and treat clickedId == -1 (no hit) as "keep looping".
 bool BuildingDialog_DispatchRenovate(const DialogLayout& l, const BuildingState& b,
                                      int clickedId, int clickedObj) {
-    if (l.childCount == 0) return true; // nothing to renovate
-    if (clickedId == kClickCancel) return true;
-    if (clickedObj == l.childIds[3]) return true; // explicit cancel button
+    if (l.childCount == 0) return true;       // nothing to renovate (messagebox 4)
+    if (clickedId == -1) return false;        // dword_75BF38 == -1 -> keep looping
+    if (clickedObj == l.childIds[3]) return true; // child[3] (v38) cancel button
     if (clickedObj == l.childIds[0] || clickedObj == l.childIds[1] ||
         clickedObj == l.childIds[2]) {
         g_sink->Renovate(b.handle, l.displayWorth, kActionRenovate);

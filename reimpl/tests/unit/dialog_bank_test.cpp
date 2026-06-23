@@ -109,3 +109,46 @@ TEST(DialogBankUnit, ClickOffConfirmYieldsNone) {
     CHECK(!c.hitConfirm);
     CHECK(c.interaction.side == LoanSide::kNone);
 }
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-12): a loan tree with ZERO lenders, with MANY lenders, and a
+// confirm click carrying an out-of-range selected row (a "bad node id") must not
+// index the lender list out of bounds. ClickBankDialog guards the row index;
+// render clips to the surface. Drive each and assert no OOB (ASAN).
+// ---------------------------------------------------------------------------
+TEST(DialogBankUnit, ZeroLendersOutOfRangeRowNoOOB) {
+    std::vector<LenderChoice> lenders;                 // empty list
+    BankDialog d = BuildSyntheticBankDialog(lenders, /*borrower*/1, /*amount*/100,
+                                            /*player*/0, 10, 10, 200, 200);
+    CHECK_EQ(d.rowCount(), 0);
+
+    // A confirm hit with a wildly out-of-range selected row -> defaults to bank sink.
+    BankWidgetRect confirm{};
+    bool found = false;
+    for (const auto& w : d.widgets)
+        if (w.role == BankWidgetRole::kConfirmBtn) { confirm = w; found = true; break; }
+    CHECK(found);
+    BankDialogClick c = ClickBankDialog(d, confirm.x + 1, confirm.y + 1, 999999);
+    CHECK(c.hitConfirm);
+    CHECK_EQ(c.interaction.lenderId, -1);              // out-of-range -> bank sink
+}
+
+TEST(DialogBankUnit, ManyLendersRendersNoOOB) {
+    std::vector<LenderChoice> lenders;
+    for (int i = 0; i < 64; ++i) { LenderChoice l{}; l.lenderId = 1000 + i; lenders.push_back(l); }
+    BankDialog d = BuildSyntheticBankDialog(lenders, 1, 100, 0, -20, -20, 80, 80);
+    CHECK_EQ(d.rowCount(), 64);
+
+    BankRenderStats st;
+    render::Surface* s = RenderBankDialog(d, 32, 32, st);   // tiny fb, negative origins
+    CHECK(s != nullptr);
+    if (s) render::SurfaceDestroy(s);
+
+    // A negative selected row also resolves to the bank sink, never an OOB read.
+    BankWidgetRect confirm{}; bool found=false;
+    for (const auto& w : d.widgets)
+        if (w.role == BankWidgetRole::kConfirmBtn) { confirm = w; found = true; break; }
+    CHECK(found);
+    BankDialogClick c = ClickBankDialog(d, confirm.x + 1, confirm.y + 1, -5);
+    CHECK_EQ(c.interaction.lenderId, -1);
+}

@@ -149,6 +149,23 @@ bool TryLoadRealBgf(app::RealGameAssets& assets) {
         if (!render::LoadFastChunk(bytes.data(), bytes.size(), model)) continue;
         if (model.polyCount == 0) continue;
         if (!render::BuildGeometry(model, g_shared.bgf)) continue;
+        // Normalize the real mesh to a fixed model-space extent (~60 units, the
+        // synthetic-octahedron size this view is calibrated for) so the render
+        // covers a meaningful fraction of the frame regardless of which shipped
+        // model loads (a Buch is ~1 unit; a building is hundreds). The pipeline
+        // exercised is identical — only the model-space scale is normalized.
+        {
+            float maxExt = 0.0f;
+            for (auto& v : g_shared.bgf.vertices) {
+                maxExt = std::max(maxExt, std::fabs(v.x));
+                maxExt = std::max(maxExt, std::fabs(v.y));
+                maxExt = std::max(maxExt, std::fabs(v.z));
+            }
+            if (maxExt > 1e-4f) {
+                const float s = 60.0f / maxExt;
+                for (auto& v : g_shared.bgf.vertices) { v.x *= s; v.y *= s; v.z *= s; }
+            }
+        }
         render::MeshGeometry* g = g_shared.bgf.View();
         if (!g || g->polyCount == 0) continue;
         g_shared.geom = *g;

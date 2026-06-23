@@ -156,6 +156,15 @@ constexpr int   kDrawBlockSize    = 0x910;   // VIBE_Memory_AllocDebug(0x910, ..
 constexpr int   kSubMeshStride    = 384;     // entry stride
 constexpr int   kSubMeshFirst     = 244;     // first entry offset in draw block
 constexpr int   kSubMeshCount     = 4;       // 1536 / 384
+// AttachToUniverseNode (0x5b3e30) reads, per LOD record (stride 384 within the draw
+// block), the LOD-mesh ptr at +260 ([ecx+104h]) and the texture-handle array ptr at
+// the verbatim 32-bit +264 ([ecx+108h]). Those two pointer slots are 4 bytes apart;
+// under the module's LP64 doctrine (followed pointer slots are native-width) the
+// texarr ptr is read from the next native slot (+260+sizeof(void*)) so both survive
+// disjoint on a 64-bit host (== +264 exactly on a 32-bit build). The per-LOD mesh
+// record's texture/material count is the 32-bit field at lodMesh+480 ([eax+1E0h]).
+constexpr int   kLodMeshPtrOff    = 260;     // [ecx+104h] LOD-mesh ptr (presence gate)
+constexpr int   kLodTexCountOff   = 480;     // [eax+1E0h] tex count on the LOD mesh
 // The +488 light block default per-stage: float 0.1f at slot, int 15 at +60.
 constexpr i32   kInitFloatBits    = 1050253722;  // 0.1f
 constexpr i32   kOneFloatBits     = 1065353216;  // 1.0f

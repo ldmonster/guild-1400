@@ -53,6 +53,25 @@ TEST(SimBuildingUpgrade, ApplyLevelGuardAtMax) {
     CHECK_EQ(static_cast<int>(r.newTypeByte), 7);   // unchanged
 }
 
+// Wave-12 hardening: an unloaded / out-of-range type. BuildingTypeDefAt returns
+// null; the function reads security/maxLevel as 0 (0 >= 0 -> at max), matching
+// the original's null-base read returning the same byte twice. No OOB.
+TEST(SimBuildingUpgradeHarden, ApplyLevelUnloadedTypeIsAtMax) {
+    ResetBuildings();
+    g_buildingTypesLoaded = false;            // table unloaded -> td null
+    UpgradeApplyResult r = Building_ApplyUpgradeLevel(200, 0x07000000);
+    CHECK(r.atMaxLevel);
+    CHECK_EQ(static_cast<int>(r.newTypeByte), 200);   // unchanged
+    CHECK_EQ(static_cast<int>(r.newCondition), 7);    // packed>>24, unchanged
+}
+
+// Upgrade cost on an unloaded type -> SumFlaggedSlotsWorth 0 -> cost 0, no OOB.
+TEST(SimBuildingUpgradeHarden, UpgradeCostUnloadedType) {
+    ResetBuildings();
+    g_buildingTypesLoaded = false;
+    CHECK_EQ(Building_ComputeUpgradeCost(200), 0);
+}
+
 TEST(SimBuildingUpgrade, ApplyLevelBelowMaxAdvances) {
     ResetBuildings();
     g_buildingTypesLoaded = true;

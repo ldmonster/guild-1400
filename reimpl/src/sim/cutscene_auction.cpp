@@ -1,5 +1,7 @@
 #include "sim/cutscene_auction.h"
 
+#include <cmath>   // std::nearbyint (x87 fistp == round-to-nearest-even)
+
 // Faithful 1:1 port of the deterministic spine of VIBE_Cutscene_Auction
 // (gilde.exe 0x4a89f8) + VIBE_Cutscene_BroadcastMessage (0x4a8930). The scene
 // load, the auctioneer/bidder actor spawns, the voice banks
@@ -114,19 +116,25 @@ AuctionOutcome CutsceneAuction(AuctionRegion region,
             }
         }
 
+        // WAVE-16 1:1 (loop @0x4a908a..0x4a9308): the binary records the winner in
+        // the per-bidder scan above (v136/v116[0] set whenever a bidder beats the
+        // round high), then branches only 2 ways: v64 >= 2 -> continue and, ONLY
+        // while v134 < 4 (round < 4), raise the ask v116[0] += 32; else (v64 < 2)
+        // -> v129 = 1 (stop). The winner persists across rounds regardless of the
+        // branch, so a single-bidder round still leaves that bidder as the leader.
         if (activeBidders >= 2) {
-            // a contested round: record the leader, raise the ask, continue.
             winnerIndex = roundWinner;
             highBid     = roundHigh;
-            askPrice   += kAuctionBidIncrement;          // v114[0] += 32
-        } else if (activeBidders == 1) {
-            // a single bidder still in -> they win; stop next.
-            winnerIndex = roundWinner;
-            highBid     = roundHigh;
-            stop = 1;                                     // v128 = 1
+            if (round < (kAuctionMaxRounds - 1))          // v134 < 4
+                askPrice += kAuctionBidIncrement;         // v116[0] += 32
         } else {
-            // nobody left -> stop (winnerIndex keeps the prior leader, if any).
-            stop = 1;
+            // v64 < 2: stop. The leader (if any bidder appeared this round) was
+            // already committed by the per-bidder scan.
+            if (activeBidders == 1) {
+                winnerIndex = roundWinner;
+                highBid     = roundHigh;
+            }
+            stop = 1;                                     // v129 = 1
         }
 
         if (hooks.onRound) hooks.onRound(round, askPrice, activeBidders, hooks.ctx);
@@ -145,9 +153,17 @@ AuctionOutcome CutsceneAuction(AuctionRegion region,
     out.winnerIndex = winnerIndex;
     out.winnerId    = bidders[winnerIndex].personId;
     out.winningBid  = highBid;
-    // lease split: 90% owner / 10% other (flt_61D700 / flt_61D704).
-    out.toOwner = static_cast<int>(static_cast<double>(highBid) * kAuctionLeaseOwner);
-    out.toOther = static_cast<int>(static_cast<double>(highBid) * kAuctionLeaseOther);
+    // lease split (gilde.exe 0x4a94c5..0x4a94e6 / 0x4a9624..0x4a9651):
+    //   v91 = (double)(int)v115[winner] * flt_61D700;  fistp [var_58]
+    // flt_61D700 / flt_61D704 are 32-bit FLOATS (0x3f666666 ~= 0.89999998 and
+    // 0x3dcccccd ~= 0.10000000) — NOT the exact doubles 0.9/0.1 — and the
+    // store is `fistp`, i.e. ROUND-TO-NEAREST-EVEN, not the (int) truncation
+    // Hex-Rays prints. (The interleaved VIBE_Coord_ConvertX call leaves st0=v91
+    // untouched.) Reproduce both the float operand width and the fistp rounding.
+    out.toOwner = static_cast<int>(std::nearbyint(
+        static_cast<double>(highBid) * static_cast<double>(kAuctionLeaseOwnerF)));
+    out.toOther = static_cast<int>(std::nearbyint(
+        static_cast<double>(highBid) * static_cast<double>(kAuctionLeaseOtherF)));
 
     if (hooks.onSold)
         hooks.onSold(out.winnerId, out.winningBid, out.toOwner, out.toOther, hooks.ctx);

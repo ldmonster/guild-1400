@@ -29,9 +29,11 @@
 //     Net_RunSyncWaitLoop 0x4beac8       (net transport)            — DEFERRED
 //   * Save_LoadGameFile 0x5a7604, Save_WriteGameFile 0x5a348c,
 //     Save_ReadThumbnailFile 0x56d870    (save IO)                  — DEFERRED
-//   * Scene_SyncWorldOnEnter 0x50456c / SyncMeisterBuildings 0x504ce0 /
-//     SyncObjectHeights 0x504e14 / SyncMovableObjects 0x504ef8,
-//     Scene_RunMainFrameLoop 0x50f0c0    (scene/render sync)        — DEFERRED
+//   * Scene_SyncWorldOnEnter 0x50456c / SyncObjectHeights 0x504e14 /
+//     SyncMovableObjects 0x504ef8, Scene_RunMainFrameLoop 0x50f0c0
+//                                          (scene/render sync)      — DEFERRED
+//     (Scene_SyncMeisterBuildings 0x504ce0 is NOT deferred: the NewGameSyncScene
+//      step dispatches the REAL sim::Scene_SyncMeisterBuildings — rule 13.)
 //   * Groundplan_CreateWindow 0x4ae3b8 / DestroyWindow, MapView_LoadBackground-
 //     Bmp 0x5438e8, Render_SetupViewTransform 0x5af5f8, Light_EnableDaylight
 //     0x504a00, Sky_InitScene 0x4b1e94    (render/gui)              — DEFERRED
@@ -50,10 +52,14 @@
 //
 #include "app/session_init.h"
 
+#include <cstring>
+
 #include "crt/rand.h"
+#include "sim/buildingtype_callers.h"  // Scene_SyncMeisterBuildings (0x504ce0)
 #include "sim/entity.h"
 #include "sim/gametime.h"
 #include "sim/types.h"
+#include "world/amt.h"   // AmtMoneyMultiplyByRate (the canonical 0x58f19c)
 #include "world/city.h"
 
 namespace guild::app {
@@ -101,11 +107,14 @@ const char* SetupStepName(SetupStep s) {
     }
 }
 
-// gilde.exe 0x58f19c — VIBE_Money_MultiplyByRate (amount@eax, ratePct@dl).
-// result = amount * ratePct / 100  (integer; rate byte defaults to 100).
-std::int32_t MoneyMultiplyByRate(std::int32_t amount, std::uint8_t ratePct) {
-    return static_cast<std::int32_t>(
-        static_cast<std::int64_t>(amount) * ratePct / 100);
+// gilde.exe 0x58f19c — VIBE_Money_MultiplyByRate (amount@eax, currencyId@dl).
+//   return amount * dword_649A88[dword_13CD6F2[189 * currencyId] >> 16];
+// The second arg is the active city/currency index (byte_6477A1), NOT a percent.
+// The canonical 0x58f19c reconstruction lives in world::AmtMoneyMultiplyByRate
+// (it models the runtime city-record/multiplier tables as a settable rate hook,
+// identity by default); forward to it so there is one copy of the 0x58f19c logic.
+std::int32_t MoneyMultiplyByRate(std::int32_t amount, std::uint8_t currencyId) {
+    return world::AmtMoneyMultiplyByRate(amount, currencyId);
 }
 
 // gilde.exe 0x533c5e — new-game starting purse base.
@@ -225,6 +234,13 @@ void InitOrLoadSession(std::uint16_t flags, SessionInitCtx& ctx,
         Emit(ctx, SetupStep::NewGameLoadCty);
         // 0x533fXX: EnqueueInheritanceTransfer; Scene_SyncWorldOnEnter /
         //           SyncMeisterBuildings / SyncObjectHeights ; UpdateProgressBar.
+        // The middle leaf is dispatched for REAL (rule 13): VIBE_Scene_Sync-
+        // MeisterBuildings @0x504ce0 (sim/buildingtype_callers.cpp) — anchor
+        // scan + shop list + Building_RegisterNames + SyncMasterShopObjects
+        // over the live g_persons/g_objects arrays, its unreconstructed leaves
+        // routed through BuildingCallerHooks. Scene_SyncWorldOnEnter (0x50456c)
+        // and Scene_SyncObjectHeights (0x504e14) remain DEFERRED hook leaves.
+        sim::Scene_SyncMeisterBuildings();
         Emit(ctx, SetupStep::NewGameSyncScene);
         break;
 
@@ -288,11 +304,15 @@ void InitOrLoadSession(std::uint16_t flags, SessionInitCtx& ctx,
         const std::int32_t base = NewGameStartGoldBase(ctx.cheatStartGold,
                                                        st.difficulty);
         ctx.startGoldBase = base;
-        const std::uint8_t cityRate = 100; // byte_6477A1 default for a fresh city
+        // 0x533f65: VIBE_Money_MultiplyByRate(v32, byte_6477A1) — the second arg
+        // is the active city/currency index (byte_6477A1, cold image 0), NOT a
+        // percentage. With the identity rate hook (no runtime city table) this
+        // returns the base unchanged.
+        const std::uint8_t currencyIndex = 0; // byte_6477A1 (cold image)
         Emit(ctx, SetupStep::SeedPlayerStartGold, base);
         for (const auto& p : ctx.players) {
             if (p.isPlayer && (p.kind == 6 || p.kind == 7)) {
-                const std::int32_t gold = MoneyMultiplyByRate(base, cityRate);
+                const std::int32_t gold = MoneyMultiplyByRate(base, currencyIndex);
                 ctx.startGoldByPlayer.push_back(gold);
                 // EnqueueCmd15(p.personId, -1, gold, cityRate) — DEFERRED leaf.
             }
@@ -357,20 +377,31 @@ void InitOrLoadSession(std::uint16_t flags, SessionInitCtx& ctx,
 // ---------------------------------------------------------------------------
 void GameInitWorldAndSounds_Body(SessionInitCtx& ctx) {
     SessionState& st = GameSessionState();
-    // 0x52f2fX: dword_63CC2C = 1; LODWORD(qword_13CE852) = 2; dword_63CC30 = 0;
-    //           dword_63CC34 = 0; byte_63CC41 = 0;
-    st.roundCounter = 1;       // dword_63CC2C
-    st.outroShown   = 0;       // dword_63CC30
-    st.reinitRequest = 0;      // dword_63CC34
-    st.victoryFlag  = 0;       // byte_63CC41
-    // qword_13CE852 day = 2 (the world starts on calendar day 2). The clock is
-    // owned by sim/gametime; here we reset our mirror to the new-game day/hour.
+    // 0x52f303..0x52f333 — the exact global re-init set (edx=1, ebx=2, esi=0,
+    // ah=0): dword_631DB4 = 1; dword_63CC2C = 1; LODWORD(qword_13CE852) = 2;
+    // dword_63CC30 = 0; dword_63CC34 = 0; byte_63CC41 = 0; dword_631284 = 2.
+    st.worldActive   = 1;      // dword_631DB4 = 1  (0x52f303)
+    st.roundCounter  = 1;      // dword_63CC2C  = 1  (0x52f30b)
+    st.outroShown    = 0;      // dword_63CC30  = 0  (0x52f317)
+    st.reinitRequest = 0;      // dword_63CC34  = 0  (0x52f31d)
+    st.victoryFlag   = 0;      // byte_63CC41   = 0  (0x52f323)
+    st.clockProcState = 2;     // dword_631284  = 2  (0x52f333)
+    // 0x52f311: mov dword ptr ds:qword_13CE852, ebx — only the LOW dword (the day
+    // field) of the 14-byte calendar is set to 2; hour/minute/second are NOT
+    // touched here (they are seeded later by GameTime_Set in InitOrLoadSession).
     sim::GameTime& clk = WorldClock();
     clk.day = 2;
-    clk.hour = 0; clk.minute = 0; clk.second = 0;
 
-    // 0x52f37X: City_InitParameterTable() — the 28-good economy seed (REUSED).
-    world::CityInitParameterTable(1.0f);
+    // 0x52f354/0x52f359: VIBE_City_InitParameterTable is __thiscall; ecx holds the
+    // integer 1 (from `mov ecx, edx`, edx==1), which the callee stores raw into
+    // the float global flt_641DA8 (`flt_641DA8 = v1`). So the seeded cap divisor
+    // is bit_cast<float>(1u) (the denormal 1.401e-45), NOT 1.0f.
+    {
+        const std::uint32_t kEcxRaw = 1u;       // ecx == 1 at the call site
+        float capDivisor;
+        std::memcpy(&capDivisor, &kEcxRaw, sizeof capDivisor);
+        world::CityInitParameterTable(capDivisor);
+    }
 
     // The entity arrays the spawned population lives in are reset by the
     // world-reset path (Building_ResetAllBuildings / World_ResetPersonTable in

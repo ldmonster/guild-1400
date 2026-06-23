@@ -42,7 +42,8 @@ double PersonGetCashAmount(u16 idx);
 
 // gilde.exe 0x58f71c — VIBE_Person_ComputePriceMultiplier (__usercall, st0=(idx@eax)).
 // Reputation-based price multiplier for slot `idx`. If reputation (+0x80 byte) is
-// <= 42.0 returns 1.0, else 1.0 + rep * 0.25 * (1/256) (computed in float).
+// <= 42.0 returns 1.0, else 1.0 + rep * 0.25 * (1/252) (computed in float).
+// (dbl_62698C @0x62698C == 0.003968253968253968 == 1/252, not 1/256.)
 double PersonComputePriceMultiplier(int idx);
 
 // gilde.exe 0x592ae8 — VIBE_Person_ComputeWealthRank (__usercall, eax=(idx@eax),

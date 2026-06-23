@@ -48,14 +48,17 @@ TEST(SimCombatBattle, BattleDescriptorDefaults) {
 // Unit strength — GetSoundRangeScale / WeaponWeight
 // ===========================================================================
 TEST(SimCombatBattle, WeaponWeightTable) {
-    CHECK(std::fabs(WeaponWeight(340) - 0.5) < 1e-9);
-    CHECK(std::fabs(WeaponWeight(342) - 0.8) < 1e-9);
-    CHECK(std::fabs(WeaponWeight(344) - 1.0) < 1e-9);
-    CHECK(std::fabs(WeaponWeight(350) - 0.7) < 1e-9);
-    CHECK(std::fabs(WeaponWeight(352) - 0.7) < 1e-9);
-    CHECK(std::fabs(WeaponWeight(366) - 0.8) < 1e-9);
-    CHECK(std::fabs(WeaponWeight(374) - 0.9) < 1e-9);
-    CHECK(std::fabs(WeaponWeight(1234) - 0.3) < 1e-9);  // default
+    // The weights are FLOAT-precision in the binary (v8 is a float register slot):
+    // 0.80000001==float(0.8), 0.69999999==float(0.7), 0.89999998==float(0.9),
+    // 0.30000001==float(0.3). Compare against the float-rounded constants exactly.
+    CHECK_EQ(WeaponWeight(340), static_cast<double>(static_cast<float>(0.5)));
+    CHECK_EQ(WeaponWeight(342), static_cast<double>(static_cast<float>(0.8)));
+    CHECK_EQ(WeaponWeight(344), static_cast<double>(static_cast<float>(1.0)));
+    CHECK_EQ(WeaponWeight(350), static_cast<double>(static_cast<float>(0.7)));
+    CHECK_EQ(WeaponWeight(352), static_cast<double>(static_cast<float>(0.7)));
+    CHECK_EQ(WeaponWeight(366), static_cast<double>(static_cast<float>(0.8)));
+    CHECK_EQ(WeaponWeight(374), static_cast<double>(static_cast<float>(0.9)));
+    CHECK_EQ(WeaponWeight(1234), static_cast<double>(static_cast<float>(0.3)));  // default
 }
 
 TEST(SimCombatBattle, GetSoundRangeScale) {
@@ -391,4 +394,58 @@ TEST(SimCombatBattle, AssignUnitsToRolesPicksByWeight) {
     CutsceneRng rng; rng.state = 7;
     AssignUnitsToRoles(units, w, rng);
     CHECK_EQ(static_cast<int>(u0.role), 3);
+}
+
+// --- Wave-12 hardening: boundary indices / empty collections ---------------
+
+// ComputeBalanceIndex with no battle flags returns the default mode 6 (one past
+// the 6-row table). This is a VALUE the caller uses to index dword_B59C40
+// (30*mode); the index bound is the caller's contract — pin the boundary value
+// so the table-read owner sees mode==6 explicitly (documented for that owner).
+TEST(SimCombatBattle, ComputeBalanceIndexDefaultModeBoundary) {
+    BattleDescriptor b;
+    b.modeFlags = 0;                          // no raid/attack/defend bit
+    BalanceIndex r = ComputeBalanceIndex(b, true, 1.0, 1.0, 0);
+    CHECK_EQ(r.mode, 6);                       // default sentinel (out-of-table)
+    // bucket still derived from the ratio (1.0 -> bucket 2).
+    CHECK_EQ(r.bucket, 2);
+    // Zero "other" strength avoids div-by-zero (ratio forced to 0 -> bucket 0).
+    BalanceIndex z = ComputeBalanceIndex(b, true, 5.0, 0.0, 0);
+    CHECK_EQ(z.bucket, 0);
+}
+
+// ScoreUnitForRole with a role byte past the handled 0..5 set falls into the
+// default (0.0) — no table/array access, no UB on the out-of-range role.
+TEST(SimCombatBattle, ScoreUnitForRoleOutOfRangeRole) {
+    CombatField field;
+    CombatUnit* c0 = field.Spawn(1, 100, 1);
+    CombatUnitAI u; u.unit = c0; u.weaponType = 344; u.outputRatio = 1.0f;
+    CHECK_EQ(ScoreUnitForRole(u, /*role*/ 200), 0.0);   // default branch
+}
+
+// Assigning roles over an EMPTY unit list is a no-op (the for-loop count is 0)
+// and must not touch the empty pool vector.
+TEST(SimCombatBattle, AssignUnitsToRolesEmpty) {
+    std::vector<CombatUnitAI*> units;          // 0 units
+    RoleWeights w{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    crt::Srand(1);
+    CutsceneRng rng; rng.state = 7;
+    AssignUnitsToRoles(units, w, rng);         // no crash, nothing assigned
+    CHECK(units.empty());
+}
+
+// All weights zero: every cumulative threshold fails the `roll <= weights[r]`
+// test, so chosenRole falls through to the last index (5) without reading past
+// the 6-element RoleWeights array.
+TEST(SimCombatBattle, AssignUnitsToRolesAllWeightsZero) {
+    CombatField field;
+    CombatUnit* c0 = field.Spawn(1, 100, 1);
+    CombatUnitAI u0; u0.unit = c0; u0.weaponType = 344; u0.outputRatio = 1.0f;
+                    u0.role = 0;
+    std::vector<CombatUnitAI*> units{&u0};
+    RoleWeights w{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    crt::Srand(1);
+    CutsceneRng rng; rng.state = 7;
+    AssignUnitsToRoles(units, w, rng);
+    CHECK_EQ(static_cast<int>(u0.role), 5);    // last-index fallthrough
 }

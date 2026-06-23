@@ -1,6 +1,8 @@
 #pragma once
 #include "guild/common/types.h"
 
+#include <cstring>
+
 // Heightmap (terrain elevation grid) for the guild::render present/terrain layer
 // (d3_engine.c "d3_sm:" — "smooth map"). Recovered from the raw *(type*)(base+off)
 // access in gilde.exe (the IDB had no named UDTs).
@@ -15,6 +17,22 @@
 // (VIBE_Heightmap_BuildTerrainMesh @0x5c5610 grid-scale setup is translated below;
 // its draw-list walk + raster submission are deferred — see Heightmap_DeriveGridScale).
 namespace guild::render {
+
+namespace detail {
+// Exact float reconstruction from the binary's dword (C++17: memcpy bit-cast).
+inline float F32FromBits(u32 bits) {
+    float f;
+    std::memcpy(&f, &bits, sizeof f);
+    return f;
+}
+} // namespace detail
+
+// flt_628BA8 @0x628BA8 — the BuildTerrainMesh @0x5c5610 height normalization:
+//   scaleY = (maxY - minY) * flt_628BA8        (fmul @0x5c5be6)
+// EXACT dword 0x3B81848E = 0.00395257212f, whose reciprocal is 252.99977
+// (i.e. ~ 1/253.0 — NOT the previously documented "1/252.85"; verified with
+// get_int over the binary).
+inline const float kTerrainScaleYNorm = detail::F32FromBits(0x3B81848Eu);
 
 // ---------------------------------------------------------------------------
 // Heightmap record — gilde.exe "d3_sm:Create" (0x30 = 48 bytes). Recovered from
@@ -93,10 +111,11 @@ void Free(Heightmap* hm);
 // raster submission are DEFERRED (render-coupled); this is the byte-for-byte scale
 // math, which the sampling functions above depend on.
 //   minX/minY/minZ, maxX/maxZ are the world AABB (Y handled by caller);
-//   scaleX = (maxX-minX) / (size + flt_628BA4)         flt_628BA4 = -1.75
-//   scaleY = (maxZ_height - minZ_height) * flt_628BA8   flt_628BA8 = 1/252.85 (~0.003955)
+//   scaleX = (maxX-minX) / (size + flt_628BA4)   flt_628BA4 @0x628BA4 = 0xBFE00000 (-1.75)
+//   scaleY = (maxY - minY) * flt_628BA8          flt_628BA8 @0x628BA8 = 0x3B81848E
+//                                                (= 0.0039525721, ~1/253.0; kTerrainScaleYNorm)
 //   scaleZ = (minZw - maxZw) / (flt_628BA4 + size)
-//   originX = minX; originY = minY + 1.0; originZ = maxZw
+//   originX = minX; originY = minY + 1.0 (@0x5c5b95 fld1; fadd minY); originZ = maxZw
 // (We expose the X/Z derivation, which is self-contained and verifiable.)
 void DeriveGridScaleXZ(Heightmap* hm, float minX, float maxX,
                        float originZ, float minZ);

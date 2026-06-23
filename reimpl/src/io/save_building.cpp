@@ -39,12 +39,13 @@ bool SaveWriteBuildingRecord(VfsHandle* h, const guild::u8* r,
                              const guild::u8* /*parallelRec*/, guild::u32 version) {
     if (!h)
         return false;
-    // The shipping writer always runs at the current version (all gates taken). To
-    // keep old-version round-trips self-consistent we mirror the loader's gates here
-    // (at 0x10045 this is byte-identical to the original's unconditional writes).
-    if (!WRf(h, r, 0, 2) || !WRf(h, r, 2, 0x10) || !WRf(h, r, 20, 4))
-        return false;
-    if (version >= 0x1002C && !WRf(h, r, 40, 4))
+    // gilde.exe 0x5a45bc — the writer is UNCONDITIONAL for every field EXCEPT the
+    // +84..+104 group, which is the only one gated (>=0x10014). The loader (0x5a86d0)
+    // additionally gates +40 (>=0x1002C), +112 (>=0x10015) and +108 (>=0x10018), but
+    // the WRITE side has none of those gates — verified line-for-line against the
+    // disassembly: +0x28(+40), +0x70(+112) and +0x6C(+108) are written with no
+    // dword_649D4C compare. Mirroring the loader gates here would be a deviation.
+    if (!WRf(h, r, 0, 2) || !WRf(h, r, 2, 0x10) || !WRf(h, r, 20, 4) || !WRf(h, r, 40, 4))
         return false;
     if (!WRf(h, r, 28, 4) || !WRf(h, r, 32, 4) || !WRf(h, r, 44, 4) || !WRf(h, r, 48, 4)
         || !WRf(h, r, 52, 4) || !WRf(h, r, 56, 4) || !WRf(h, r, 64, 4) || !WRf(h, r, 68, 4)
@@ -55,11 +56,11 @@ bool SaveWriteBuildingRecord(VfsHandle* h, const guild::u8* r,
             || !WRf(h, r, 96, 4) || !WRf(h, r, 100, 4) || !WRf(h, r, 104, 4))
             return false;
     }
-    if (version >= 0x10015 && !WRf(h, r, 112, 0xE))
+    if (!WRf(h, r, 112, 0xE))
         return false;
     if (!WRf(h, r, 128, 4) || !WRf(h, r, 132, 0x10) || !WRf(h, r, 148, 0xC) || !WRf(h, r, 160, 4))
         return false;
-    if (version >= 0x10018 && !WRf(h, r, 108, 4))
+    if (!WRf(h, r, 108, 4))
         return false;
     return true;
 }

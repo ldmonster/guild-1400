@@ -27,9 +27,11 @@ struct SeqPlatform : shim::IPlatform {
     const Step& at() const { static Step z; if (steps.empty()) return z;
         int i = iter < (int)steps.size() ? iter : (int)steps.size() - 1; return steps[i < 0 ? 0 : i]; }
 };
+// Click the centre of the button on the real (centred + scaled) layout for a
+// 320x240 framebuffer — the same mapping the menu hit-tests against.
 SeqPlatform::Step OnMenuButton(int index, bool left) {
-    SeqPlatform::Step s; s.x = gui::kMainMenuButtonX + 20;
-    s.y = gui::MainMenu_ButtonY(index) + 10; s.left = left; return s;
+    const play::MenuButtonRect r = play::MenuButtonScreenRect(gui::MainMenu_ButtonY(index), 320, 240);
+    SeqPlatform::Step s; s.x = r.x + r.w / 2; s.y = r.y + r.h / 2; s.left = left; return s;
 }
 std::vector<std::pair<std::string,std::string>> Cities() {
     return { {"AUGSBURG","Resources/gamedata/Cities/AUGSBURG.cty"},

@@ -34,6 +34,26 @@ int ButtonRedGfx() {
 } // namespace
 
 // gilde.exe 0x416720 — VIBE_Window_ParseMarkupAndBuild (object-build half).
+//
+// NOT-1:1 (hardening sweep, gui_03): the original is a 1961-instruction, 298-BB
+// monolith with a FULLY INLINED markup state machine (pen globals dword_69FFA8/
+// dword_69FFAC; inline handlers for $R/$L/$B/$Y/$T/$M/$F/$[/$]/$A/$C/$<…) and 23
+// callees including VIBE_Object_AddButtonLabel(0x41b598), VIBE_Object_SetEditText
+// (0x41b75c), VIBE_Input_SetIconTextById(0x40fb4c), VIBE_Window_Resize(0x41a0f8),
+// VIBE_Window_NormalizeSpriteWidths(0x416658), VIBE_Window_LayoutScrollContent
+// (0x41536c). This reconstruction is a STRUCTURAL APPROXIMATION, not a faithful
+// translation. Known divergences vs the binary:
+//   * Depends on guild::gui::text::TokenizeMarkup — no such separable tokenizer
+//     exists in the original; the parse is inlined into 0x416720.
+//   * The $t/$tt Input_AddFieldToWindow params here (8,0x10 / 16,0x82) do NOT
+//     match the three real call sites (0x4176ff, 0x417810, 0x417a25), which
+//     compute field geometry from pen positions and object metrics ([obj+4]>>16,
+//     [obj+2]>>16) and pass different args (window, 1, ebx=0).
+//   * The layout-only tokens ($R/$L/$B/$Y/$T/$M/$F/$</$=/literal text/%-codes)
+//     are stubbed as no-ops; the original mutates pen/columns and blits glyphs.
+// A faithful 1:1 requires reconstructing the inlined parser at 0x416720 together
+// with text/markup.*. Flagged per Rule 8 (do not paper over with an analogue) —
+// left as-is pending a dedicated reconstruction task; see progress/harden/gui_03.md.
 std::vector<MarkupObject> BuildMarkupIntoWindow(
     int winSlot, const char* str, const std::vector<int>& pendingObjectIds) {
 

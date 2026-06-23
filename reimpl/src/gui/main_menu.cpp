@@ -2,10 +2,14 @@
 
 namespace guild::gui {
 
-// gilde.exe 0x529d08 — the eight VIBE_Widget_AddSpriteToWindow(32, Y, 174, label, win)
-// calls in build order.  y = 10, 53, 96, 139, 182, 225, 268, 311.  The label argument
-// (dword_8C98xx) is a runtime-resolved MENU\MAIN_MENU caption handle, summarised here by
-// its functional role.
+// gilde.exe 0x529d08 — the menu buttons, built with VIBE_Widget_AddSpriteToWindow(32, Y,
+// 174, win).  This table is the y -> action MAPPING for the default (non-mission) layout
+// dword_63C7CC == 0; it is NOT the literal build order.  In the binary the build order is
+// y = 10,53,96,139 (NewGame/Load/Multiplayer/GameOptions), then 268,311 (Credits/Quit),
+// then the dword_63C7CC branch appends either {139,182,225} (mission) or {182,225}
+// (GfxOptions/SfxOptions); see main_menu_run.cpp for the faithful build-order model and the
+// full dispatch chain.  Here the rows are sorted by y for the static caption table only.
+// The caption argument is a runtime-resolved MENU\MAIN_MENU handle, summarised by its role.
 const MainMenuButton kMainMenuButtons[kMainMenuButtonCount] = {
     {10,  MainMenuItem::kNewGame,     "New Game"},     // v74 / v79  dword_8C9870
     {53,  MainMenuItem::kLoad,        "Load Game"},    // v75 / v84  dword_8C9854

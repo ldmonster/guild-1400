@@ -156,11 +156,14 @@ static bool TickSlot(OrderSlot& slot, int idx, bool unitAlive, i16 defClass) {
             // !*(v83+8) / completion -> LABEL_190 (Op80 objective sync).
             EmitObjectiveReached(slot, idx);
         } else {
-            i32 outX = slot.tileAux, outZ = slot.tileX;  // *(v4+8),*(v4+9) probe
-            if (!slot.phase && HFindFree(slot.tileAux, slot.tileX, outX, outZ)) {
+            // The original walks via the +32/+36 dwords (`*((_DWORD*)v4+8)` /
+            // `*((_DWORD*)v4+9)`), which are the hitFlag (+32) and predictedDamage
+            // (+36) fields reused as the capture-walk tile pair — NOT tileX/tileAux.
+            i32 outX = slot.hitFlag, outZ = slot.predictedDamage; // *(v4+8),*(v4+9)
+            if (!slot.phase && HFindFree(slot.hitFlag, slot.predictedDamage, outX, outZ)) {
                 slot.phase = 1;
-                slot.tileAux = outX;            // *((_DWORD*)v4+8)=v82[0]
-                slot.tileX   = outZ;            // *((_DWORD*)v4+9)=v76
+                slot.hitFlag         = outX;    // *((_DWORD*)v4+8)=v82[0]
+                slot.predictedDamage = outZ;    // *((_DWORD*)v4+9)=v76
                 HEmit(idx, OrderEmit::Op85Anim);    // anim mode 6
                 HEmit(idx, OrderEmit::Op78Path);
                 slot.packetId = 1;
@@ -180,33 +183,51 @@ static bool TickSlot(OrderSlot& slot, int idx, bool unitAlive, i16 defClass) {
     }
 
     // --- case 6: ware-collect ----------------------------------------------
-    // warePhase (v4[34]) selects the sub-state:
-    //   0 -> phase=1, anim6, free-tile walk Op78;
-    //   1 -> object probe + free-tile -> Op81 ware-save + Op78;
-    //   2 -> within 50 -> anim5 + Op80.
+    // The original (decompile @0x492505) first re-checks the ware object exists
+    // (FindByHandle -> if gone, Op85(6)+Op80 objective sync). Then it branches on
+    // warePhase (v4[34], the hitFlag byte-2 alias) AND the unit-busy flag
+    // (v53 = *(actor+296)). The free-tile / TileToWorld calls use the BYTE tile
+    // fields (u8)v4[32]/(u8)v4[33] — the low two bytes of hitFlag — NOT tileX/tileZ:
+    //   warePhase 1 & !busy: probe ware tile + free-tile -> Op81 + Op78;
+    //   warePhase 2:         within 50 -> Op85(5) + Op80;
+    //   warePhase 0 & busy:  within 50 -> Op85(4) + Op81;
+    //   warePhase 0 & !busy: phase=1, Op85(6), free-tile -> Op78.
     case 6: {
         if (!PacketReady(slot)) return false;
         slot.packetId = -1;
-        const u8 warePhase = slot.WarePhase();  // v4[34]
-        if (warePhase == 0) {
-            slot.phase = 1;                      // v4[12] = 1
-            HEmit(idx, OrderEmit::Op85Anim);     // anim mode 6
-            i32 outX = slot.tileX, outZ = slot.tileZ;  // *(v4[32]),*(v4[33])
-            if (HFindFree(slot.tileX, slot.tileZ, outX, outZ)) {
-                HEmit(idx, OrderEmit::Op78Path);
+        const u8 warePhase = slot.WarePhase();      // v4[34]
+        const bool busy = HBusy(slot.unitId);       // v53 = *(actor+296)
+        const i32 wx = static_cast<i32>(static_cast<u8>(slot.hitFlag));         // (u8)v4[32]
+        const i32 wz = static_cast<i32>(static_cast<u8>(slot.hitFlag >> 8));    // (u8)v4[33]
+        if (warePhase) {
+            if (warePhase == 1) {
+                if (!busy) {
+                    i32 outX = wx, outZ = wz;
+                    if (HFindFree(wx, wz, outX, outZ)) {
+                        HEmit(idx, OrderEmit::Op81Ware); // RequestBuildOp81 ware-save
+                        HEmit(idx, OrderEmit::Op78Path);
+                        slot.packetId = 1;
+                    }
+                }
+            } else if (warePhase == 2) {
+                if (HOnTile(slot, kTolMarch)) {          // within 50
+                    HEmit(idx, OrderEmit::Op85Anim);     // anim mode 5
+                    HEmit(idx, OrderEmit::Op80Sync);
+                    slot.packetId = 1;
+                }
+            }
+        } else if (busy) {                               // warePhase 0 + busy
+            if (HOnTile(slot, kTolMarch)) {              // within 50
+                HEmit(idx, OrderEmit::Op85Anim);         // anim mode 4
+                HEmit(idx, OrderEmit::Op81Ware);
                 slot.packetId = 1;
             }
-        } else if (warePhase == 1) {
-            i32 outX = slot.tileX, outZ = slot.tileZ;
-            if (HFindFree(slot.tileX, slot.tileZ, outX, outZ)) {
-                HEmit(idx, OrderEmit::Op81Ware); // RequestBuildOp81 ware-save
+        } else {                                         // warePhase 0 + idle
+            slot.phase = 1;                              // v4[12] = 1
+            HEmit(idx, OrderEmit::Op85Anim);             // anim mode 6
+            i32 outX = wx, outZ = wz;
+            if (HFindFree(wx, wz, outX, outZ)) {
                 HEmit(idx, OrderEmit::Op78Path);
-                slot.packetId = 1;
-            }
-        } else if (warePhase == 2) {
-            if (HOnTile(slot, kTolMarch)) {       // within 50
-                HEmit(idx, OrderEmit::Op85Anim);  // anim mode 5
-                HEmit(idx, OrderEmit::Op80Sync);
                 slot.packetId = 1;
             }
         }
@@ -286,9 +307,9 @@ int UpdateUnitOrders(std::vector<OrderSlot>& slots, bool globalHalt) {
             break;   // the original returns here
         }
 
-        // unitBusy gate is folded into the per-case bodies in the original; the
-        // abstracted driver lets each case decide. (Query once for fidelity.)
-        (void)HBusy(slot.unitId);
+        // The unit-busy flag (*(actor+296)) is consulted inside the per-case
+        // bodies in the original (only the ware-collect case 6 reads it), so it is
+        // queried there (HBusy), not here.
 
         if (TickSlot(slot, i, info.alive, info.defClass))
             ++worked;

@@ -153,6 +153,79 @@ TEST(RenderSpriteScale, Scaled16ColorKeyTransparent) {
     CHECK_EQ((int)buf[1], 63488); // source R -> written
 }
 
+// =============================================================================
+// WAVE-10 HARDENING — large-scale shift UB + degenerate inputs (ASAN+UBSAN).
+//
+// The RLE scaled blitter computes `phase = (skip >> (phase + 1)) % scale`. Because
+// `phase < scale` and `scale` can be up to 255, `phase + 1` can exceed 31; a bare
+// C++ `u32 >> count` with count >= 32 is UB. The original x86 `shr r/m32, cl`
+// masks the count to 5 bits — so the faithful translation masks `(phase+1) & 31`.
+// These tests drive a large scale with multi-run rows so phase grows large and the
+// masked shift path is exercised under UBSAN (which would trap on the unmasked >>).
+// =============================================================================
+
+// Build a 2-run-per-row RLE shape so `phase` carries across runs into the shift.
+// Layout per row: runCount(u32) then {skip(u32), nPixels(u32), px[nPixels](u16)}.
+static std::vector<u8> MakeTwoRunShape(u16 width, u16 height) {
+    std::vector<u8> s(0x32, 0);
+    std::memcpy(&s[6], &width, 2);
+    std::memcpy(&s[0x0A], &height, 2);
+    s[0x0C] = 1;                              // depth 1 -> RLE path
+    auto putU32 = [&](u32 v) {
+        s.push_back((u8)v); s.push_back((u8)(v >> 8));
+        s.push_back((u8)(v >> 16)); s.push_back((u8)(v >> 24));
+    };
+    auto putU16 = [&](u16 v) { s.push_back((u8)v); s.push_back((u8)(v >> 8)); };
+    for (int row = 0; row < height; ++row) {
+        putU32(2);                            // 2 runs this row
+        // run A: a big skip (forces a large phase via skip>>1 % scale) + 1 pixel
+        putU32(500); putU32(1); putU16(63488);
+        // run B: small skip + 1 pixel (its shift count is the carried large phase+1)
+        putU32(2);   putU32(1); putU16(2016);
+    }
+    return s;
+}
+
+// Large scale (64): phase can reach up to 63, so the second run's shift count
+// (phase+1) reaches 64 — the masked-shift path. Must not trap UBSAN; must clip
+// cleanly and return without OOB on the destination buffer.
+TEST(RenderSpriteScale, HardenLargeScaleShiftNoUB) {
+    auto shape = MakeTwoRunShape(/*width*/200, /*height*/200);
+    u16 buf[64]; std::memset(buf, 0, sizeof(buf));
+    ColorBlitTarget16 dst{8, buf};
+    // Clip tightly so the down-scaled output stays inside the 8x8 buffer.
+    FrameBlitState st = ClipState(0, 8, 0, 8);
+    int rv = ShapeBlitRleScaled(0, 0, shape.data(), dst, /*scale*/64, st);
+    CHECK_EQ(rv, 1);                          // not fully rejected
+    // No assertion on exact pixels (the gold for scale=64 is not the point); the
+    // value here is that ASAN/UBSAN exercise the masked shift + dest writes.
+    CHECK(true);
+}
+
+// An even larger scale (255) with the light-table path, to push phase+1 toward
+// 255 (the worst-case shift count) through the remap arm too.
+TEST(RenderSpriteScale, HardenMaxScaleLightTableNoUB) {
+    auto shape = MakeTwoRunShape(/*width*/255, /*height*/255);
+    std::vector<u16> remap(65536, 0);
+    remap[63488] = 1; remap[2016] = 2;
+    u16 buf[64]; std::memset(buf, 0, sizeof(buf));
+    ColorBlitTarget16 dst{8, buf};
+    FrameBlitState st = ClipState(0, 8, 0, 8);
+    st.remapTable = remap.data();
+    int rv = ShapeBlitRleLightTable(0, 0, shape.data(), dst, /*scale*/255, st);
+    CHECK_EQ(rv, 1);
+    CHECK(true);
+}
+
+// ShowFromBankScaled / ShowFromBank null-bank guards (no deref of a null bank).
+TEST(RenderSpriteScale, HardenNullBankGuards) {
+    ColorBlitTarget16 dst{8, nullptr};
+    FrameBlitState st = ClipState(0, 8, 0, 8);
+    CHECK_EQ(ShapeShowFromBankScaled(0, 0, nullptr, 0, 1, true, false, dst, st), 0);
+    ColorFormat fmt{};
+    CHECK_EQ(ShapeShowFromBank(0, 0, nullptr, 0, dst, fmt, st), 0);
+}
+
 // VIBE_Render_EncodeSpriteDrawFlags leaf.
 TEST(RenderSpriteScale, EncodeSpriteDrawFlags) {
     CHECK_EQ(RenderEncodeSpriteDrawFlags(1, 7), 0);

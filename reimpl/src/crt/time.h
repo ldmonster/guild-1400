@@ -101,9 +101,13 @@ public:
 
     // VIBE_TimeBase_StartTimer @0x44e240 (__usercall, eax = (delayMs@eax, periodic@edx)).
     // Begin the timer with `delayMs` between ticks. `periodic` mirrors the
-    // original's repeat flag (non-zero => keep rescheduling). Returns 1 on
-    // success, 0 if `delayMs` is below the device minimum. The original also
-    // reseeds the RNG from timeGetTime on success; we record the start time.
+    // original's dword_62EB50 mode flag: a2 == 0 passes TIME_PERIODIC to
+    // timeSetEvent (@0x44e28c, fuEvent = (a2 == 0)); a2 != 0 passes
+    // TIME_ONESHOT and fptc re-arms itself each tick (@0x44e209). EITHER WAY
+    // ticking continues until StopTimer. Returns 1 on success, 0 if `delayMs`
+    // is below the device minimum. The original also reseeds the RNG from
+    // timeGetTime on success; we record the start time.
+    // (The app boots with StartTimer(0xE, 0) @0x527e52 — 14 ms, periodic.)
     int StartTimer(u32 delayMs, int periodic);
 
     // VIBE_TimeBase_StopTimer @0x44e2c4.

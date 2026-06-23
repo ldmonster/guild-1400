@@ -92,16 +92,24 @@ inline u8&    Cas7_Delivered(HeRecord* h){ return *reinterpret_cast<u8*>(HeBytes
 //   flt_61F3A8 / flt_61F3AC / flt_61F3B0 — ambush-probability framerate terms.
 //   dbl_61F3B8                           — ambush-probability scale.
 // ===========================================================================
-constexpr double kCartSpeedScale  = 0.25;  // flt_61F244
-constexpr double kCartSpeedFactor = 1.0;   // dbl_61F248
-constexpr double kCartSpeedBase   = 1.0;   // dbl_61F250
-constexpr double kCartBonus309    = 0.5;   // dbl_61F258
-constexpr double kCartBonus310    = 0.5;   // dbl_61F260
-constexpr double kWorkstationMul  = 0.1;   // dbl_61F268
-constexpr double kAmbushBase      = 1.0;   // flt_61F3A8
-constexpr double kAmbushMed       = 0.5;   // flt_61F3AC
-constexpr double kAmbushFast      = 1.0;   // flt_61F3B0
-constexpr double kAmbushScale     = 0.5;   // dbl_61F3B8
+// Byte-verified via get_bytes (gilde.exe .rdata):
+//   flt_61F244 = 0x3c23d70a = 0.01f ; dbl_61F248 = 0x3fe0..   = 0.5
+//   dbl_61F250 = 0x3fecccc.. = 0.9  ; dbl_61F258 = 0x3fd3333. = 0.3
+//   dbl_61F260 = 0xbfd9999. = -0.4  ; dbl_61F268 = 0x3f847ae. = 0.01
+//   flt_61F3A8 = 0x42c80000 = 100.0f; flt_61F3AC = 0xc1200000 = -10.0f
+//   flt_61F3B0 = 0xc1700000 = -15.0f; dbl_61F3B8 = 0x3f847ae. = 0.01
+// float-origin constants are stored as float so promotion to double in the
+// mixed expressions matches the binary's load of a 4-byte .rdata float bit-for-bit.
+constexpr float  kCartSpeedScale  = 0.01f; // flt_61F244 (float)
+constexpr double kCartSpeedFactor = 0.5;   // dbl_61F248
+constexpr double kCartSpeedBase   = 0.9;   // dbl_61F250
+constexpr double kCartBonus309    = 0.3;   // dbl_61F258  (cls==309 path)
+constexpr double kCartBonus310    = -0.4;  // dbl_61F260  (cls==310 path)
+constexpr double kWorkstationMul  = 0.01;  // dbl_61F268
+constexpr float  kAmbushBase      = 100.0f;// flt_61F3A8 (float)
+constexpr float  kAmbushMed       = -10.0f;// flt_61F3AC (float)
+constexpr float  kAmbushFast      = -15.0f;// flt_61F3B0 (float)
+constexpr double kAmbushScale     = 0.01;  // dbl_61F3B8
 
 // ===========================================================================
 // CharActionStep7 cross-cluster leaves. A null member installs an inert default.

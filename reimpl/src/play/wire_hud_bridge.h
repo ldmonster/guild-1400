@@ -80,6 +80,18 @@ const u8* DefaultHudSpriteBank(std::size_t* outSize = nullptr);
 // to the built-in DefaultHudSpriteBank.
 void SetHudSpriteBank(const u8* bank);
 
+// THE GAP IS CLOSED: feed a REAL gilde.gfx SHAPBANK blob (pixel-format 2 / 0)
+// through the REAL conversion chain — render::ShapeBankConvertNew @0x5d80a8 ->
+// render_leaves9 Shape_ConvertToNew @0x5d8080 -> render::ShapeConvertRgbTo16
+// @0x5d7c0c / ShapeConvert8To16 @0x5d7924 (src/render/shape_convert16) -> the
+// real ShapeBankAddShape @0x5d8330 — and make the resulting depth-1 bank the
+// active HUD sprite bank (exactly the lazy convert VIBE_State_Helper @0x40e014
+// runs after d2_LoadObj). Installs the converters into RenderLeaves9Hooks first
+// (rule 13). Returns the converted bank (BRIDGE-OWNED; released on the next
+// call or on nullptr), or nullptr on a degenerate blob. Pass (nullptr, 0) to
+// release the converted bank and revert to the prior SetHudSpriteBank state.
+const u8* SetHudSpriteBankFromGfx(const u8* bankBlob, std::size_t blobSize);
+
 // Blit one shape of the active bank straight into a 16bpp pixel buffer via the
 // REAL render::ShapeShowFromBank leaf (the exact call the installed hook makes).
 // `pixels`/`widthPx` describe the destination 16bpp surface; `fmt` is its colour

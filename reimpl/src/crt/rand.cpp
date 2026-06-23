@@ -8,6 +8,8 @@ namespace {
 u32 g_randState = 1;
 } // namespace
 
+// VIBE_Util_GetRandStatePtr @0x5cb8b0 — off_64A90C() + 12 in the original (the per-thread
+// CRT data block + 12); a single global here (see header note).
 u32* RandStatePtr() {
     return &g_randState;
 }
@@ -23,6 +25,14 @@ int RandNext() {
 
 void Srand(u32 seed) {
     *RandStatePtr() = seed;
+}
+
+// VIBE_Util_RandSeed @0x5cb8e0 — faithful translation (null-guarded, returns ptr).
+u32* RandSeed(u32 seed) {
+    u32* ptr = RandStatePtr();   // 0x5cb8e3: call VIBE_Util_GetRandStatePtr
+    if (ptr)                     // 0x5cb8ea: test eax,eax / jz
+        *ptr = seed;             // 0x5cb8ec: mov [eax], edx
+    return ptr;                  // 0x5cb8ef: return eax
 }
 
 } // namespace guild::crt

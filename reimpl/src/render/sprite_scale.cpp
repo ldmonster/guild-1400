@@ -1,5 +1,6 @@
 #include "render/sprite_scale.h"
 
+#include <cmath>
 #include <cstring>
 
 namespace guild::render {
@@ -115,9 +116,15 @@ static int RleScaledImpl(int x, int y, const u8* shape, const ColorBlitTarget16&
     const int height = GetU16(shape + kHeight);                   // (u16)*(a3+10)
     if (height + y < st.clipY0) return 0;
 
-    const int width = GetU16(shape + kWidth);                     // (u16)*(a3+6)
-    if (x + width / static_cast<int>(scale) > st.clipX1 || x + width < st.clipX0)
-        return 0;
+    // BlitRleScaled (0x5D6A08) performs an X-axis clip against clipX0/clipX1 here;
+    // BlitRleLightTable (0x5D6D74) does NOT — its prologue reads no width and runs
+    // no X-clip (disasm 0x5d6dc6 jumps straight to the Y-clip at 0x5d6de6). Gate the
+    // X-clip on !lightTable to match each binary exactly.
+    if (!lightTable) {
+        const int width = GetU16(shape + kWidth);                 // (u16)*(a3+6)
+        if (x + width / static_cast<int>(scale) > st.clipX1 || x + width < st.clipX0)
+            return 0;
+    }
 
     int rowLimit;                                                 // v16
     if (y + height / scale > st.clipY1)
@@ -138,7 +145,12 @@ static int RleScaledImpl(int x, int y, const u8* shape, const ColorBlitTarget16&
             const u32 skip    = GetU32(runCur);                   // *v23 (>>1 etc.)
             const u32 nPixels = GetU32(runCur + 4);              // v23[1]
             d += (phase + (skip >> 1)) / scale;
-            phase = (skip >> (phase + 1)) % scale;
+            // x86 `shr r/m32, cl` masks the shift count to 5 bits (count & 0x1F).
+            // `phase` < scale (<= 254), so `phase + 1` can exceed 31 for a large
+            // `scale`; a bare C++ `>>` with count >= 32 is UB. Masking to 31 is the
+            // faithful translation of the x86 instruction the binary executes (and is
+            // byte-identical for the common small-scale case where phase+1 < 32).
+            phase = (skip >> ((phase + 1) & 31u)) % scale;
             if ((i % scale) == 0) {
                 const u8* px = runCur + 8;                       // v11 / v15 = v23 + 2 (words)
                 u32 emitted = 0;                                 // v10 / v24
@@ -197,7 +209,8 @@ int ShapeBlitRleLightTable(int x, int y, const u8* shape, const ColorBlitTarget1
 //   // fall-through: recompute the scaled clip extents and return 1.
 int ShapeShowFromBankScaled(int x, int y, const u8* bank, int shapeIndex, u8 scale,
                             bool doScaledBlit, bool lightTable,
-                            const ColorBlitTarget16& dst, FrameBlitState& st) {
+                            const ColorBlitTarget16& dst, FrameBlitState& st,
+                            bool highColorMode) {
     if (!bank) return 0;
 
     const int count = static_cast<i32>(GetU16(bank + 0x2A));     // *(u16*)(bank+42)
@@ -211,20 +224,31 @@ int ShapeShowFromBankScaled(int x, int y, const u8* bank, int shapeIndex, u8 sca
     const u32 shapeOff = GetU32(bank + 4 * static_cast<u8>(shapeIndex) + 0x45);
     const u8* shape = bank + shapeOff;
 
-    // byte_140694B gates the scaled blit path; when clear (the common case) we run it.
-    const int savedStride = st.destStridePx;                     // dword_64A1C8
-    st.destStridePx = dst.widthPx;                               // = *(surface+16)
+    // byte_140694B (highColorMode) gates the scaled blit block (disasm 0x5d8704
+    // `cmp byte_140694B,0 / jnz`). When clear (default) we run the install+dispatch;
+    // when set we fall straight through to the clip-extent recompute below.
+    if (!highColorMode) {
+        const int savedStride = st.destStridePx;                 // dword_64A1C8
+        st.destStridePx = dst.widthPx;                           // = *(surface+16)
 
-    const u8 depth = shape[0x0C];                                // *(u8*)(shape+12)
-    if (!depth) return 0;
-    if (depth <= 1) {
-        if (!doScaledBlit) return 1;
-        if (lightTable)
-            return ShapeBlitRleLightTable(x, y, shape, dst, scale, st);
-        return ShapeBlitRleScaled(x, y, shape, dst, scale, st);
+        const u8 depth = shape[0x0C];                            // *(u8*)(shape+12)
+        if (!depth) return 0;
+        if (depth <= 1) {
+            if (!doScaledBlit) return 1;                         // (a5 & 0x8000000000)==0
+            if (lightTable)
+                return ShapeBlitRleLightTable(x, y, shape, dst, scale, st);
+            return ShapeBlitRleScaled(x, y, shape, dst, scale, st);
+        }
+        if (depth == 2) return 1;
+        st.destStridePx = savedStride;                          // restore (depth > 2)
     }
-    if (depth == 2) return 1;
-    st.destStridePx = savedStride;                              // restore (depth > 2)
+
+    // Fall-through (highColorMode set, or depth > 2): the binary recomputes the
+    // scaled clip extents — HIWORD(dword_64A1A2) = width/scale, word_64A1A6 =
+    // height/scale (0x5d874f/0x5d876d). dword_64A1A2/word_64A1A6 are owned by other
+    // modules (gamelogic_recon's `defaultBorder` et al.) and are not reachable from
+    // this signature; this cross-module state write is left as a BOUNDARY rather than
+    // faked. The return value (1) is unaffected.
     return 1;
 }
 
@@ -234,7 +258,7 @@ int ShapeShowFromBankScaled(int x, int y, const u8* bank, int shapeIndex, u8 sca
 //   test uses `> count` directly (no (u8) cast — index is already a u8 here).
 int ShapeShowFromBank(int x, int y, const u8* bank, int shapeIndex,
                       const ColorBlitTarget16& dst, const ColorFormat& fmt,
-                      FrameBlitState& st) {
+                      FrameBlitState& st, bool highColorMode) {
     if (!bank) return 0;
 
     const int count = static_cast<i32>(GetU16(bank + 0x2A));     // *(u16*)(bank+42)
@@ -246,17 +270,21 @@ int ShapeShowFromBank(int x, int y, const u8* bank, int shapeIndex,
     const u32 shapeOff = GetU32(bank + 4 * shapeIndex + 0x45);
     const u8* shape = bank + shapeOff;
 
-    const int savedStride = st.destStridePx;                     // dword_64A1C8
-    st.destStridePx = dst.widthPx;                               // = *(surface+16)
+    // byte_140694B (highColorMode) gates the block (disasm 0x5d864c `cmp .,0 / jnz`).
+    // When set, the binary returns 1 without installing the stride or blitting.
+    if (!highColorMode) {
+        const int savedStride = st.destStridePx;                 // dword_64A1C8
+        st.destStridePx = dst.widthPx;                           // = *(surface+16)
 
-    const u8 depth = shape[0x0C];                                // *(u8*)(shape+12)
-    if (!depth) return 0;
-    if (depth <= 1) {
-        ShapeBlitColored16(x, y, shape, dst, fmt);               // shape_blit.cpp
-        return 1;
+        const u8 depth = shape[0x0C];                            // *(u8*)(shape+12)
+        if (!depth) return 0;
+        if (depth <= 1) {
+            ShapeBlitColored16(x, y, shape, dst, fmt);           // shape_blit.cpp
+            return 1;
+        }
+        if (depth == 2) return 1;
+        st.destStridePx = savedStride;
     }
-    if (depth == 2) return 1;
-    st.destStridePx = savedStride;
     return 1;
 }
 
@@ -265,6 +293,176 @@ int RenderEncodeSpriteDrawFlags(int mode, int value) {
     if (mode == 1)
         return 0;
     return (value << 22) | 0x8000000;
+}
+
+// =============================================================================
+// gilde.exe 0x5AC970 — VIBE_Particle_UpdateBillboards (vertex projection arm).
+//
+//   verts come from the node's billboard set; the original strides 0x50 bytes
+//   per record and tests bit7 of +0x4C (signed-byte < 0). Three arms:
+//     byte_649D70 && byte_649DD8  -> project + depth fade (alpha @+0x4F)  [0x5AC9A4]
+//     byte_649D70 && !byte_649DD8 -> project, NO fade                     [0x5ACB4F]
+//     !byte_649D70                -> project + byteOut(+0x42), skip dead   [0x5ACC0B]
+//   The first two strictly skip records whose bit7 is clear; the third uses a
+//   while-loop that advances over dead records first (same observable effect).
+// =============================================================================
+
+namespace {
+// VIBE_Coord_ConvertX @0x5C6B08 sets the x87 rounding mode to truncate-toward-
+// zero (control word RC field) and frndint's. With that mode `fistp` truncates
+// toward zero — i.e. C's float->int conversion. The result is stored as a byte
+// (mov al, ...), so only the low 8 bits survive.
+inline u8 TruncToByte(double v) { return static_cast<u8>(static_cast<i32>(v)); }
+} // namespace
+
+void ProjectBillboardVertices(BillboardVertex* verts, unsigned vertCount,
+                              const BillboardParams& p) {
+    if (p.enabled) {
+        if (p.depthFade) {
+            // ---- 0x5AC9A4: project + depth fade ----
+            for (unsigned i = 0; i < vertCount; ++i) {
+                BillboardVertex& v = verts[i];
+                if (!(v.flags() & 0x80)) continue;               // test [edx+4Ch],80h
+
+                const float cx = v.cx(), cy = v.cy(), cz = v.cz();
+                const float invZ = 1.0f / cz;                    // fld1; fdiv [edx+8]
+                // distSq = cx*cx + cy*cy + cz*cz  (stored to flt_13FC548)
+                const float distSq = cy * cy + cx * cx + cz * cz;
+                v.invZ() = invZ;                                 // [edx+1Ch]
+                v.colorOut() = v.colorSrc();                     // [edx+40h] = [edx+44h]
+                // screenX = projScaleX*cx*invZ + centerX ; screenY likewise
+                v.screenX() = p.projScaleX * cx * invZ + p.centerX;  // [edx+10h]
+                v.screenY() = p.projScaleY * cy * invZ + p.centerY;  // [edx+14h]
+
+                double alpha;
+                if (distSq <= p.fadeMinSq) {                     // fcomp flt_13FC544; jbe
+                    alpha = 255.0;
+                } else {
+                    double t = (std::sqrt(static_cast<double>(distSq))
+                                - p.fadeNear) * p.fadeScale;     // (sqrt-near)*scale
+                    // min(255.0, t): the original clamps t up to 255 before the
+                    // 255 - t. (dbl_628074 = 255.0; jnb keeps t, else t = 255.)
+                    if (t > 255.0) t = 255.0;                    // 406FE000h = 255.0
+                    alpha = 255.0 - t;                           // dbl_628074 - clamp
+                }
+                v.alphaOut() = TruncToByte(alpha);              // [edx+4Fh]
+            }
+        } else {
+            // ---- 0x5ACB4F: project, NO fade ----
+            for (unsigned i = 0; i < vertCount; ++i) {
+                BillboardVertex& v = verts[i];
+                if (!(v.flags() & 0x80)) continue;
+
+                const float cx = v.cx(), cy = v.cy();
+                const float invZ = 1.0f / v.cz();
+                v.invZ() = invZ;
+                v.colorOut() = v.colorSrc();
+                v.screenX() = p.projScaleX * cx * invZ + p.centerX;
+                v.screenY() = p.projScaleY * cy * invZ + p.centerY;
+            }
+        }
+        return;
+    }
+
+    // ---- 0x5ACC0B: billboards globally disabled — project + byteOut, skip dead ----
+    for (unsigned i = 0; i < vertCount; ++i) {
+        BillboardVertex& v = verts[i];
+        if (!(v.flags() & 0x80)) continue;                       // jnz keeps live ones
+
+        const float cx = v.cx(), cy = v.cy();
+        const float invZ = 1.0f / v.cz();
+        v.byteOut() = static_cast<u8>(v.byteSrc() >> 2);        // [edx+42h] = [edx+46h]>>2
+        v.invZ() = invZ;
+        v.screenX() = p.projScaleX * cx * invZ + p.centerX;
+        v.screenY() = p.projScaleY * cy * invZ + p.centerY;
+    }
+}
+
+// =============================================================================
+// gilde.exe 0x5ACAB0 — VIBE_Particle_UpdateBillboards (node-level effect-tint arm).
+//
+//   Runs on the billboards-enabled branch (byte_649D70), AFTER both project arms
+//   and BEFORE the quad visibility pass, gated on the node type byte +0x215:
+//
+//     al = *(a1+0x215);
+//     if (al < 5)  goto quad-pass;               // jl loc_5ACAE0 — no tint
+//     if (al == 8) esi = 0x1F1FFF;               // mov esi, 1F1FFFh
+//     else { ... pack esi from the node tint floats ... }   // loc_5ACBBC
+//     // broadcast loop (loc_5ACAC7):
+//     eax = *(a1+0x1CC);  eax = *eax;            // verts base = *v2
+//     for (edx = 0; edx < count; ++edx) {
+//         eax += 0x50;  *(eax-0x10) = esi;       // vertex[i] + 0x40 = packed tint
+//     }
+//
+//   The packing block (loc_5ACBBC) reads three floats and narrows each to a byte
+//   with VIBE_Coord_ConvertX (x87 frndint truncate-toward-zero) then fistp + an
+//   8-bit move:
+//     R = (u8)trunc(*(a1+0x5C))   ->  shl 16
+//     G = (u8)trunc(*(a1+0x60))   ->  shl 8
+//     B = (u8)trunc(*(a1+0x64))
+//     esi = (R<<16) | (G<<8) | B
+//   (Stack trace: fld f60, fld f5C, ConvertX, fxch, ConvertX, fxch, fistp(f5C)->al
+//    ->dl, fistp(f60)->al; edx = dl<<16 | (al&0xFF)<<8; fld f64, ConvertX, fistp,
+//    esi = (al&0xFF) | edx.)  The constant 0x1F1FFF decodes the same way:
+//    R=0x1F, G=0x1F, B=0xFF.
+// =============================================================================
+
+bool BillboardEffectTintColor(u8 nodeType, float tintR, float tintG, float tintB,
+                              u32& outColor) {
+    if (nodeType < 5) return false;                 // cmp al,5; jl loc_5ACAE0
+    if (nodeType == 8) {                             // cmp al,8; jnz loc_5ACBBC
+        outColor = 0x1F1FFFu;                        // mov esi, 1F1FFFh
+        return true;
+    }
+    // loc_5ACBBC: pack from the three node tint floats (R=+0x5C, G=+0x60, B=+0x64).
+    const u32 r = TruncToByte(static_cast<double>(tintR));   // (u8)trunc, then <<16
+    const u32 g = TruncToByte(static_cast<double>(tintG));   // (u8)trunc, then <<8
+    const u32 b = TruncToByte(static_cast<double>(tintB));   // (u8)trunc, low byte
+    outColor = (r << 16) | (g << 8) | b;            // or edx,eax / or esi,edx
+    return true;
+}
+
+void BillboardApplyEffectTint(BillboardVertex* verts, unsigned vertCount,
+                              u8 nodeType, float tintR, float tintG, float tintB) {
+    u32 packed = 0;
+    if (!BillboardEffectTintColor(nodeType, tintR, tintG, tintB, packed))
+        return;                                     // nodeType < 5 -> no broadcast
+    // loc_5ACAC7: broadcast into every vertex's colorOut (+0x40); the loop is
+    // unconditional over the count (no per-vertex live-bit test, unlike project).
+    for (unsigned i = 0; i < vertCount; ++i)
+        verts[i].colorOut() = packed;               // mov [eax-10h], esi
+}
+
+// gilde.exe 0x5ACAE0 — per-quad back-face / visibility pass.
+void BillboardQuadVisibilityPass(BillboardQuad* quads, unsigned quadCount) {
+    for (unsigned i = 0; i < quadCount; ++i) {
+        BillboardQuad& q = quads[i];
+        const u8 f = q.flags;                                    // [edx+24h]
+        if (!(f & 0x80)) continue;                               // signed < 0 test
+
+        if (f & 0x10) {                                          // bit4: force-keep
+            q.flags = static_cast<u8>(f | 0x40);                 // set bit6
+            continue;
+        }
+        // Projected winding test (0x5ACC92). The binary loads the screen coords as
+        // floats but keeps the two subtractions AND products on the x87 stack in
+        // 80-bit precision, comparing them with `fcompp` (no intermediate store to a
+        // 32-bit float). Model the products in `double` so the comparison is not
+        // perturbed by an intermediate round-to-float. eax=v0, edi=v1, esi=v2:
+        //   product1 = (v0.sx - v1.sx)*(v0.sy - v2.sy)   [== rhs below]
+        //   product2 = (v0.sx - v2.sx)*(v0.sy - v1.sy)   [== lhs below]
+        // `fcompp; jbe` skips the cull when product2 <= product1, so cull happens
+        // when product2 > product1, i.e. when `lhs > rhs` here.
+        BillboardVertex* v0 = q.v0;
+        BillboardVertex* v1 = q.v1;
+        BillboardVertex* v2 = q.v2;
+        const double lhs = (double(v0->screenX_c()) - double(v2->screenX_c()))
+                         * (double(v0->screenY_c()) - double(v1->screenY_c()));
+        const double rhs = (double(v0->screenX_c()) - double(v1->screenX_c()))
+                         * (double(v0->screenY_c()) - double(v2->screenY_c()));
+        if (lhs > rhs && (q.flags2 & 0x04) == 0)                 // [edx+26h] bit2
+            q.flags = static_cast<u8>(f & 0x7F);                 // clear bit7
+    }
 }
 
 } // namespace guild::render

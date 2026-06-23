@@ -61,8 +61,10 @@ std::vector<u8> makeRecord(int stride, uint16_t x, uint16_t y, uint16_t w,
     putU16(rec, 204, static_cast<uint16_t>(objs.size()));
     for (size_t o = 0; o < objs.size(); ++o) {
         const ObjSpec& s = objs[o];
-        putU32(rec, 208 + 8 * static_cast<int>(o), static_cast<uint32_t>(s.type));
-        putU32(rec, 3472 + 8 * static_cast<int>(o), static_cast<uint32_t>(s.aux));
+        // Per-object strides recovered from the binary (0x41c4d6): type/aux base
+        // increments by 4 (`add esi,4`), NOT 8. type @+208+4o ; aux @+3472+4o.
+        putU32(rec, 208 + 4 * static_cast<int>(o), static_cast<uint32_t>(s.type));
+        putU32(rec, 3472 + 4 * static_cast<int>(o), static_cast<uint32_t>(s.aux));
         // x = (dword@10+2o) >> 16 == word@(12+2o); y = (dword@106+2o)>>16 == word@(108+2o).
         // The per-object x/y are a packed 16-bit array (stride 2; consecutive dwords
         // overlap by 2 bytes) — store the HIGH word directly.
@@ -165,8 +167,10 @@ TEST(GuiFormParse, BuildsObjectsByType) {
     CHECK(w.objects[3].widgetIdx >= 0);
     CHECK_EQ(w.objects[4].widgetIdx, -1);
 
-    // Inert object -> no widget.
-    CHECK_EQ(w.objects[5].widgetIdx, -1);
+    // "Inert" object: the binary's dispatch is `if (type < 64) Object_AddToWindow`
+    // (0x41c3ea), so type 0 (< 64) DOES build a widget via Object_AddToWindow — it is
+    // NOT skipped. (Verified against gilde.exe 0x41beb8.)
+    CHECK(w.objects[5].widgetIdx >= 0);
 
     // Widget x/y are window-relative + window origin (window at 0,0 here so == obj).
     CHECK_EQ(static_cast<int>(g_widgets[w.objects[0].widgetIdx].x()), 10);
@@ -231,4 +235,138 @@ TEST(GuiFormParse, RejectsShortAndTruncatedBuffers) {
     hdr[4] = 4;
     FormFile b = Form_ParseResourceFile(hdr.data(), hdr.size(), "trunc");
     CHECK(!b.ok);
+}
+
+// ===== Wave-11 hardening: malformed/oversized .form inputs (ASAN/UBSAN) ===============
+// These drive the FRM2 parser with adversarial fields and must NOT read/write out of
+// bounds. The fixes keep the valid-asset path byte-identical (proven by the real-forms
+// e2e); here we exercise the guards on degenerate input.
+
+TEST(GuiFormParseHarden, EmptyAndOneByteBuffers) {
+    ResetGuiState();
+    FormFile z = Form_ParseResourceFile(nullptr, 0, "empty");
+    CHECK(!z.ok);
+    u8 one = 'F';
+    FormFile o = Form_ParseResourceFile(&one, 1, "one");
+    CHECK(!o.ok);
+    CHECK_EQ(Form_SniffFormat(&one, 1), -1);
+}
+
+TEST(GuiFormParseHarden, TruncatedMidRecord) {
+    ResetGuiState();
+    // Declare one FRM2 window record but supply only half its bytes.
+    auto rec = makeRecord(kFrm2RecordStride, 0, 0, 100, 100, 0, 0, 3792, {});
+    auto file = makeFrm2({rec});
+    file.resize(8 + kFrm2RecordStride / 2); // chop the record in half
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "halfrec");
+    CHECK(!f.ok); // short-buffer guard rejects before any record read
+}
+
+TEST(GuiFormParseHarden, ObjectCountTooLargeIsClampedNotOOB) {
+    ResetGuiState();
+    // A record that declares an absurd object count (0xFFFF). The per-object arrays
+    // physically end inside the 4124-byte record; the parser must clamp the count so
+    // every per-object read (type/aux/x/y/name) stays inside the record — no OOB read
+    // into the (here absent) next record or past the buffer.
+    auto rec = makeRecord(kFrm2RecordStride, 0, 0, 200, 200, 0x10, 0, 3792, {});
+    putU16(rec, 204, 0xFFFF); // objectCount = 65535
+    auto file = makeFrm2({rec});
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "manyobj");
+    CHECK(f.ok);
+    CHECK_EQ(f.windows.size(), static_cast<size_t>(1));
+    // Clamped to what the record layout can hold (well under 65535).
+    CHECK(f.windows[0].objects.size() < 64u);
+}
+
+TEST(GuiFormParseHarden, ObjectCountTooLargeOnLastRecordNoBufferOverrun) {
+    ResetGuiState();
+    // Two records; the LAST one declares a huge object count. Without the clamp the
+    // per-object name read (+400+64*o) would run off the end of `data`. ASAN catches it.
+    auto r0 = makeRecord(kFrm2RecordStride, 0, 0, 100, 100, 0x10, 0, 3792, {});
+    auto r1 = makeRecord(kFrm2RecordStride, 0, 0, 100, 100, 0x10, 0, 3792, {});
+    putU16(r1, 204, 0x7FFF);
+    auto file = makeFrm2({r0, r1});
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "lastbig");
+    CHECK(f.ok);
+    CHECK_EQ(f.windows.size(), static_cast<size_t>(2));
+}
+
+TEST(GuiFormParseHarden, OutOfRangeParentIndex) {
+    ResetGuiState();
+    // A child window declaring a parentIndex far past the window-id table (dw[1..96]).
+    // The parser must not index g_forms[].dw out of bounds; it fails the window safely.
+    auto root  = makeRecord(kFrm2RecordStride, 0, 0, 300, 300, 0x11, 0, 3792, {});
+    auto child = makeRecord(kFrm2RecordStride, 10, 10, 80, 60, 0x10, /*parent*/ 9999, 3792, {});
+    auto file  = makeFrm2({root, child});
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "badparent");
+    CHECK(f.ok);
+    CHECK_EQ(f.windows.size(), static_cast<size_t>(2));
+    // The out-of-range parent yields no live child window (winSlot < 0).
+    CHECK_EQ(f.windows[1].windowSlot, -1);
+}
+
+TEST(GuiFormParseHarden, NegativeParentIndex) {
+    ResetGuiState();
+    auto root  = makeRecord(kFrm2RecordStride, 0, 0, 300, 300, 0x11, 0, 3792, {});
+    auto child = makeRecord(kFrm2RecordStride, 10, 10, 80, 60, 0x10, /*parent*/ -5, 3792, {});
+    auto file  = makeFrm2({root, child});
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "negparent");
+    CHECK(f.ok);
+    CHECK_EQ(f.windows[1].windowSlot, -1); // negative parent -> safe no-build
+}
+
+TEST(GuiFormParseHarden, ParentIndexResolvesToGarbageSlot) {
+    ResetGuiState();
+    // In-range parentIndex, but the form's window-id table slot it points at was never
+    // filled (stale id). The resolved slot must be range-checked against g_windows[].
+    auto child = makeRecord(kFrm2RecordStride, 10, 10, 80, 60, 0x10, /*parent*/ 50, 3792, {});
+    auto file  = makeFrm2({child}); // single record, but it names parent slot 50
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "staleparent");
+    CHECK(f.ok);
+    CHECK_EQ(f.windows[0].windowSlot, -1); // garbage parent slot -> safe no-build
+}
+
+TEST(GuiFormParseHarden, NulLessCaptionDoesNotOverread) {
+    ResetGuiState();
+    // Fill the font/text name slots with non-NUL bytes for their full 64-byte capacity.
+    // rd_str must stop at the 64-byte cap and not run into the next field.
+    auto rec = makeRecord(kFrm2RecordStride, 0, 0, 100, 100, 0, 0, 3792, {});
+    for (int i = 0; i < 64; ++i) { rec[3728 + i] = 'A'; rec[3664 + i] = 'B'; }
+    auto file = makeFrm2({rec});
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "nulless");
+    CHECK(f.ok);
+    CHECK_EQ(f.windows[0].fontName.size(), static_cast<size_t>(64));   // capped, no overread
+    CHECK_EQ(f.windows[0].windowText.size(), static_cast<size_t>(64));
+}
+
+TEST(GuiFormParseHarden, WindowCountExceedsTableNoOOB) {
+    ResetGuiState();
+    // Declare more windows than the 96-slot window-id table holds. Window_Create caps at
+    // 96 (returns -1 after); the form window-id table write (dw[1+wi]) must be guarded so
+    // wi >= 96 cannot overwrite dw[97] (the window-count) or run off the 171-dword Form.
+    const int n = 120;
+    std::vector<std::vector<u8>> recs;
+    for (int i = 0; i < n; ++i)
+        recs.push_back(makeRecord(kFrm2RecordStride, 0, 0, 50, 50, 0, 0, 3792, {}));
+    auto file = makeFrm2(recs);
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "toomanywin");
+    CHECK(f.ok);
+    CHECK_EQ(f.windows.size(), static_cast<size_t>(n));
+    // The form-id marker (dw[0]) and valid flag (dw[100]) survive intact.
+    CHECK_EQ(g_forms[f.formId].dw[0], f.formId);
+    CHECK_EQ(g_forms[f.formId].valid(), 1);
+}
+
+TEST(GuiFormParseHarden, SliderObjectHighIndexByteReadGuarded) {
+    ResetGuiState();
+    // A slider object near the top of the object array, where the +3868+8*o range byte
+    // would exceed the record stride. The guarded read must default to 0, not run off.
+    std::vector<ObjSpec> objs;
+    for (int i = 0; i < 40; ++i)
+        objs.push_back({kFormObjInert, 0, 0, 0, ""});
+    objs.push_back({kFormObjSlider, 0x10, 5, 5, "_SLIDER"}); // index 40: 3868+320=4188>4124
+    auto rec = makeRecord(kFrm2RecordStride, 0, 0, 200, 200, 0x10, 0, 3792, objs);
+    auto file = makeFrm2({rec});
+    FormFile f = Form_ParseResourceFile(file.data(), file.size(), "slider");
+    CHECK(f.ok); // no OOB; clamp/guard keep all reads in-bounds
 }

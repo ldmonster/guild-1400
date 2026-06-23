@@ -33,9 +33,9 @@ i32 SpyParse(const char*) { return g_lastParse; }
 int g_applyCalls = 0; u8 g_applyLaw = 0; i32 g_applyVal = 0;
 void SpyApply(int, u8 law, i32 v) { ++g_applyCalls; g_applyLaw = law; g_applyVal = v; }
 
-DebugCmdHooks::GesetzRecord g_rec;
+Apply11CmdHooks::GesetzRecord g_rec;
 int g_getRet = 1;
-int SpyGet(u8, DebugCmdHooks::GesetzRecord* out) { if (out) *out = g_rec; return g_getRet; }
+int SpyGet(u8, Apply11CmdHooks::GesetzRecord* out) { if (out) *out = g_rec; return g_getRet; }
 
 } // namespace
 
@@ -94,7 +94,7 @@ TEST(CmdApply11Emit, SpawnSelectedGateRejectsNonNeg) {
     CommandQueue q; q.Init();
     PendingState pending;
     DebugCmdCtx c = MakeCtx();
-    DebugCmdHooks h{}; g_lastParse = 0; h.parseInt = SpyParse; SetDebugCmdHooks(h);
+    Apply11CmdHooks h{}; g_lastParse = 0; h.parseInt = SpyParse; SetApply11CmdHooks(h);
 
     // parseInt returns 0 -> no packet, but returns 1.
     i32 r = QueueSpawnSelected(q, pending, c, "-0");
@@ -106,7 +106,7 @@ TEST(CmdApply11Emit, SpawnSelectedGateRejectsNonNeg) {
     CHECK_EQ(r, 1);
     CHECK_EQ(q.send_count(), 1u);
     CHECK_EQ(q.ring_slot(1).opcode(), 28);
-    SetDebugCmdHooks(DebugCmdHooks{});  // reset to inert
+    SetApply11CmdHooks(Apply11CmdHooks{});  // reset to inert
 }
 
 TEST(CmdApply11Emit, SpawnSelectedRejectsNonDash) {
@@ -121,7 +121,7 @@ TEST(CmdApply11Emit, SpawnSelectedRejectsNonDash) {
 TEST(CmdApply11B, AdjustSelectedStatSignSwap) {
     CommandQueue q; q.Init();
     DebugCmdCtx c;
-    DebugCmdHooks h{}; g_lastParse = 42; h.parseInt = SpyParse; SetDebugCmdHooks(h);
+    Apply11CmdHooks h{}; g_lastParse = 42; h.parseInt = SpyParse; SetApply11CmdHooks(h);
 
     // PLUS slot: from = person (selBase), to = -1.
     i32 r = QueueAdjustSelectedStat(q, c, /*selBase*/0x77, /*a2*/0, "-PLUS_42");
@@ -139,7 +139,7 @@ TEST(CmdApply11B, AdjustSelectedStatSignSwap) {
     CommandPacket& p2 = q.ring_slot(2);
     CHECK_EQ(p2.get32(0x10), 0xFFFFFFFFu);      // from = -1
     CHECK_EQ(p2.get32(0x14), 0x77u);            // to = person
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 TEST(CmdApply11B, AdjustSelectedStatGate) {
@@ -156,7 +156,7 @@ TEST(CmdApply11B, AdjustSelectedStatGate) {
 TEST(CmdApply11B, BuildingStatNonPositiveNoEmit) {
     CommandQueue q; q.Init();
     DebugCmdCtx c;
-    DebugCmdHooks h{}; g_lastParse = 0; h.parseInt = SpyParse; SetDebugCmdHooks(h);
+    Apply11CmdHooks h{}; g_lastParse = 0; h.parseInt = SpyParse; SetApply11CmdHooks(h);
     // parsed value <= 0 -> returns 1 with no packet.
     CHECK_EQ(QueueAdjustBuildingStat(q, c, "-PLUS_0"), 1);
     CHECK_EQ(q.send_count(), 0u);
@@ -164,16 +164,16 @@ TEST(CmdApply11B, BuildingStatNonPositiveNoEmit) {
     CHECK_EQ(QueueAdjustBuildingStat(q, c, "-PLUS_9"), 1);
     CHECK_EQ(q.send_count(), 1u);
     CHECK_EQ(q.ring_slot(1).opcode(), 16);
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 // --- (B) Justice severity clamp logic (the load-bearing reconstructed part) --
 
 TEST(CmdApply11Justice, SetClampsIntoRange) {
     DebugCmdCtx c;
-    DebugCmdHooks h{};
+    Apply11CmdHooks h{};
     h.parseInt = SpyParse; h.gesetzGetRecord = SpyGet; h.gesetzRequestApply = SpyApply;
-    SetDebugCmdHooks(h);
+    SetApply11CmdHooks(h);
     g_rec = {0, 10, 20}; g_getRet = 1;             // applyFlag 0 (no out-of-range reject)
 
     g_lastParse = 25; g_applyCalls = 0;
@@ -189,37 +189,37 @@ TEST(CmdApply11Justice, SetClampsIntoRange) {
     g_lastParse = 15; g_applyCalls = 0;
     QueueSetJusticeSeverity(c, 3, "-RECHTSPRECHUNG_HAERTE_15");
     CHECK_EQ(g_applyVal, 15);                        // in range, unchanged
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 TEST(CmdApply11Justice, SetRejectsOutOfRangeWithFlag) {
     DebugCmdCtx c;
-    DebugCmdHooks h{};
+    Apply11CmdHooks h{};
     h.parseInt = SpyParse; h.gesetzGetRecord = SpyGet; h.gesetzRequestApply = SpyApply;
-    SetDebugCmdHooks(h);
+    SetApply11CmdHooks(h);
     g_rec = {1, 10, 20}; g_getRet = 1;              // applyFlag set -> reject OOR
     g_lastParse = 25; g_applyCalls = 0;
     CHECK_EQ(QueueSetJusticeSeverity(c, 3, "-RECHTSPRECHUNG_HAERTE_25"), 0);
     CHECK_EQ(g_applyCalls, 0);
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 TEST(CmdApply11Justice, SetRejectsWhenNoRecord) {
     DebugCmdCtx c;
-    DebugCmdHooks h{};
+    Apply11CmdHooks h{};
     h.parseInt = SpyParse; h.gesetzGetRecord = SpyGet; h.gesetzRequestApply = SpyApply;
-    SetDebugCmdHooks(h);
+    SetApply11CmdHooks(h);
     g_getRet = 0; g_lastParse = 15; g_applyCalls = 0;
     CHECK_EQ(QueueSetJusticeSeverity(c, 3, "-RECHTSPRECHUNG_HAERTE_15"), 0);
     CHECK_EQ(g_applyCalls, 0);
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 TEST(CmdApply11Justice, AdjustSignedDeltaClamped) {
     DebugCmdCtx c;
-    DebugCmdHooks h{};
+    Apply11CmdHooks h{};
     h.parseInt = SpyParse; h.gesetzGetRecord = SpyGet; h.gesetzRequestApply = SpyApply;
-    SetDebugCmdHooks(h);
+    SetApply11CmdHooks(h);
     g_rec = {0, 0, 100}; g_getRet = 1;
     // PLUS: value = 0(curr) + (+1)*30 = 30, in [0,100].
     g_lastParse = 30; g_applyCalls = 0;
@@ -229,5 +229,5 @@ TEST(CmdApply11Justice, AdjustSignedDeltaClamped) {
     g_lastParse = 30; g_applyCalls = 0;
     QueueAdjustJusticeSeverity(c, 7, "-MINUS_RECHTSPRECHUNG_HAERTE_30");
     CHECK_EQ(g_applyVal, 0);
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }

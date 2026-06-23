@@ -106,7 +106,7 @@ TEST(HudMenu2_Slider, PanelLayout) {
     if (r.labelId >= 0 && r.labelId < (int)w.size()) {
         CHECK_EQ((int)w[r.labelId].x(), 200 - 19);
         CHECK_EQ((int)w[r.labelId].y(), 40 + 25);
-        CHECK_EQ((int)w[r.labelId].editFlags(), 67);
+        CHECK_EQ((int)w[r.labelId].at<i16>(112), 67); // 0x4bd564 writes +112 (text color)
         CHECK_EQ((int)w[r.labelId].at<i32>(88), 1);
         CHECK_EQ((int)w[r.labelId].at<i16>(20), 48);
     }
@@ -194,7 +194,9 @@ TEST(HudMenu2_DragSlots, ResetTable) {
     DragSlotTables t;
     PlayerBar_ResetDragSlots(t);
     int touched = 0;
-    for (int i = 0; i < kDragSlotLoopEnd; i += kDragSlotStep) {
+    // 0x4b1d17: the `i += 10` runs at the top of the body, so the writes land on
+    // i = 10, 20, ..., 320 (slot 0 is NOT reset; slot 320 IS).
+    for (int i = kDragSlotStep; i <= kDragSlotLoopEnd; i += kDragSlotStep) {
         CHECK_EQ(t.t6F8[i], -1);
         CHECK_EQ(t.t700[i], -1);
         CHECK_EQ(t.t704[i], -1);
@@ -204,8 +206,9 @@ TEST(HudMenu2_DragSlots, ResetTable) {
         CHECK_EQ(t.b714[i], 0);
         ++touched;
     }
-    CHECK_EQ(touched, 32);          // 320 / 10
-    // entries between strides remain untouched (0)
+    CHECK_EQ(touched, 32);          // indices 10..320 step 10
+    // slot 0 is never reset by the loop (stays 0), and entries between strides too.
+    CHECK_EQ(t.t6F8[0], 0);
     CHECK_EQ(t.t6F8[1], 0);
     CHECK_EQ(t.t708[5], 0);
 }

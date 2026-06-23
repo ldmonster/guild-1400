@@ -38,7 +38,9 @@ inline constexpr u16 kPlayerBarFree  = 0xFFFF; // empty slot marker (objId field
 //   icon button x/y : x=6,  y=78*i        (1403 icon)
 //   icon sprite x/y : x=8,  y=78*i + 17
 //   name label  x/y : x=0,  y=78*i + 4    (width 95)
-//   sub-window  x/y : x=15, y=78*i + 63   (w=80, h=6) for output-bar buildings
+//   sub-window  x/y : x=6,  y=78*i + 63   (w=15, h=80) for output-bar buildings
+// AddChildWindow(a1@ax=x, a2@dx=y, a3@cx=w, a4@bx=h): the body calls
+// AddChildWindow(6, 78*v45 + 63, 15, 80, 0, win) -> x=6, y=78*i+63, w=15, h=80.
 inline constexpr int kPlayerBarRowPitch    = 78;
 inline constexpr int kPlayerBarIconX       = 6;
 inline constexpr int kPlayerBarSpriteX     = 8;
@@ -46,10 +48,10 @@ inline constexpr int kPlayerBarSpriteDY    = 17;
 inline constexpr int kPlayerBarLabelX      = 0;
 inline constexpr int kPlayerBarLabelDY     = 4;
 inline constexpr int kPlayerBarLabelWidth  = 95;
-inline constexpr int kPlayerBarSubWinX     = 15;
+inline constexpr int kPlayerBarSubWinX     = 6;
 inline constexpr int kPlayerBarSubWinDY    = 63;
-inline constexpr int kPlayerBarSubWinW     = 80;
-inline constexpr int kPlayerBarSubWinH     = 6;
+inline constexpr int kPlayerBarSubWinW     = 15;
+inline constexpr int kPlayerBarSubWinH     = 80;
 
 // Output-ratio percentage scale (dbl_61DD00 = 100.0): pct = (int)(ratio * 100.0).
 inline constexpr double kOutputRatioScale = 100.0;

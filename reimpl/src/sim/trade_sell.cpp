@@ -34,6 +34,18 @@ void TradeEmit(const TradeCommand& cmd) {
         g_cmdHook(cmd);
 }
 
+// ---------------------------------------------------------------------------
+// Storage-node phase backend (0x496b90 node mutations).  Inert base instance by
+// default; WireBuildingCallers() (buildingtype_callers.cpp) installs the 1:1
+// phases (SellStoragePhase1to1).
+// ---------------------------------------------------------------------------
+static SellStoragePhase g_inertStoragePhase;
+static SellStoragePhase* g_storagePhase = &g_inertStoragePhase;
+void TradeSetStoragePhase(SellStoragePhase* phase) {
+    g_storagePhase = phase ? phase : &g_inertStoragePhase;
+}
+SellStoragePhase* TradeStoragePhase() { return g_storagePhase; }
+
 // trunc-to-zero (x86 cvttsd2si / (int)double): matches Coord_ConvertX's fixup.
 static i32 TruncToInt(double v) { return static_cast<i32>(v); }
 
@@ -120,6 +132,19 @@ i32 TradeSellObjektResolve(SellResolve& r, bool commit) {
         rem.proto = r.proto;
         TradeEmit(rem);
 
+        // 0x496ec2..0x496f47: source stock-node decrement + depleted-node
+        // removal.  The original rejects (return 1) AFTER the source count has
+        // already been decremented — no rollback; mirrored here by returning 0
+        // after the kRemoveSource emit.
+        if (!g_storagePhase->SourcePhase(r, qty))
+            return 0;
+
+        // 0x496f4b..0x4974ce + LABEL_58: dest stock-node ensure / increment
+        // (storage-room alloc through Building_AllocStorageRoom when the dest
+        // object type is 2/6) + the dword_631290 latch.
+        if (!g_storagePhase->DestPhase(r, qty))
+            return 0;
+
         TradeCommand add{};
         add.cmd = TradeCmd::kAddDest;
         add.qty = qty;
@@ -187,8 +212,11 @@ SellableResult TradeComputeSellableAmount(SellableResolve& r, bool commit) {
         return out;  // ok == false (return 1)
 
     out.produced = v15;
+    // 0x4976c8..0x4976e0: fild[v15]; fmulp; ConvertX; fistp.  The proceeds are
+    // price * v15 (the CRAFT count), NOT price * outCount*v15 — the output goods
+    // added are outCount*v15 but the credit is per craft.  (1:1 with the disasm.)
     double price = TradeMarketPrice(r.outProto, r.player);
-    out.proceeds = TruncToInt(price * static_cast<double>(outCount * v15));
+    out.proceeds = TruncToInt(price * static_cast<double>(v15));
     out.ok = true;
 
     if (commit) {

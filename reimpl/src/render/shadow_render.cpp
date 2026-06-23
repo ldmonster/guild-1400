@@ -19,13 +19,19 @@ inline int EdgeSetup(int py0, int py1, int px0, int px1, int& outSlope) {
     int slope;
     int dx = px1 - px0;
     if (dy >= 0x10000)
-        slope = (int)(((long long)dx << 16) / dy);
+        // (dx << 16) / dy.  `(long long)dx << 16` is UB when dx<0; the x86 form
+        // is an arithmetic value (`dx` scaled by 2^16), so multiply by 65536 to
+        // get the identical result with no signed-shift UB.
+        slope = (int)(((long long)dx * 65536) / dy);
     else
         slope = (int)((unsigned long long)((0x40000000 / dy) * (long long)dx) >> 14);
     outSlope = slope;
     // start = px0 + (slope * (ceil16(py0) - py0)) >> 16
-    long long frac = (long long)(((py0 + 0xFFFF) >> 16 << 16) - py0);
-    int start = px0 + (int)((unsigned long long)(slope * frac) >> 16);
+    // `ceil16(py0)` is the x86 idiom `(py0 + 0xFFFF) & 0xFFFF0000`; the decompiler
+    // rendered the mask as `>> 16 << 16`, whose `<< 16` is UB for negatives. The
+    // mask form is bit-identical to the original instruction and UB-free.
+    long long frac = (long long)(((py0 + 0xFFFF) & ~0xFFFF) - py0);
+    int start = px0 + (int)((unsigned long long)((long long)slope * frac) >> 16);
     return start;
 }
 } // namespace
@@ -58,13 +64,30 @@ int InterpolateEdgeZ(ShadowRasterState& s, int a1, int a2) {
 // ---------------------------------------------------------------------------
 void FillSpans(ShadowRasterState& s, const ShadowSurface& surf, int count) {
     int v1 = s.rightX;               // dword_13FC5BC
+    // Memory-safety window for the destination surface (the original shadow
+    // surface is square — width==height — so dstRow never leaves the buffer and
+    // the span never exceeds the row; these guards are no-ops on that in-bounds
+    // path and only fire when a caller hands a smaller-than-expected surface).
+    // surf.height/width==0 means "unbounded" (legacy callers that don't fill them).
+    const bool boundRows = surf.pixels && surf.height > 0;
+    const u8* rowEnd =
+        boundRows ? surf.pixels + (size_t)surf.pitch * surf.height : nullptr;
+    const int rowW = surf.width;     // valid pixels/words per row (0 == unbounded)
     if (s.is8bpp) {
         for (int v3 = 0; v3 < count; ++v3) {
             int v4 = (s.leftX + 0xFFFF) >> 16;
             s.rightX = v1;
             s.spanLen = ((v1 + 0xFFFF) >> 16) - v4;
-            if (s.spanLen > 0)
-                std::memset(s.dstRow + v4, s.fillValue, (size_t)s.spanLen);
+            if (s.spanLen > 0) {
+                int x0 = v4, len = s.spanLen;
+                if (rowW > 0) {                 // clamp the span into [0, width)
+                    if (x0 < 0) { len += x0; x0 = 0; }
+                    if (x0 + len > rowW) len = rowW - x0;
+                }
+                if (len > 0 && (!boundRows || (s.dstRow >= surf.pixels &&
+                                               s.dstRow < rowEnd)))
+                    std::memset(s.dstRow + x0, s.fillValue, (size_t)len);
+            }
             s.leftX += s.leftDxDy;
             v1 = s.rightDxDy + s.rightX;
             s.dstRow += surf.pitch;  // dword_7626FC
@@ -76,9 +99,17 @@ void FillSpans(ShadowRasterState& s, const ShadowSurface& surf, int count) {
             s.rightX = v1;
             s.spanLen = v7;
             if (v7 > 0) {
-                u16* p = (u16*)(s.dstRow + 2 * v6);
-                u16 word = (u16)s.fillValue;
-                while (v7--) *p++ = word;
+                int x0 = v6, len = v7;
+                if (rowW > 0) {                 // clamp the span into [0, width)
+                    if (x0 < 0) { len += x0; x0 = 0; }
+                    if (x0 + len > rowW) len = rowW - x0;
+                }
+                if (len > 0 && (!boundRows || (s.dstRow >= surf.pixels &&
+                                               s.dstRow < rowEnd))) {
+                    u16* p = (u16*)(s.dstRow + 2 * x0);
+                    u16 word = (u16)s.fillValue;
+                    while (len--) *p++ = word;
+                }
             }
             v1 = s.rightDxDy + s.rightX;
             s.leftX += s.leftDxDy;
@@ -144,43 +175,50 @@ void RasterizeTriangle(ShadowRasterState& s, const ShadowTri& tri,
         if (yv < 0 || v16 < yv) return;
     }
 
-    // Winding / apex resolution (faithful to the disasm at 0x60401f, register
-    // mapping: apex=edi, leftTarget=esi(=prev), rightTarget=ecx(=next),
-    // rightGuardBase=ebp). The three cases handle a flat top edge.
+    // Winding / apex resolution (faithful to the disasm at 0x60400b..0x6041eb).
+    // The unified setup at loc_604034 walks four vertex indices held in
+    //   apex  = edi  (LEFT-edge base + topRow vertex)
+    //   leftV = esi  (LEFT-edge target / first sub-edge)
+    //   rGuard= ebp  (RIGHT-edge guard base)
+    //   rightV= ecx  (RIGHT-edge target / second sub-edge)
+    // selected by which of the three top vertices share the minimum Y (v8).
     int apex;       // edi
     int leftV;      // esi  (left edge target)
     int rightV;     // ecx  (right edge target)
     int rGuard;     // ebp  (right-edge guard base vertex)
     if (v8 == s.py[kEdgeNext[a4]]) {
-        // equal path (0x604025): ebp=a4, esi=prev, ecx=next, edi=a4.
-        apex = a4; rGuard = a4;
-        leftV = kEdgePrev[a4];
-        rightV = kEdgeNext[a4];
+        // equal path (0x604025): edi=a4, esi=prev[a4], ebp=next[a4],
+        //   ecx=next[next[a4]] (== prev[a4] for a 3-cycle). Flat top: the right
+        //   edge runs next[a4] -> next[next[a4]], NOT a4 -> next[a4].
+        apex = a4;
+        leftV = kEdgePrev[a4];                 // esi = T[2*a4+1]
+        rGuard = kEdgeNext[a4];                // ebp = T[2*a4]
+        rightV = kEdgeNext[kEdgeNext[a4]];     // ecx = T[2*next[a4]]
     } else {
         int prev = kEdgePrev[a4]; // edx
         if (v8 == s.py[prev]) {
-            // 0x604181: ebp=a4, ecx=next, esi=prev(prev), edi=prev.
+            // 0x604181: edi=prev, esi=prev[prev], ebp=a4, ecx=next[a4].
             apex = prev; rGuard = a4;
             leftV = kEdgePrev[prev];
             rightV = kEdgeNext[a4];
         } else {
-            // 0x604197: ebp=a4, esi=prev, edi=a4; ecx=next (unchanged).
+            // 0x604197: edi=a4, esi=prev, ebp=a4, ecx=next[a4].
             apex = a4; rGuard = a4;
             leftV = prev;
             rightV = kEdgeNext[a4];
         }
     }
 
-    // LEFT edge guard + setup: py[leftV] - py[apex] > 0.
+    // LEFT edge guard + setup: py[leftV] - py[apex] > 0   (ComputeEdgeSlope(edi,esi)).
     if (s.py[leftV] - s.py[apex] <= 0)
         return;
-    ComputeEdgeSlope(s, apex, leftV);   // ComputeEdgeSlope(edi, esi)
-    // RIGHT edge guard + setup: py[rightV] - py[rGuard] > 0.
+    ComputeEdgeSlope(s, apex, leftV);
+    // RIGHT edge guard + setup: py[rightV] - py[rGuard] > 0 (InterpolateEdgeZ(ebp,ecx)).
     if (s.py[rightV] - s.py[rGuard] <= 0)
         return;
-    InterpolateEdgeZ(s, rGuard, rightV); // InterpolateEdgeZ(ebp, ecx)
+    InterpolateEdgeZ(s, rGuard, rightV);
 
-    int topRow = (s.py[apex] + 0xFFFF) >> 16; // ebx = apex's 16.16 Y (ebx+0FFFFh)
+    int topRow = (s.py[apex] + 0xFFFF) >> 16; // ceil16(v8); py[apex]==v8 here.
     s.is8bpp = !surf.is16bpp;            // byte_140A220 = (a2 <= 8)
     if (s.is8bpp) {
         s.fillValue = 1;                  // dword_13FC5E0 = 1
@@ -190,25 +228,50 @@ void RasterizeTriangle(ShadowRasterState& s, const ShadowTri& tri,
         s.dstRow = surf.pixels + (size_t)(2 * surf.width) * topRow;
     }
 
-    // First span block: top -> ceil16(py[leftV]).  (esi=leftV in the disasm.)
+    // First span block (0x6040C4..0x60411a): top -> ceil16(min(py[leftV],py[rightV])).
+    // v36 = (py[esi] < py[ecx]); the count uses the SMALLER of the two bottoms.
     bool v36 = s.py[leftV] < s.py[rightV]; // var_1C = py[esi] < py[ecx]
-    FillSpans(s, surf, ((s.py[leftV] + 0xFFFF) >> 16) - topRow);
+    int firstBottom = v36 ? s.py[leftV] : s.py[rightV]; // min(py[leftV],py[rightV])
+    FillSpans(s, surf, ((firstBottom + 0xFFFF) >> 16) - topRow);
 
-    // Second span block: continue along whichever sub-edge remains. Both the
-    // v36 (LEFT) and !v36 (RIGHT) branches converge on the same span count
-    // ceil16(py[rightV]) - ceil16(py[leftV]); they differ only in which edge is
-    // re-set up (the disasm both jmp to loc_604150).
+    // Second span block (0x60412b..0x6041eb). Re-set up whichever sub-edge
+    // remains and fill ceil16(larger) - ceil16(smaller). The disasm orders the
+    // subtraction as (edx - eax) where edx/eax depend on v36:
+    //   v36 : ComputeEdgeSlope(esi,ecx); count = ceil16(py[ecx]) - ceil16(py[esi])
+    //  !v36 : InterpolateEdgeZ(ecx,esi); count = ceil16(py[esi]) - ceil16(py[ecx])
     if (s.py[leftV] != s.py[rightV]) {
+        int count;
         if (v36) {
-            // 0x6041D6: ComputeEdgeSlope(eax=leftV, edx=rightV) — LEFT edge.
+            // 0x6041D6: ComputeEdgeSlope(eax=esi=leftV, edx=ecx=rightV) — LEFT edge.
             ComputeEdgeSlope(s, leftV, rightV);
+            count = ((s.py[rightV] + 0xFFFF) >> 16) - ((s.py[leftV] + 0xFFFF) >> 16);
         } else {
-            // 0x60413b: InterpolateEdgeZ(eax=rightV, edx=leftV) — RIGHT edge.
+            // 0x60413b: InterpolateEdgeZ(eax=ecx=rightV, edx=esi=leftV) — RIGHT edge.
             InterpolateEdgeZ(s, rightV, leftV);
+            count = ((s.py[leftV] + 0xFFFF) >> 16) - ((s.py[rightV] + 0xFFFF) >> 16);
         }
-        FillSpans(s, surf,
-                  ((s.py[rightV] + 0xFFFF) >> 16) - ((s.py[leftV] + 0xFFFF) >> 16));
+        FillSpans(s, surf, count);
     }
+}
+
+// ---------------------------------------------------------------------------
+// gilde.exe 0x5f363c VIBE_Shadow_RenderMeshShadow tri-loop tail (0x5f3f38):
+//   v78 = 0;
+//   for ( j = *(_DWORD **)(v108 + 4);                 // mesh.tris
+//         v78 < *(_DWORD *)(v108 + 12);               // mesh.triCount
+//         j = (_DWORD *)(v80 + 40) )                  // stride 40 bytes
+//     VIBE_Shadow_RasterizeTriangle(j, *(_BYTE *)(v96 + 124),  // surface bpp
+//                                   *(_DWORD *)(v96 + 116),     // surface width
+//                                   v78++);                     // tri index
+// One ShadowRasterState (the 13FCxxxx accumulator globals) is shared across the
+// whole loop, exactly as the original re-uses the process globals per triangle.
+// ---------------------------------------------------------------------------
+int RenderObjectShadow(const ShadowMeshTri* tris, int count, ShadowSurface& surf) {
+    ShadowRasterState s;            // dword_13FCxxxx accumulator block
+    int v78 = 0;                    // tri index (the original's v78)
+    for (; v78 < count; ++v78)      // for ( ; v78 < mesh.triCount; ... )
+        RasterizeTriangle(s, tris[v78].v, surf);
+    return v78;
 }
 
 } // namespace guild::render

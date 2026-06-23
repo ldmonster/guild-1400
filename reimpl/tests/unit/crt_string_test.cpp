@@ -154,6 +154,43 @@ TEST(CrtString, IntToAsciiHexAndBin) {
     CHECK(std::string(buf) == "ffffffff");
 }
 
+// ---------- Wave-11 hardening: itoa INT_MIN / overflow / buffer boundary ------
+// IntToRadix negates via `0u - value` (unsigned) so INT_MIN is representable
+// without signed-overflow UB; the decimal form needs 12 bytes ("-2147483648").
+TEST(CrtString, IntToAsciiIntMin) {
+    char buf[16];
+    crt::StringIntToAscii(-2147483647 - 1, buf, 10);
+    CHECK(std::string(buf) == "-2147483648");
+    // INT_MIN in base 16 formats as unsigned (no minus).
+    crt::StringIntToAscii(-2147483647 - 1, buf, 16);
+    CHECK(std::string(buf) == "80000000");
+}
+
+// IntToRadix at a tight-but-sufficient buffer: "-2147483648" is 11 chars + NUL.
+TEST(CrtString, IntToRadixExactBuffer) {
+    char buf[12]; // exactly minus + 10 digits + NUL
+    crt::StringIntToRadix(static_cast<u32>(-2147483647 - 1), buf, 10u, 1);
+    CHECK(std::string(buf) == "-2147483648");
+    CHECK_EQ(buf[11], '\0');
+}
+
+// UIntToString of UINT_MAX in base 2 is 32 chars (fits the 33-byte scratch).
+TEST(CrtString, UIntToStringBinaryMax) {
+    char buf[40];
+    std::string s = crt::StringUIntToString(0xFFFFFFFFu, buf, 2);
+    CHECK_EQ(s.size(), 32u);
+    CHECK(s == std::string(32, '1'));
+}
+
+// Concat at the exact destination boundary: dst already holds "ab", append "cd"
+// into a 5-byte buffer ("ab"+"cd"+NUL == 5). Must not write a 6th byte.
+TEST(CrtString, ConcatExactBoundary) {
+    char dst[5] = {'a', 'b', '\0', '\xAA', '\xAA'};
+    crt::StringConcat(dst, "cd");
+    CHECK(std::string(dst) == "abcd");
+    CHECK_EQ(dst[4], '\0');
+}
+
 // ---------- UIntToString ----------
 TEST(CrtString, UIntToString) {
     char buf[40];

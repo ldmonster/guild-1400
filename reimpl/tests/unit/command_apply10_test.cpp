@@ -355,3 +355,48 @@ TEST(CmdApply10_Thief, IterateEmptyNoChoice) {
     g.personChain.clear();
     CHECK_EQ(ResolveTargetBestThief(0, nullptr, 0, nullptr), 0);
 }
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-11): CheckParamRefsValid walks (width,count,off:2)+values field
+// descriptors out of the 153-byte command record. A malformed +20 field count or
+// oversized fields must not run the cursor off the record (OOB read). Drive it
+// with a full 153-byte record (the real CommandPacket stride) and a bogus count.
+// ---------------------------------------------------------------------------
+TEST(CmdApply10_Malformed, ParamRefsOverlargeFieldCount) {
+    install();
+    // Full-size 153-byte record (CheckParamRefsValid reads up to the record end).
+    u8 cmd[0x99] = {0};
+    i32 id = 7; std::memcpy(cmd + 16, &id, 4);
+    cmd[20] = 255;                       // bogus field count
+    // Fill the record tail with width=4,count=255 descriptors so the cursor would
+    // sprint past the 153-byte record without the bound.
+    for (int off = 21; off + 1 < 0x99; off += 4) {
+        cmd[off] = 4;                    // width
+        cmd[off + 1] = 255;              // count
+    }
+    g.resolveOk = true;
+    g.nextResolved = ResolvedEntity{};   // immediate/parent null -> pick==object(null)
+    // Must return without reading past cmd[153] (ASAN gate); result is don't-care.
+    int r = CheckParamRefsValid(cmd);
+    CHECK(r == 0 || r == 1);
+}
+
+// Many zero-body descriptors (width=4,count=0 -> advance 4 each) walk the cursor
+// up to and past the 153-byte record end. The header read at the top of the loop
+// must be bounded so it never reads cmd[>=153].
+TEST(CmdApply10_Malformed, ParamRefsCursorWalksOffEnd) {
+    install();
+    u8 cmd[0x99] = {0};
+    i32 id = 7; std::memcpy(cmd + 16, &id, 4);
+    cmd[20] = 60;                        // 60 descriptors; cur advances 4 each ->
+                                         // reaches 153 after 33, must stop there.
+    for (int off = 21; off + 1 < 0x99; off += 4) {
+        cmd[off] = 4;                    // width 4
+        cmd[off + 1] = 0;                // count 0 -> no inline body; header-only stride 4
+    }
+    static u8 obj[600]; std::memset(obj, 0, sizeof obj);
+    g.resolveOk = true;
+    g.nextResolved = ResolvedEntity{}; g.nextResolved.object = obj;
+    int r = CheckParamRefsValid(cmd);   // must not read past cmd[153] (ASAN gate)
+    CHECK(r == 0 || r == 1);
+}

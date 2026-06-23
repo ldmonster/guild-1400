@@ -48,7 +48,7 @@ static inline void Advance(HeRecord* h, int off, int days, int secs, int mins) {
 // gilde.exe 0x4e4728 — VIBE_NpcAction_BeginEquipObject.
 //   Stamp +82 and +68 with the clock; query the carrier person (filter +172).
 //   If absent, free. Otherwise Advance the +82 appointment: dword_63C7B8 fast
-//   path = 0 days/0 minutes; else (apprentice-span hours, min 24). Record the
+//   path = 0 days/30 minutes; else (apprentice-span hours, min 24). Record the
 //   person's entity id at +16; if the +90 equip bit (0x40) is already set, free;
 //   else set it and emit the equip command (arg25 a=90,b=64,c=2,d=0).
 // ===========================================================================
@@ -65,10 +65,11 @@ i32 NpcAction11_BeginEquipObject(HeRecord* h) {
     }
 
     int days = 0, mins = 0;
-    // dword_63C7B8 gate routed through the fastMode hook: when set, the original
-    // takes the 0/0 branch; when clear, computes the apprentice hour count.
+    // dword_63C7B8 gate routed through the fastMode hook (disasm @0x4e47fd):
+    // fast path = 0 days + 30 minutes (v6=0, v7=30); when clear, compute the
+    // apprentice hour count carried in addDays.
     if (H->fastMode && H->fastMode()) {
-        days = 0; mins = 0;
+        days = 0; mins = 30;
     } else {
         i32 span = H->familyDur ? H->familyDur(person, 0) : 0;
         int hours = 24 * span;

@@ -46,7 +46,7 @@ bool BioReadByte(VfsHandle* h, guild::u8* out) {
 }
 
 // gilde.exe 0x5e639c — the scene-chunk acceptance gate from VIBE_WorldIo_-
-// LoadSceneState: (tag & 0xFFFF0000) == 0x3A6E0000 && tag >= 980156601.
+// LoadSceneState: (tag & 0xFFFF0000) == 0x3A6C0000 (980156416) && tag >= 980156601.
 bool WorldIoSceneTagValid(guild::u32 tag) {
     return (tag & 0xFFFF0000u) == kSceneTagBase && tag >= kSceneTagMinVersion;
 }

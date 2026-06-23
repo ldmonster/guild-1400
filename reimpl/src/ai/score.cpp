@@ -35,8 +35,11 @@ u8 Planner::SelectBest(int personIndex, ActionFrame* outA, ActionFrame* outB) {
     for (int i = 0; i < static_cast<int>(methods_.size()); ++i) {
         const Method& m = methods_[i];
 
-        // enable byte (byte_B57210[148*i]) and class-difference gate.
-        if (!m.enabled || m.id == 0)
+        // enable byte (byte_B57210[148*i]) and class-difference gate. The binary
+        // gates a candidate ONLY on the enable byte and the class difference — it
+        // does NOT test the id for zero (it would still push/eval an id-0 method),
+        // so we mirror exactly that (no `m.id == 0` guard).
+        if (!m.enabled)
             continue;
         if (m.classId == currentClass_)
             continue;

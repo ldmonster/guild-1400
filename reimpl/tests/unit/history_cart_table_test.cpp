@@ -13,6 +13,19 @@
 using namespace guild::world;
 
 // ---------------------------------------------------------------------------
+// Cart-table layout constants — pinned byte-exact from the source's recovery
+// (history_cart_table.h): 4 groups x 17 dwords (68-byte stride), 8 slots/group;
+// the ChronicleState/FreeFiles reset clears only the first 4 slots (the faithful
+// asymmetry vs ResetGroupSlot's 8).
+// ---------------------------------------------------------------------------
+TEST(HistoryCartTable, LayoutConstants) {
+    CHECK_EQ(kCartGroupCount, 4);
+    CHECK_EQ(kCartSlotCount, 8);
+    CHECK_EQ(kCartGroupDwords, 17);          // 68-byte stride / 4
+    CHECK_EQ(kResetAllGroupsSlots, 4);       // ChronicleState/FreeFiles asymmetry
+}
+
+// ---------------------------------------------------------------------------
 // ResetGroupSlot 0x4fd140
 // ---------------------------------------------------------------------------
 TEST(HistoryCartTable, ResetGroupSlotFreesAllEight) {

@@ -75,9 +75,9 @@ TEST(GuiPanelsE2E, StatPanelBuildAndChart) {
     CHECK_EQ(sink.readouts.demandValue, 300);   // 3.0 * 100
     CHECK_EQ(sink.readouts.priceValue, 50);      // 0.5 * 100
     CHECK_EQ(sink.readouts.floorMark, 0);
-    // growth = round((1.0+1.0)*2.5) = 5 -> clamps to 4 -> 6901
+    // growth = trunc((1.0+1.0)*2.5) = trunc(5.0) = 5 -> clamps to 4 -> 6901
     CHECK_EQ(sink.readouts.growthPhraseId, 6901);
-    // supply = round(0.4*5) = 2 -> 6905
+    // supply = trunc(0.4*5) = trunc(2.0) = 2 -> 6905   (ConvertX truncates, wave-17)
     CHECK_EQ(sink.readouts.supplyPhraseId, 6905);
 
     // Legend is a five-row tree with monotonically increasing row Y.

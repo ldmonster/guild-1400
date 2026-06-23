@@ -55,7 +55,13 @@ int HistoryCommandIndex(const char* token) {
     for (int i = 0; i < kHistoryCommandCount; ++i) {
         const char* name = kHistoryCommandNames[i];
         std::size_t n = std::strlen(name);
-        if (std::memcmp(token, name, n) == 0)
+        // The original memcmp's the token against `n` keyword bytes; its tokens live
+        // in a 6080-byte NUL-padded scratch so the read stays in-bounds. Our callers
+        // pass exact-length C strings, so a token shorter than `name` would have the
+        // original read past the token. strncmp is behaviour-identical (a token
+        // shorter than `name` has its NUL where `name` has a non-NUL char, so the
+        // comparison fails at that byte — never a prefix match) and bounds the read.
+        if (std::strncmp(token, name, n) == 0)
             return i;
     }
     return kHistoryCommandCount;   // == 27, the "not found" sentinel (`>= 27`)
@@ -70,17 +76,27 @@ HistoryGroupRef HistoryClassifyGroupRef(const char* head) {
     if (!head || !head[0])
         return ref;                          // empty -> kNone
 
-    // v29 == *(int*)(head + 1): the 4 prefix bytes after the leading marker.
+    // v29 == *(int*)(head + 1): the 4 prefix bytes after the leading marker. The
+    // original loads a dword (4 bytes) from head+1; its labels live in a 6080-byte
+    // NUL-padded scratch so the read is in-bounds. Our callers pass exact-length C
+    // strings, so a head shorter than 5 chars would read past the buffer. strncmp
+    // is behaviour-identical (a short head has its NUL where the prefix has a non-NUL
+    // char, so it never matches the 4-char prefix) and bounds the read to the NUL.
     const char* prefix4 = head + 1;
-    bool isSet = std::memcmp(prefix4, kHistoryGroupSetPrefix, 4) == 0;
-    bool isUse = std::memcmp(prefix4, kHistoryGroupUsePrefix, 4) == 0;
+    bool isSet = std::strncmp(prefix4, kHistoryGroupSetPrefix, 4) == 0;
+    bool isUse = std::strncmp(prefix4, kHistoryGroupUsePrefix, 4) == 0;
     if (!isSet && !isUse)
         return ref;                          // v9 = &v28 (body parsed verbatim)
 
     ref.kind = isSet ? HistoryGroupKind::kSet : HistoryGroupKind::kUse;
 
-    // v32 = v30 (head+6, the slot digit char); v21 = ParseInt(&v32).
-    char digit[2] = { head[6], '\0' };
+    // v32 = v30 (head+6, the slot digit char); v21 = ParseInt(&v32). A matched
+    // prefix guarantees head[1..4] are non-NUL, so head[5] is in-bounds (worst case
+    // the NUL terminator); but head[6] is OOB when head[5] is the terminator. Guard
+    // the slot-digit read on head[5] being present (the original's scratch is always
+    // long enough; here a "_SET"-prefixed but truncated head must not over-read).
+    char slotChar = (head[5] != '\0') ? head[6] : '\0';
+    char digit[2] = { slotChar, '\0' };
     int slot = static_cast<int>(UtilParseInt(digit));
     if (static_cast<unsigned>(slot) >= static_cast<unsigned>(kHistoryGroupCount)) {
         // "Invalid GROUP reference in Label %i" -> return 0.

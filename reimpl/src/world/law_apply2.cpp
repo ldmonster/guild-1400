@@ -39,8 +39,9 @@ static int BuildPromotionImpl(const OfficePerson& person, int maxCount,
     int rankBlocked = 0;  // v34 (filtered) — 1 if a rank>=4 holder was skipped
     int count = 0;        // v33 / v36
 
+    // gilde.exe 0x47f434 / 0x47f1ea: the `a2 <= 0` early return happens BEFORE the
+    // `if (v29) *v29 = v34` write, so *outRankBlocked is left UNTOUCHED here.
     if (maxCount <= 0) {
-        if (rankInside && outRankBlocked) *outRankBlocked = 0;
         return 0;
     }
 

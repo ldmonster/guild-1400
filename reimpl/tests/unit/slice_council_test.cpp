@@ -46,17 +46,14 @@ TEST(SliceCouncilUnit, BuildPacketEmitsOpcode68WithRealLayout) {
     CHECK_EQ((int)pkt.holderB, 0xFF);               // single-slot path
     CHECK_EQ((int)pkt.officeType, 5);
 
-    // The on-wire image: [0]=68, [1..4]=applicant id LE, [5]=holderA, [6]=holderB,
-    // [7]=officeType.
-    u8 wire[8] = {0};
-    pkt.encode(wire);
-    CHECK_EQ((int)wire[0], 68);
-    i32 packedId = 0;
-    std::memcpy(&packedId, wire + 1, 4);
-    CHECK_EQ(packedId, 100);
-    CHECK_EQ((int)wire[5], 7);
-    CHECK_EQ((int)wire[6], 0xFF);
-    CHECK_EQ((int)wire[7], 5);
+    // The on-wire image, exactly as RequestBuildOp68 (0x495454) stages it:
+    //   [0]=68, applicant dword @ +0x10, holderA/B/officeType @ +0x14/+0x15/+0x16.
+    sim::CommandPacket wire = pkt.encode();
+    CHECK_EQ((int)wire.bytes[0], 68);
+    CHECK_EQ((int)wire.get32(kCouncilApplicantOff), 100);
+    CHECK_EQ((int)wire.bytes[kCouncilHolderAOff], 7);
+    CHECK_EQ((int)wire.bytes[kCouncilHolderBOff], 0xFF);
+    CHECK_EQ((int)wire.bytes[kCouncilOfficeOff], 5);
 }
 
 TEST(SliceCouncilUnit, BuildPacketRejectsNonCandidacyAndBadType) {

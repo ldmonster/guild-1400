@@ -101,6 +101,77 @@ TEST(AgfAnimUnit, RejectBad) {
 }
 
 // =============================================================================
+// W11 hardening: malformed / truncated / oversized .baf inputs. Each must fail
+// safe or clamp, with no over-read / no runaway allocation. ASAN+UBSAN-checked.
+// =============================================================================
+
+// ---- oversized frame count (declared huge, no body) -> reject, no OOM -------
+TEST(AgfAnimUnit, OversizedFrameCount) {
+    Builder w;
+    w.magic();
+    w.byte(48); w.u32v(1);
+    w.byte(35); w.i32v(1000000000);  // ~1e9 frames in a ~15-byte file
+    // No frame bodies follow.
+    AnimClip clip;
+    // The frame-count bound rejects this before the 192*N allocation.
+    CHECK(!LoadAnimation(w.b.data(), w.b.size(), "huge.baf", clip, 0));
+    CHECK(!clip.valid);
+}
+
+// ---- negative frame count -> reject ----------------------------------------
+TEST(AgfAnimUnit, NegativeFrameCount) {
+    Builder w;
+    w.magic();
+    w.byte(48); w.u32v(1);
+    w.byte(35); w.i32v(-5);
+    AnimClip clip;
+    CHECK(!LoadAnimation(w.b.data(), w.b.size(), "neg.baf", clip, 0));
+}
+
+// ---- oversized per-frame vertex count -> no runaway alloc / no OOB ----------
+TEST(AgfAnimUnit, OversizedVertexCount) {
+    Builder w;
+    w.magic();
+    w.byte(48); w.u32v(1);
+    w.byte(35); w.i32v(1);            // 1 frame
+    w.byte(51); w.byte(1);            // hasVertex
+    w.byte(41); w.i32v(0);
+    w.byte(42); w.i32v(0);
+    w.byte(24); w.i32v(0);            // frame time
+    w.byte(25); w.i32v(1000000000);  // claim 1e9 verts
+    w.byte(33);                       // points: only a couple of floats follow
+    w.f32v(1.0f); w.f32v(2.0f);
+    AnimClip clip;
+    // Must not crash / OOM: the point alloc is bounded by the buffer size, and the
+    // write loop is guarded. Result may be valid (clamped) or rejected — either is
+    // memory-safe; we only require no ASAN report and a defined return.
+    bool ok = LoadAnimation(w.b.data(), w.b.size(), "verts.baf", clip, 0);
+    CHECK(ok == clip.valid);   // self-consistent, no UB
+}
+
+// ---- truncated mid-points (frameCount says 2, second frame's data missing) --
+TEST(AgfAnimUnit, TruncatedMidFrame) {
+    auto good = BuildMorph(/*nframes*/2, /*nv*/3, /*stride*/10);
+    // Lop off the final ~third so the second frame's point stream is incomplete.
+    std::vector<u8> bad(good.begin(), good.begin() + good.size() * 2 / 3);
+    AnimClip clip;
+    // The streaming reader stops at EOF; a partial frame must not over-read.
+    bool ok = LoadAnimation(bad.data(), bad.size(), "trunc.baf", clip, 0);
+    CHECK(ok == clip.valid);   // no UB regardless of success
+}
+
+// ---- bad magic guard (token 1 value > kMagicMax) -> reject -----------------
+TEST(AgfAnimUnit, BadMagicGuard) {
+    Builder w;
+    w.magic();
+    w.byte(48); w.u32v(1);
+    w.byte(1);  w.u32v(0xFFFFFFFFu);  // > 0xABCD0001 -> rejected
+    w.byte(35); w.i32v(1);
+    AnimClip clip;
+    CHECK(!LoadAnimation(w.b.data(), w.b.size(), "magic.baf", clip, 0));
+}
+
+// =============================================================================
 // ComputeMorphWeights: linear weight pair w/1-w = phase/seg, clamped.
 // =============================================================================
 TEST(AgfAnimUnit, MorphWeights) {

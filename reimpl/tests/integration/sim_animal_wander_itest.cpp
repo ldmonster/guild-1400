@@ -96,7 +96,12 @@ TEST(SimAnimalWanderIT, HerdGroupingRealTransform) {
     BuildingAnchor cand[6];
     for (long i = 0; i < 6; ++i) cand[i] = {fr[i].f, reinterpret_cast<void*>(i)};
     guild::crt::Srand(100);   // anchor = cand[RandomModulo(6)]
-    float pts[16] = {0};
+    // HARDEN (wave-10): the grouping loop stores a 3-float triple while
+    // (group < 16), so the final triple can land at group==15 and write indices
+    // 15,16,17 — the out buffer must hold 18 floats, not 16 (the prior size let
+    // a full group scribble 2 floats past the end). The real engine's herd buffer
+    // is the AnimalRec scratch (64 floats), so this only affected this helper test.
+    float pts[18] = {0};
     int group = Animal_HerdGroupFrom(cand, 6, pts);
     // group is a multiple of 3 (x,y,z triples), at most 16 floats stored.
     CHECK(group % 3 == 0);

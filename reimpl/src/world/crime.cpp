@@ -30,10 +30,17 @@ struct CrimeTableInit {
 
 void DefaultResolveNotify(int /*crimeIndex*/, i32 /*perpId*/) {}
 ResolveNotifyFn g_resolveNotifyFn = &DefaultResolveNotify;
+
+void DefaultRemoveGrid(i32 /*target*/, u8 /*location*/) {}
+ResolveRemoveGridFn g_removeGridFn = &DefaultRemoveGrid;
 } // namespace
 
 void StraftatSetResolveNotifyFn(ResolveNotifyFn fn) {
     g_resolveNotifyFn = fn ? fn : &DefaultResolveNotify;
+}
+
+void StraftatSetResolveRemoveGridFn(ResolveRemoveGridFn fn) {
+    g_removeGridFn = fn ? fn : &DefaultRemoveGrid;
 }
 
 // gilde.exe 0x4c3390 — VIBE_Straftat_FindFreeSlot.
@@ -109,7 +116,13 @@ int StraftatResolveAndClear(i32 crimeId, int force) {
     if (state != 1 && (!force || !state))
         return 1;
 
-    // Cleared path: remove all linked evidence pairs (those whose crimeId == id).
+    // Cleared path (0x4c3614..): the original resolves the perpetrator person
+    // record (FindRecordById — gates the History notify below) and then calls
+    // VIBE_City_RemoveCrimeFromGrid(target@+33, location@+28) UNCONDITIONALLY,
+    // once, before removing the linked evidence. Surfaced via the grid hook.
+    g_removeGridFn(rec.target, rec.location);
+
+    // Remove all linked evidence pairs (those whose crimeId == id).
     for (int i = 0; i != kEvidenceDwords; i += 2) {
         if (crimeId == g_evidenceCrimeId[i]) {
             // The original notifies History when the evidence belongs to the
@@ -178,7 +191,15 @@ int BeweisCollectByOwner(i32 key, i32* out, int outCapacity) {
     if (outCapacity * 4 < maxBytes)
         maxBytes = outCapacity * 4;
     do {
-        if (key == g_crimeTable[recIdx].provenState) {
+        // HARDENING (wave-12): the original always receives the engine's fixed
+        // 32-entry (128-byte) buffer, so outBytes < maxBytes terminates before
+        // `count` can reach the buffer end. With a degenerate caller buffer
+        // (outCapacity <= 0, or < 32) the do/while writes out[count] before the
+        // post-check and overruns (confirmed via ASAN). Guarding the write on
+        // count < outCapacity is a no-op for every valid call (maxBytes ==
+        // min(128, outCapacity*4) already stops the loop first) but stops the
+        // overrun for a too-small buffer.
+        if (key == g_crimeTable[recIdx].provenState && count < outCapacity) {
             out[count] = recIdx;
             ++count;
             outBytes += 4;

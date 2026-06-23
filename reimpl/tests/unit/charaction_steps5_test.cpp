@@ -64,6 +64,7 @@ struct S5 {
     int markBoughtCalls = 0; i32 markBoughtArg = 0;
     int slot28Calls = 0;
     int quickjumpCalls = 0; std::vector<i32> quickjumpRecipient;
+    int finalizeCalls = 0; i32 finalizeBuyer = 0, finalizeObj = 0;
     i32 cityPid = 0; u8 cityCat = 0;
     int rnd = 0;
     int fastCnt = 0, medCnt = 0;
@@ -84,6 +85,7 @@ i32  HSeq(i32) { return g_s.seqRet; }
 void HMark(i32 a) { ++g_s.markBoughtCalls; g_s.markBoughtArg = a; }
 void HSlot28() { ++g_s.slot28Calls; }
 void HQuickjump(i32 r, i32, int) { ++g_s.quickjumpCalls; g_s.quickjumpRecipient.push_back(r); }
+void HFinalize(i32 buyer, i32 obj) { ++g_s.finalizeCalls; g_s.finalizeBuyer = buyer; g_s.finalizeObj = obj; }
 i32  HCityPid(u16) { return g_s.cityPid; }
 u8   HCityCat(u16) { return g_s.cityCat; }
 int  HRnd(int) { return g_s.rnd; }
@@ -104,6 +106,7 @@ void InstallS5() {
     h.markObjectBought = HMark;
     h.queueSlotReset28 = HSlot28;
     h.sendQuickjumpMessage = HQuickjump;
+    h.queuePurchaseFinalize32 = HFinalize;
     h.cityPersonId = HCityPid;
     h.cityCategory = HCityCat;
     h.randomModulo = HRnd;
@@ -222,7 +225,8 @@ TEST(CharActionV5, TransportSpeed_NoScaleVerbatim) {
     Setup();
     BigRec actor, link, veh;
     Cas5_BaseSpeed(actor.get()) = 4.0f;
-    *reinterpret_cast<HeRecord**>(reinterpret_cast<unsigned char*>(link.get()) + 59) = veh.get();
+    { HeRecord* _vp = veh.get();  // unaligned +59 pointer store via memcpy (no UB)
+      std::memcpy(reinterpret_cast<unsigned char*>(link.get()) + 59, &_vp, sizeof(_vp)); }
     g_s.fastCnt = 0; g_s.medCnt = 0;   // neither tier
     HeRecord* out = ApplyTransportSpeed(actor.get(), link.get());
     CHECK(out == veh.get());
@@ -232,20 +236,22 @@ TEST(CharActionV5, TransportSpeed_FastTier) {
     Setup();
     BigRec actor, link, veh;
     Cas5_BaseSpeed(actor.get()) = 3.0f;
-    *reinterpret_cast<HeRecord**>(reinterpret_cast<unsigned char*>(link.get()) + 59) = veh.get();
-    g_s.fastCnt = 200;   // > 100 -> fast factor 2.0
+    { HeRecord* _vp = veh.get();  // unaligned +59 pointer store via memcpy (no UB)
+      std::memcpy(reinterpret_cast<unsigned char*>(link.get()) + 59, &_vp, sizeof(_vp)); }
+    g_s.fastCnt = 200;   // > 100 -> fast factor dbl_61F290 = 0.7
     ApplyTransportSpeed(actor.get(), link.get());
-    CHECK(Cas5_VehSpeed(veh.get()) == 6.0f);
+    CHECK(Cas5_VehSpeed(veh.get()) == static_cast<float>(3.0 * 0.7));   // 2.1f
 }
 TEST(CharActionV5, TransportSpeed_Type2Doubles) {
     Setup();
     BigRec actor, link, veh;
     Cas5_BaseSpeed(actor.get()) = 4.0f;
-    Cas5_ActorType(actor.get()) = 2;   // type 2 -> * slow factor 0.5
-    *reinterpret_cast<HeRecord**>(reinterpret_cast<unsigned char*>(link.get()) + 59) = veh.get();
+    Cas5_ActorType(actor.get()) = 2;   // type 2 -> * slow factor dbl_61F288 = 0.8
+    { HeRecord* _vp = veh.get();  // unaligned +59 pointer store via memcpy (no UB)
+      std::memcpy(reinterpret_cast<unsigned char*>(link.get()) + 59, &_vp, sizeof(_vp)); }
     g_s.fastCnt = 0; g_s.medCnt = 0;
     ApplyTransportSpeed(actor.get(), link.get());
-    CHECK(Cas5_VehSpeed(veh.get()) == 2.0f);   // 4.0 verbatim then * 0.5
+    CHECK(Cas5_VehSpeed(veh.get()) == static_cast<float>(4.0 * 0.8));   // 4.0 verbatim then * 0.8 = 3.2f
 }
 
 // ===========================================================================
@@ -287,7 +293,8 @@ TEST(CharActionV5, RunFollow_FreesWhenLeaderDead) {
     BigRec h; Cas5_IdB176(h.get()) = 1;
     BigRec leader, leaderAct;
     *reinterpret_cast<u8*>(leaderAct.get()) = 22;   // dead anim
-    *reinterpret_cast<HeRecord**>(reinterpret_cast<unsigned char*>(leader.get()) + 380) = leaderAct.get();
+    { HeRecord* _vp = leaderAct.get();  // unaligned +380 pointer store via memcpy (no UB)
+      std::memcpy(reinterpret_cast<unsigned char*>(leader.get()) + 380, &_vp, sizeof(_vp)); }
     g_s.personById.assign(2, nullptr); g_s.personById[1] = leader.get();
     i32 res = RunFollowTarget(h.get());
     CHECK_EQ(res, 7);
@@ -354,6 +361,9 @@ TEST(CharActionV5, RunBuy_State1DueQueuesRequest) {
     BigRec h; He_State(h.get()) = 1;
     He_ApptTime(h.get()) = GameTime{1, 0, 0, 0};
     Cas5_IdB176(h.get()) = 808;   // target object id
+    // hiword counter: the original passes (*(i32*)(h+170)) >> 16 (signed sar, from
+    // bytes at offset 170-173). Seed dword@170 = 0xFFFE0000 -> >>16 (signed) = -2.
+    h.at<i32>(170) = static_cast<i32>(0xFFFE0000);
     BigRec self;
     g_s.queryRet = self.get();
     g_s.req17Ret = 555;
@@ -361,6 +371,7 @@ TEST(CharActionV5, RunBuy_State1DueQueuesRequest) {
     CHECK_EQ(res, 555u);
     CHECK_EQ(g_s.req17Calls, 1);
     CHECK_EQ(g_s.req17ObjId, 808);
+    CHECK_EQ(g_s.req17Hiword, -2);          // signed >>16 of dword@170
     CHECK_EQ(Cas5_IdC180(h.get()), 555);   // handle stored
     CHECK_EQ(He_State(h.get()), 2);        // advanced
 }
@@ -389,6 +400,9 @@ TEST(CharActionV5, RunBuy_State2AppliedFinalizes) {
     CHECK_EQ(g_s.quickjumpRecipient[0], 314);
     CHECK_EQ(g_s.markBoughtCalls, 1);
     CHECK_EQ(g_s.markBoughtArg, 9000);
+    // The purchase-finalize tail (QueueRequestFlagBlob32(4,...) @0x4dd3f3) always
+    // runs on the apply phase, regardless of the city-category branch.
+    CHECK_EQ(g_s.finalizeCalls, 1);
 }
 TEST(CharActionV5, RunBuy_State2NonMarketSkipsRender) {
     Setup();
@@ -397,7 +411,10 @@ TEST(CharActionV5, RunBuy_State2NonMarketSkipsRender) {
     BigRec self;
     g_s.queryRet = self.get();
     g_s.cityCat = 0;   // not 6 -> no render
+    g_s.seqRet = 9000; // nonzero so the markObjectBought guard is irrelevant here
     u32 res = RunBuyObject(h.get());
     CHECK_EQ(res, 7u);
     CHECK_EQ(g_s.quickjumpCalls, 0);
+    // The finalize tail still runs even when the city-category branch is skipped.
+    CHECK_EQ(g_s.finalizeCalls, 1);
 }

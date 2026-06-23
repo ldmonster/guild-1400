@@ -23,6 +23,14 @@ struct TypeRecBuilder {
     void setRoom(int i, int slot, std::uint16_t v) {
         std::memcpy(rec(i) + 35 + 2 * slot, &v, 2);
     }
+};
+
+// Build a synthetic person/family record table (gilde.exe word_12CE910, byte
+// stride 536) read by MatchTypeCode/MatchProfessionCode at fields +356/+358/+361.
+struct PersonRecBuilder {
+    std::vector<std::uint8_t> buf;
+    explicit PersonRecBuilder(int n) : buf(536 * n, 0) {}
+    std::uint8_t* rec(int i) { return buf.data() + 536 * i; }
     void setTypeByte(int i, std::uint8_t v) { rec(i)[356] = v; }
     void setProf(int i, std::uint8_t p0, std::uint8_t p1) {
         rec(i)[358] = p0; rec(i)[361] = p1;
@@ -39,11 +47,12 @@ struct ObjTableBuilder {
 // Install bindings for a test and restore on scope exit.
 struct BindScope {
     BindScope(const std::uint8_t* type, const std::uint8_t* obj,
-              const std::uint8_t* chr) {
+              const std::uint8_t* chr, const std::uint8_t* person = nullptr) {
         BuildingArrayBindings b;
         b.buildingTypeBase = type;
         b.objectTypeBase   = obj;
         b.charArrayBase    = chr;
+        b.personFamilyBase = person;
         SetBuildingArrayBindings(b);
     }
     ~BindScope() { SetBuildingArrayBindings(BuildingArrayBindings{}); }
@@ -121,10 +130,10 @@ TEST(Building2_LookupTypeRecord, GoldenB) {
 // MatchTypeCode / MatchProfessionCode
 // ---------------------------------------------------------------------------
 TEST(Building2_Match, TypeCode) {
-    TypeRecBuilder t(4);
+    PersonRecBuilder t(4);
     t.setTypeByte(2, 0x55);
     t.setProf(2, 0x11, 0x22);
-    BindScope bind(t.buf.data(), nullptr, nullptr);
+    BindScope bind(nullptr, nullptr, nullptr, t.buf.data());
 
     std::uint8_t codes[] = {0x10, 0x55, 0x99};
     CHECK_EQ(Building_MatchTypeCode(2, 3, codes), 1);   // 0x55 present
@@ -136,9 +145,9 @@ TEST(Building2_Match, TypeCode) {
 }
 
 TEST(Building2_Match, ProfessionCode) {
-    TypeRecBuilder t(4);
+    PersonRecBuilder t(4);
     t.setProf(1, 0x07, 0x0C);
-    BindScope bind(t.buf.data(), nullptr, nullptr);
+    BindScope bind(nullptr, nullptr, nullptr, t.buf.data());
 
     std::uint8_t a[] = {0x01, 0x0C};
     CHECK_EQ(Building_MatchProfessionCode(1, 2, a), 1);  // matches +361

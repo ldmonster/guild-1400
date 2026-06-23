@@ -70,9 +70,13 @@ int Compute3dVolume(const Vec3& listener, const Vec3& source, float maxDist, int
 // from the camera basis; we expose the magnitude curve faithfully.)
 int Compute3dPan(const Vec3& listenerForward, const Vec3& dirToSource);
 
-// VIBE_Math_VectorAngleBetween @0x5ca334 analogue: unsigned angle in radians
-// between two vectors (acos of normalized dot, clamped). Helper for Compute3dPan.
-double AngleBetween(const Vec3& a, const Vec3& b);
+// VIBE_Math_VectorAngleBetween @0x5ca334 — signed *horizontal* (XZ-plane) angle in
+// radians from `forward` to `dir`. Both vectors have their Y forced to 0, are
+// normalized, then the up-axis cross-product sign selects -acos(dot) (source on the
+// +x/right side) vs acos(dot)-2*PI (source on the -x/left side). Parallel returns 0
+// (binary leaves it uninitialized; 0 reproduces the "center" pan), antiparallel
+// returns -PI. Helper for Compute3dPan; arg order is (dir, forward).
+double AngleBetween(const Vec3& dir, const Vec3& forward);
 
 // --- Pool --------------------------------------------------------------------
 

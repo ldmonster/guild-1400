@@ -124,6 +124,38 @@ TEST(CombatSlots5_FindNearest, FallbackEmptyReturnsMinusOne) {
     CHECK_EQ(FindNearestEnemyTarget(none, true, self, {}), -1);
 }
 
+// --- Wave-12 hardening: fallback roll boundary clamps -----------------------
+
+// A roll returned >= count (or negative) must be clamped to the valid [0,count)
+// range before indexing fallbackIndices — no out-of-bounds read.
+TEST(CombatSlots5_FindNearest, FallbackRollClampedHighAndLow) {
+    float self[3] = {0.0f, 0.0f, 0.0f};
+    std::vector<EnemyCandidate> none;
+    std::vector<int> fb = {40, 41, 42};      // count 3, valid indices 0..2
+
+    // Roll too high (99) -> clamp to count-1 == index 2 -> value 42.
+    CombatSlots5Hooks hi = WithRng(99);
+    SetCombatSlots5Hooks(&hi);
+    CHECK_EQ(FindNearestEnemyTarget(none, true, self, fb), 42);
+
+    // Roll negative (-5) -> clamp to 0 -> value 40.
+    CombatSlots5Hooks lo = WithRng(-5);
+    SetCombatSlots5Hooks(&lo);
+    CHECK_EQ(FindNearestEnemyTarget(none, true, self, fb), 40);
+    SetCombatSlots5Hooks(nullptr);
+}
+
+// Single-element fallback: any roll resolves to the one entry.
+TEST(CombatSlots5_FindNearest, FallbackSingleElement) {
+    float self[3] = {0.0f, 0.0f, 0.0f};
+    std::vector<EnemyCandidate> none;
+    std::vector<int> fb = {77};
+    CombatSlots5Hooks h = WithRng(123);      // clamped to index 0
+    SetCombatSlots5Hooks(&h);
+    CHECK_EQ(FindNearestEnemyTarget(none, true, self, fb), 77);
+    SetCombatSlots5Hooks(nullptr);
+}
+
 // --------------------------------------------------------------------------
 // SelectIntroTrack / PlayIntroCutscene  (0x48ac70 / 0x48ac0c)
 // --------------------------------------------------------------------------

@@ -9,7 +9,23 @@
 #include "sim/gametime.h"   // GameTimeAdvance, GameTimeCompare
 #include "sim/npcaction.h"  // NpcClock(), GetNpcLeafHooks()
 
+#include <cstring>          // std::memcpy
+
 namespace guild::sim {
+
+// Byte-exact, alignment-safe loads of values at arbitrary byte offsets. The x86
+// binary uses unaligned `*(int*)(rec+N)` / `*(WORD*)(rec+N)` reads off He/person
+// records whose fields are not naturally aligned (e.g. +39, +93); binding an i32&/
+// u16& reference to those addresses is UB in portable C++ (UBSAN). These read the
+// identical little-endian bytes without forming a misaligned reference.
+namespace {
+inline i32 LoadI32At(const HeRecord* h, int off) {
+    i32 v; std::memcpy(&v, reinterpret_cast<const u8*>(h) + off, sizeof(v)); return v;
+}
+inline u16 LoadU16At(const HeRecord* h, int off) {
+    u16 v; std::memcpy(&v, reinterpret_cast<const u8*>(h) + off, sizeof(v)); return v;
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Hook table plumbing (inert default — every leaf reports "absent"/no-op).
@@ -27,6 +43,7 @@ i32       InertPacketSeqBase(i32)                          { return 0; }
 void      InertMarkObjectBought(i32)                       {}
 void      InertQueueSlotReset28()                          {}
 void      InertSendQuickjump(i32, i32, int)                {}
+void      InertQueuePurchaseFinalize32(i32, i32)           {}
 i32       InertCityPersonId(u16)                           { return 0; }
 u8        InertCityCategory(u16)                           { return 0; }
 int       InertRandomModulo(int)                           { return 0; }
@@ -37,6 +54,7 @@ const CharActionStep5Hooks kInertHooks = {
     InertFindPerson, InertPersonQueryBegin, InertObjectQueryFind, InertFindFirst,
     InertFindNext, InertChangePlayerAction, InertQueueRequest17, InertPacketSeqBase,
     InertMarkObjectBought, InertQueueSlotReset28, InertSendQuickjump,
+    InertQueuePurchaseFinalize32,
     InertCityPersonId, InertCityCategory,
     InertRandomModulo, InertFastFrameCounter, InertMedFrameCounter,
 };
@@ -88,7 +106,10 @@ i32 FindPairedEntityReverse(HeRecord* h) {
 HeRecord* ApplyTransportSpeed(HeRecord* actor, HeRecord* link) {
     const CharActionStep5Hooks& k = GetCharActionStep5Hooks();
     // result = *(_DWORD*)(link + 59): the vehicle record the speed is written to.
-    HeRecord* veh = *reinterpret_cast<HeRecord**>(HeBytes(link) + 59);
+    // +59 is not pointer-aligned; read the stored pointer via memcpy to avoid a
+    // misaligned reference (the byte image is identical to the original's load).
+    HeRecord* veh;
+    std::memcpy(&veh, HeBytes(link) + 59, sizeof(veh));
     float base = Cas5_BaseSpeed(actor);   // *(float*)(actor + 192)
     bool scaled = true;
     if (k.fastFrameCounter() > 100) {
@@ -150,7 +171,7 @@ i32 CopyGoalToTargetDup(HeRecord* h) {
 // gilde.exe 0x4e0d54 — VIBE_CharAction_CopyGoalToTargetState2Dup
 i32 CopyGoalToTargetState2Dup(HeRecord* h) {
     CopySavedToAppt(h);
-    return GameTimeAdvance(&He_ApptTime(h), 2, 0, 0);    // +2 days
+    return GameTimeAdvance(&He_ApptTime(h), 2, 0, 0);    // edx=2 -> +2 hours (wraps to days at 24)
 }
 
 // ===========================================================================
@@ -195,7 +216,8 @@ i32 RunFollowTarget(HeRecord* h) {
         return GetNpcLeafHooks().freeHandlerEntry(h);
     // leader[+380] (idx 95) is the leader's current action record; if its first
     // byte is 22 ("dead"/terminal anim), free.
-    HeRecord* leaderAct = *reinterpret_cast<HeRecord**>(HeBytes(leader) + 380);
+    HeRecord* leaderAct;  // +380 is not pointer-aligned; load via memcpy (no UB).
+    std::memcpy(&leaderAct, HeBytes(leader) + 380, sizeof(leaderAct));
     if (leaderAct && *reinterpret_cast<u8*>(leaderAct) == 22)
         return GetNpcLeafHooks().freeHandlerEntry(h);
     // Begin the actor's own person query keyed off +16.
@@ -206,22 +228,30 @@ i32 RunFollowTarget(HeRecord* h) {
     // Optional follow object (+180): resolve it if set.
     HeRecord* obj = nullptr;
     if (Cas5_IdC180(h) != -1) {
-        i32 selfScene = *reinterpret_cast<i32*>(HeBytes(self) + 93);
+        i32 selfScene = LoadI32At(self, 93);  // (unaligned)
         obj = k.objectQueryFind(selfScene, 2, 6, Cas5_IdC180(h));
     }
-    // Stamp the clock into +82, snapshot it into the saved-pose (+68) and the
-    // scratch (+96) slots (the original copies the same 14-byte image to both).
+    // Stamp the clock into +82, then snapshot the stamped +82 image into the
+    // saved-pose (+68) slot (the original reads +82..+94 into temps after the stamp
+    // and copies them to +68..+80).
     StampClock(He_ApptTime(h));
     He_SavedTime(h) = He_ApptTime(h);
-    *reinterpret_cast<GameTime*>(HeBytes(h) + 96) = NpcClock();
-    // Drive the player action toward the leader (classByte = self's first word).
+    // Drive the player action toward the leader. The classByte is read from a
+    // register (ecx) that the preceding query calls leave holding the resolved
+    // record's class word; we model it as self's first word (see report — the
+    // exact source register is indeterminate at the binary level).
     u16 cls = *reinterpret_cast<u16*>(HeBytes(self));
     k.changePlayerAction(self, obj, h, cls);
-    // Schedule the walk for +30 minutes (+82).
+    // Stamp the clock into the scratch (+96) slot — AFTER changePlayerAction, as
+    // the original does (0x4e1c30, post-call).
+    *reinterpret_cast<GameTime*>(HeBytes(h) + 96) = NpcClock();
+    // Schedule the walk for +30 minutes (+82): Advance(+82, 0, 0, 30) -> ebx=30.
     GameTimeAdvance(&He_ApptTime(h), 0, 0, 30);
     // Snapshot the appointment into the give-up block (+184) and push +6 hours.
+    // The original is Advance(+184, 6, 0, 0) (edx=6 adds to the hour count), NOT a
+    // +360-minute advance.
     *reinterpret_cast<GameTime*>(HeBytes(h) + 184) = He_ApptTime(h);
-    return GameTimeAdvance(reinterpret_cast<GameTime*>(HeBytes(h) + 184), 0, 0, 6 * 60);
+    return GameTimeAdvance(reinterpret_cast<GameTime*>(HeBytes(h) + 184), 6, 0, 0);
 }
 
 // ===========================================================================
@@ -247,9 +277,13 @@ u32 RunBuyObject(HeRecord* h) {
         if (!self)
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
         // find the target object (+176) and queue a cmd17 buy request.
-        i32 selfScene = *reinterpret_cast<i32*>(HeBytes(self) + 93);
+        i32 selfScene = LoadI32At(self, 93);  // (unaligned)
         k.objectQueryFind(selfScene, 1, 1, Cas5_IdB176(h));
-        int hiword = (Cas5_IdA172(h) >> 16) & 0xFFFF;   // HIWORD(*(DWORD*)(a1+170))
+        // hiword counter: the original reads the DWORD at +170 and `sar 16` it
+        // (0x4dd482: mov ebx,[ebp+0AAh]; 0x4dd489: sar ebx,10h) — a SIGNED >>16 of
+        // the dword at offset 170 (== the sign-extended low word of +172). NOT a
+        // masked HIWORD of +172.
+        int hiword = LoadI32At(h, 170) >> 16;
         i32 handle = k.queueRequest17(Cas5_IdB176(h), 0, 1, hiword, 0);
         u32 prevState = static_cast<u32>(He_State(h));
         Cas5_IdC180(h) = handle;          // a1[45] = handle (+180)
@@ -271,9 +305,9 @@ u32 RunBuyObject(HeRecord* h) {
     if (objType == 301)
         k.queueSlotReset28();
     // city-category gate (byte_12CE912[536*selfCity] == 6): render + quickjump.
-    u16 selfCity = *reinterpret_cast<u16*>(HeBytes(self) + 39);
+    u16 selfCity = LoadU16At(self, 39);  // (unaligned)
     if (k.cityCategory(selfCity) == 6) {
-        HeRecord* found = k.objectQueryFind(*reinterpret_cast<i32*>(HeBytes(self) + 93),
+        HeRecord* found = k.objectQueryFind(LoadI32At(self, 93),  // (unaligned)
                                             1, 1, Cas5_IdB176(h));
         i32 recipient = k.cityPersonId(selfCity);
         // The original renders one of two templates (6202 "not bought" when the
@@ -286,6 +320,16 @@ u32 RunBuyObject(HeRecord* h) {
         if (seqBase)
             k.markObjectBought(seqBase);
     }
+    // Purchase-finalize tail (runs regardless of the city-category branch — the
+    // category block falls through to loc_4DD37A): resolve the object again
+    // (+176), then emit QueueRequestFlagBlob32(4, {buyer_dword @ self+1,
+    // object_dword @ obj+2}). The interleaved GameTime advance there (0x4dd3c0)
+    // computes into the blob's first dword which is then OVERWRITTEN by *(self+1),
+    // so the advance result is discarded; we skip it.
+    HeRecord* finalObj = k.objectQueryFind(LoadI32At(self, 93), 1, 1, Cas5_IdB176(h));
+    i32 buyerBlob = LoadI32At(self, 1);                          // *(DWORD*)(self+1)
+    i32 objBlob   = finalObj ? LoadI32At(finalObj, 2) : 0;       // *(DWORD*)(obj+2)
+    k.queuePurchaseFinalize32(buyerBlob, objBlob);
     return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
 }
 

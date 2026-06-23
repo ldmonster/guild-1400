@@ -7,6 +7,10 @@ namespace guild::render {
 
 namespace {
 
+// HARDENING (wave-11) bounds for the malformed-input guards in BmpLoadBuffer.
+constexpr int       kI32Min       = (-2147483647 - 1);  // INT_MIN (abs is UB)
+constexpr long long kMaxBmpPixels = 1LL << 28;          // 256M px ceiling (sane)
+
 inline u16 rd16(const u8* p) { return (u16)(p[0] | (p[1] << 8)); }
 inline u32 rd32(const u8* p) { return (u32)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24)); }
 inline void wr16(std::vector<u8>& v, u16 x) { v.push_back((u8)x); v.push_back((u8)(x >> 8)); }
@@ -169,7 +173,19 @@ std::vector<u8> BmpLoadBuffer(const std::vector<u8>& file, int wantBpp,
     if (!is24 && (bpp != 8 || comp > 1))
         return {};
 
-    int absH = std::abs(height);
+    // HARDENING (wave-11): reject degenerate dimensions BEFORE sizing/indexing
+    // the decode buffer. The on-disk width/height are untrusted i32s; a negative
+    // or absurd value would otherwise (a) make std::abs(INT_MIN) UB, and
+    // (b) turn `(size_t)srcStride * absH` into a wild allocation size / OOB index.
+    // A real BMP has positive dims; a malformed one fails safe (empty result),
+    // which is the original's behavior too (it could not decode such a file).
+    if (width <= 0 || height == 0 || height == kI32Min)
+        return {};
+    int absH = (height < 0) ? -height : height;
+    // Cap the pixel count so srcStride*absH cannot overflow the 32-bit math the
+    // original used (and matches what any real surface allocation could hold).
+    if ((long long)width * absH > kMaxBmpPixels)
+        return {};
     outWidth = width;
     outHeight = absH;
 
@@ -179,6 +195,9 @@ std::vector<u8> BmpLoadBuffer(const std::vector<u8>& file, int wantBpp,
     if (!is24) {
         int npal = (int)clrUsed;
         if (npal == 0) npal = 256;
+        // HARDENING: srcPal only holds 256 entries; a malformed biClrUsed (huge
+        // or negative) must not drive the unpack loop past it. Clamp to [0,256].
+        if (npal < 0 || npal > 256) npal = 256;
         if (file.size() < 0x36 + (size_t)4 * npal)
             return {};
         const u8* pp = file.data() + 0x36;

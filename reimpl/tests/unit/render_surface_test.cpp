@@ -81,13 +81,19 @@ TEST(RenderSurface, SetGetPixel16) {
 TEST(RenderSurface, SetPixel24Bgr) {
     Surface* s = SurfaceCreate(8, 8, 24);
     SurfaceSetPixelRgb(s, 2, 1, 0x11, 0x22, 0x33);
-    u8* p = s->pixels + (s->widthPx * 1) * 3 + 2 * 3;
+    // FAITHFUL: gilde.exe SetPixelRgb @0x423f32 addresses the 24bpp pixel as
+    // pixels + (widthPx*y) + (bytespp*x), with the row term NOT scaled by bytespp.
+    // For (2,1): widthPx=8, y=1, bytespp=3 -> byte offset 8 + 6 = 14.
+    u8* p = s->pixels + (s->widthPx * 1) + 2 * 3;
     CHECK_EQ((int)p[0], 0x11); // R
     CHECK_EQ((int)p[1], 0x22); // G
     CHECK_EQ((int)p[2], 0x33); // B
+    // GetPixelRgb @0x423e11 reads at pixels + (widthPx*y*bytespp) + (bytespp*x),
+    // i.e. byte offset 8*3 + 6 = 30 -> a DIFFERENT location than Set wrote. The
+    // original Set/Get 24bpp pair is asymmetric, so the round-trip reads zeros.
     u8 px[3];
     SurfaceGetPixelRgb(s, 2, 1, px);
-    CHECK_EQ((int)px[0], 0x11); CHECK_EQ((int)px[1], 0x22); CHECK_EQ((int)px[2], 0x33);
+    CHECK_EQ((int)px[0], 0x00); CHECK_EQ((int)px[1], 0x00); CHECK_EQ((int)px[2], 0x00);
     SurfaceDestroy(s);
 }
 
@@ -379,4 +385,93 @@ TEST(RenderPaintbox, LineDraws) {
     for (int i = 0; i <= 6; ++i)
         CHECK_EQ(((u16*)s->pixels)[i * 16 + i], (u16)0xFFFF);
     SurfaceDestroy(s);
+}
+
+// ===========================================================================
+// W11-ANIM hardening — degenerate surface geometry / blit bounds (ASAN/UBSAN).
+// ===========================================================================
+
+// HLine running off the right edge: every pixel past clipX1 is rejected by
+// SetPixelRgb, so the write never leaves the row. ASAN proves no OOB.
+TEST(RenderSurfaceEdge, HLinePastRightEdgeClipped) {
+    Surface* s = SurfaceCreate(8, 4, 16);
+    int r = SurfaceDrawHLine(s, 6, 1, 100, 31, 0, 0);   // far past width 8
+    CHECK_EQ(r, 0);                                      // last write was rejected
+    SurfaceDestroy(s);
+}
+
+// Diagonal line whose endpoints are far outside the surface: Bresenham still only
+// commits in-bounds pixels (SetPixelRgb clips each step).
+TEST(RenderSurfaceEdge, LineFullyOutsideClipped) {
+    Surface* s = SurfaceCreate(8, 8, 16);
+    (void)SurfaceDrawLine(s, -50, -50, 50, 50, 0x1F, 0x1F, 0x1F);
+    SurfaceDestroy(s);
+    CHECK(true);                                         // no ASAN trap == pass
+}
+
+// Rect outline whose box extends past the surface: each edge pixel is clipped.
+TEST(RenderSurfaceEdge, RectOutlinePastEdgeClipped) {
+    Surface* s = SurfaceCreate(8, 8, 16);
+    (void)SurfaceDrawRectOutline(s, -2, -2, 20, 20, 0x1F, 0, 0x1F);
+    SurfaceDestroy(s);
+    CHECK(true);
+}
+
+// 1x1 surface: the smallest valid allocation. SetPixel at (0,0) works; everything
+// else is clipped. ColorFill memsets exactly 1 pixel.
+TEST(RenderSurfaceEdge, OnePixelSurface) {
+    Surface* s = SurfaceCreate(1, 1, 16);
+    CHECK(s != nullptr);
+    CHECK_EQ(SurfaceSetPixelRgb(s, 0, 0, 31, 0, 0), 1);
+    CHECK_EQ(SurfaceSetPixelRgb(s, 1, 0, 31, 0, 0), 0);
+    SurfaceColorFill(s, 0, 0, 0);
+    SurfaceDestroy(s);
+}
+
+// Odd width at 16bpp: pitch = width*2, buffer = pitch*height. Writing the LAST pixel
+// (width-1, height-1) stores a u16 at row*widthPx + x; ASAN proves the 2-byte store
+// lands inside the buffer for a non-power-of-two width.
+TEST(RenderSurfaceEdge, OddWidth16bppLastPixelInBounds) {
+    Surface* s = SurfaceCreate(5, 3, 16);    // odd, non-pow2 width
+    CHECK(s != nullptr);
+    CHECK_EQ((int)s->bpp, 16);
+    CHECK_EQ(SurfaceSetPixelRgb(s, 4, 2, 31, 0, 0), 1);   // last pixel
+    u8 out[3];
+    SurfaceGetPixelRgb(s, 4, 2, out);
+    SurfaceDestroy(s);
+    CHECK(true);
+}
+
+// NOTE (envelope, NOT tested): a 15bpp SYSTEM-memory surface is degenerate — the
+// original VIBE_Surface_Create computes pitch = (bpp>>3)*width == width bytes (1
+// byte/px) yet SurfaceSetPixelRgb's 15bpp branch stores a u16 (2 bytes/px). That
+// undersized allocation would corrupt for the original too; the engine only uses
+// 15bpp as a DDraw DISPLAY format, never a sysmem surface. So 15bpp create+write is
+// out of envelope and intentionally not driven here (a 1:1 question for MCP, see
+// progress/harden-anim-wave11.md). The 8/16/24/32bpp paths are the real ones.
+
+// Clone of a 1x1 surface copies pitch*height bytes without over-reading the source.
+TEST(RenderSurfaceEdge, CloneTinySurface) {
+    Surface* s = SurfaceCreate(1, 1, 32);
+    SurfaceSetPixelRgb(s, 0, 0, 1, 2, 3);
+    Surface* c = SurfaceClone(s);
+    CHECK(c != nullptr);
+    u8 a[3], b[3];
+    SurfaceGetPixelRgb(s, 0, 0, a);
+    SurfaceGetPixelRgb(c, 0, 0, b);
+    CHECK_EQ((int)a[0], (int)b[0]);
+    SurfaceDestroy(s);
+    SurfaceDestroy(c);
+}
+
+// Destroying a null surface and getting caps from a null surface are no-ops.
+TEST(RenderSurfaceEdge, NullSurfaceGuards) {
+    CHECK_EQ(SurfaceDestroy(nullptr), 0);
+    u32 caps = 0;
+    CHECK_EQ(SurfaceGetCaps(nullptr, &caps), false);
+    u8 out[3] = {9,9,9};
+    SurfaceGetPixelRgb(nullptr, 0, 0, out);
+    CHECK_EQ((int)out[0], 0);                            // null -> zeroed
+    SurfaceColorFill(nullptr, 1, 2, 3);                 // no crash
+    CHECK_EQ(SurfaceSetPixelRgb(nullptr, 0, 0, 1, 1, 1), 0);
 }

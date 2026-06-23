@@ -221,3 +221,141 @@ TEST(io_zip_archive, cached_position_roundtrip) {
     CHECK(Eq(out, kPoemBytes, kPoemBytes_len));
     z.Close();
 }
+
+// ===========================================================================
+// Wave-11 hardening: malformed / truncated / oversized inputs. None of these
+// must read or write out of bounds; every one must fail safely (Open()==false
+// or extract/locate returns an error). The valid-asset path above is unchanged.
+// ===========================================================================
+
+// 0-byte archive: no EOCD, Open must fail (and not touch file_.data()).
+TEST(io_zip_archive, malformed_empty_archive) {
+    MockFs fs; static const u8 empty[1] = {0};
+    fs.add("e.BIN", empty, 0);
+    ZipArchive z;
+    CHECK(!z.Open(&fs, "e.BIN"));
+    CHECK(!z.isOpen());
+    std::vector<u8> out;
+    CHECK(!z.ExtractCurrentFile(out));        // not open -> false, no OOB
+}
+
+// 1-byte and a few-byte buffers: FindEndOfCentralDir's maxBack<=4 guard fires.
+TEST(io_zip_archive, malformed_tiny_archives) {
+    for (std::size_t n = 1; n <= 8; ++n) {
+        std::vector<u8> buf(n, (u8)0x50);     // all 'P' — no real signature
+        MockFs fs; fs.add("t.BIN", buf.data(), buf.size());
+        ZipArchive z;
+        CHECK(!z.Open(&fs, "t.BIN"));
+        CHECK(!z.isOpen());
+    }
+}
+
+// Header-only: just a local-file-header signature, no central dir / EOCD.
+TEST(io_zip_archive, malformed_header_only) {
+    static const u8 hdr[] = {0x50,0x4B,0x03,0x04, 0x14,0,0,0, 0,0,0,0};
+    MockFs fs; fs.add("h.BIN", hdr, sizeof(hdr));
+    ZipArchive z;
+    CHECK(!z.Open(&fs, "h.BIN"));
+}
+
+// EOCD signature present but the record is truncated (fewer than 22 bytes after
+// the signature) — the ReadShort/ReadLong run off the buffer and Open fails.
+TEST(io_zip_archive, malformed_truncated_eocd) {
+    // "PK\5\6" then only 4 of the 18 trailing bytes.
+    static const u8 trunc[] = {0x50,0x4B,0x05,0x06, 0,0,0,0};
+    MockFs fs; fs.add("te.BIN", trunc, sizeof(trunc));
+    ZipArchive z;
+    CHECK(!z.Open(&fs, "te.BIN"));
+}
+
+// Valid EOCD record but central-dir offset+size point past EOF: Open's sanity
+// check (eocd < off+size) rejects it; if overflow slips it, Seek bounds-checks.
+TEST(io_zip_archive, malformed_bad_central_dir_offset) {
+    // Build a minimal 22-byte EOCD claiming 1 entry, size_cd=0x1000, off_cd=0x7000.
+    u8 b[22] = {0};
+    b[0]=0x50; b[1]=0x4B; b[2]=0x05; b[3]=0x06;       // signature
+    // disk numbers = 0 ; entries this disk / total = 1
+    b[8]=1; b[10]=1;
+    // size of central dir (LE u32) = 0x1000
+    b[12]=0x00; b[13]=0x10; b[14]=0; b[15]=0;
+    // offset of central dir (LE u32) = 0x7000 (well past this 22-byte file)
+    b[16]=0x00; b[17]=0x70; b[18]=0; b[19]=0;
+    MockFs fs; fs.add("bo.BIN", b, sizeof(b));
+    ZipArchive z;
+    CHECK(!z.Open(&fs, "bo.BIN"));
+}
+
+// EOCD declares a central-dir count larger than what the file holds. Walking the
+// directory must terminate (Seek fails -> ReadCentralDirEntry errors) without OOB.
+TEST(io_zip_archive, malformed_count_too_large) {
+    // EOCD with off_cd=0, size_cd=0 but entries=0xFFFF, placed right at start so
+    // byteBeforeZip arithmetic stays in range; GoToFirstFile reads at offset 0
+    // which is the EOCD sig (not a central sig) -> kZipBadZipFile, not OOB.
+    u8 b[22] = {0};
+    b[0]=0x50; b[1]=0x4B; b[2]=0x05; b[3]=0x06;
+    b[8]=0xFF; b[9]=0xFF; b[10]=0xFF; b[11]=0xFF;      // entries this disk/total
+    MockFs fs; fs.add("ct.BIN", b, sizeof(b));
+    ZipArchive z;
+    // numEntriesTotal==numEntriesThisDisk so that gate passes; off+size==0<=eocd.
+    bool opened = z.Open(&fs, "ct.BIN");
+    if (opened) {
+        // first central-dir read lands on the EOCD signature -> not a member.
+        CHECK(!z.currentFileOk());
+        z.Close();
+    }
+    CHECK(true);   // reaching here without an ASAN abort is the assertion
+}
+
+// A member whose declared compressedSize exceeds the archive: extract must fail
+// at the dataOff+compSize > file size guard, never reading past the buffer.
+TEST(io_zip_archive, malformed_member_size_exceeds_archive) {
+    // Take the valid zip, then corrupt the FIRST central-dir entry's compressed
+    // size to a huge value. Locate the central sig "PK\1\2" and patch +20..+23.
+    std::vector<u8> buf(kUnitZip, kUnitZip + kUnitZip_len);
+    std::size_t cd = 0;
+    for (std::size_t i = 0; i + 4 <= buf.size(); ++i)
+        if (buf[i]==0x50 && buf[i+1]==0x4B && buf[i+2]==0x01 && buf[i+3]==0x02) { cd=i; break; }
+    CHECK(cd != 0);
+    // central header +20 = compressed size (LE u32)
+    buf[cd+20]=0xFF; buf[cd+21]=0xFF; buf[cd+22]=0xFF; buf[cd+23]=0x7F;
+    MockFs fs; fs.add("ms.BIN", buf.data(), buf.size());
+    ZipArchive z;
+    if (z.Open(&fs, "ms.BIN")) {
+        std::vector<u8> out;
+        CHECK_EQ(z.LocateFileByName("hello.txt", false), (int)kZipOk);
+        CHECK(!z.ExtractCurrentFile(out));   // size guard rejects, no OOB read
+        z.Close();
+    }
+}
+
+// Truncated deflate payload: corrupt a deflated member's stored compressedSize so
+// the inflate input is cut short; extract must fail (size or CRC mismatch).
+TEST(io_zip_archive, malformed_truncated_deflate) {
+    MockFs fs; fs.add("d.BIN", kUnitZip, kUnitZip_len);
+    ZipArchive z; CHECK(z.Open(&fs, "d.BIN"));
+    CHECK_EQ(z.LocateFileByName("data/poem.txt", true), (int)kZipOk);
+    // Re-mount a copy whose archive is physically truncated mid-deflate-stream.
+    std::vector<u8> cut(kUnitZip, kUnitZip + (kUnitZip_len / 2));
+    MockFs fs2; fs2.add("d2.BIN", cut.data(), cut.size());
+    ZipArchive z2;
+    // The truncated file likely has no valid EOCD -> Open fails; if it opens,
+    // extraction of any deflated member must still fail safely.
+    if (z2.Open(&fs2, "d2.BIN")) {
+        std::vector<u8> out;
+        if (z2.LocateFileByName("data/poem.txt", true) == (int)kZipOk)
+            CHECK(!z2.ExtractCurrentFile(out));
+        z2.Close();
+    }
+    z.Close();
+}
+
+// LocateFileByName with an over-long (>=256) name returns PARAMERROR, no overflow.
+TEST(io_zip_archive, malformed_overlong_locate_name) {
+    MockFs fs; fs.add("a.BIN", kUnitZip, kUnitZip_len);
+    ZipArchive z; CHECK(z.Open(&fs, "a.BIN"));
+    std::string huge(512, 'x');
+    CHECK_EQ(z.LocateFileByName(huge.c_str(), false), (int)kZipParamError);
+    // null name -> PARAMERROR
+    CHECK_EQ(z.LocateFileByName(nullptr, false), (int)kZipParamError);
+    z.Close();
+}

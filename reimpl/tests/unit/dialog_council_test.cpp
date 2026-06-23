@@ -104,3 +104,42 @@ TEST(DialogCouncilUnit, ClickOffButtonsYieldsNone) {
     CHECK(!c.hitButton);
     CHECK(c.interaction.action == CouncilAction::kNone);
 }
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-12): an office tree with ZERO offices, with MANY offices, and a
+// click that hits no button (a "bad node") must not index the office list out of
+// bounds. ClickCouncilDialog guards officeIndex against dlg.offices.size(); render
+// clips. Drive each and assert no OOB (ASAN).
+// ---------------------------------------------------------------------------
+TEST(DialogCouncilUnit, ZeroOfficesNoHitNoOOB) {
+    std::vector<OfficeChoice> offices;                 // empty
+    CouncilDialog d = BuildSyntheticCouncilDialog(offices, /*applicant*/5, 0, 0, 200, 200);
+    CHECK_EQ(d.buttonCount(), 0);
+
+    CouncilDialogClick c = ClickCouncilDialog(d, -100, -100);   // misses everything
+    CHECK(!c.hitButton);
+    CHECK(c.interaction.action == CouncilAction::kNone);
+}
+
+TEST(DialogCouncilUnit, ManyOfficesRendersNoOOB) {
+    std::vector<OfficeChoice> offices;
+    for (int i = 0; i < 100; ++i) {
+        OfficeChoice o{}; o.officeType = (u8)(i % 37); o.holderKey = i; offices.push_back(o);
+    }
+    CouncilDialog d = BuildSyntheticCouncilDialog(offices, 5, -30, -30, 60, 60);
+    CHECK_EQ(d.buttonCount(), 100);
+
+    CouncilRenderStats st;
+    render::Surface* s = RenderCouncilDialog(d, 32, 32, st);    // tiny fb, neg origin
+    CHECK(s != nullptr);
+    if (s) render::SurfaceDestroy(s);
+
+    // Hitting the first office button resolves a valid holderKey (bounded index).
+    CouncilWidgetRect btn{}; bool found = false;
+    for (const auto& w : d.widgets)
+        if (w.role == CouncilWidgetRole::kOfficeButton) { btn = w; found = true; break; }
+    CHECK(found);
+    CouncilDialogClick c = ClickCouncilDialog(d, btn.x + 1, btn.y + 1);
+    CHECK(c.hitButton);
+    CHECK(c.officeIndex >= 0 && c.officeIndex < (int)d.offices.size());
+}

@@ -72,7 +72,8 @@ TEST(HudBinderUnit, PlayerBarSlotLayoutGolden) {
     CHECK_EQ(slots[2].slotIndex, 2);
 
     // Slot 1 layout: rowY=78, icon at (6,78), sprite at (8,95), label at (0,82,w95),
-    // sub-window at (15,141,80x6).
+    // sub-window at (6,141, w15 x h80).  AddChildWindow(a1=x=6, a2=y=78*i+63, a3=w=15,
+    // a4=h=80) @0x4b19a5 -> x=6, y=141, w=15, h=80.
     const gui::PlayerBarLayout& L = slots[1].layout;
     CHECK_EQ(L.rowY, 78);
     CHECK_EQ(L.iconX, 6);
@@ -82,10 +83,10 @@ TEST(HudBinderUnit, PlayerBarSlotLayoutGolden) {
     CHECK_EQ(L.labelX, 0);
     CHECK_EQ(L.labelY, 82);
     CHECK_EQ(L.labelWidth, 95);
-    CHECK_EQ(L.subWinX, 15);
+    CHECK_EQ(L.subWinX, 6);
     CHECK_EQ(L.subWinY, 141);
-    CHECK_EQ(L.subWinW, 80);
-    CHECK_EQ(L.subWinH, 6);
+    CHECK_EQ(L.subWinW, 15);
+    CHECK_EQ(L.subWinH, 80);
 
     // Re-assigning an existing object id returns the SAME slot (de-dup).
     auto again = b.buildPlayerBar({200});

@@ -199,10 +199,14 @@ void Animal_Update(int season) {
         // probability that rises as the animal ages.
         unsigned threshold = static_cast<unsigned>(rec->spawnTick) + 2100;
         if (threshold < static_cast<unsigned>(g_gameTick)) {
-            // v14 = (float)(threshold / (gameTick - threshold))  [integer div]
-            int denom = g_gameTick - static_cast<int>(threshold);
-            float v14 = static_cast<float>(static_cast<int>(
-                threshold / static_cast<unsigned>(denom)));
+            // 0x4837b5: sub ecx,eax (gameTick - threshold, unsigned)
+            // 0x4837bf: xor edx,edx; div ecx  -> UNSIGNED quotient in eax
+            // 0x4837c1..ca: store {eax, edx=0} then `fild qword` -> the 64-bit
+            // value (low=quotient, high=0) loaded as a non-negative integer, then
+            // fstp -> float. So v14 == (float)(u32 quotient); no signed (int) step
+            // (a bare (int) cast would mis-sign quotients >= 2^31).
+            unsigned denom = static_cast<unsigned>(g_gameTick) - threshold;
+            float v14 = static_cast<float>(threshold / denom);
             if (util::RandomFloatScaled() > v14)
                 rec->despawn = 1;
         }

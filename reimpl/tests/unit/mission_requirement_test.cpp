@@ -263,18 +263,22 @@ TEST(MissionReqUnit, CheckStatCombo_NeedsThreeAndAvg) {
     CHECK(MissionReqCheckStatCombo(&obj) == false);
 }
 
-// CheckCumulativeStats: 5 gates must not be "count>0 & avg<1"; final state-9
-// (sum+count) >= threshold. With all owners "busy" (kind 6) avg==1.0 passes the
-// gates; sum(2)+count(2) == 4 reaches threshold 4.
+// CheckCumulativeStats: 5 gates (states 21,20,18,22,8) must not be "count>0 &
+// avg<1"; the final gate is (count(9)<=0 || avg(9)>=1.0) AND
+// (sum(21)+sum(20)+sum(18)+sum(22)+sum(8)+sum(9)) >= threshold. The original
+// accumulates each state's out->sum into a running register (ecx, 0x53954e..
+// 0x539624) and compares the TOTAL to row.threshold — NOT just state 9's sum.
+// The mock iterator returns the same 2 busy (kind 6) members for every state
+// query, so each of the 6 states contributes sum==2 -> total == 12.
 TEST(MissionReqUnit, CheckCumulativeStats_Golden) {
     for (auto& p : sim::g_persons) p.kind = 6;  // all busy -> avg 1.0
     auto m0 = MakeMember(0);
     auto m1 = MakeMember(0);
     sim::MockSetIterList({&m0, &m1});
     ReqTableRow row{};
-    row.threshold = 4;    // 2+2 >= 4 -> true
+    row.threshold = 12;   // total sum (6 states * 2) == 12 >= 12 -> true
     CHECK(MissionReqCheckCumulativeStats(&row) == true);
-    row.threshold = 5;    // 4 >= 5 -> false
+    row.threshold = 13;   // 12 >= 13 -> false
     CHECK(MissionReqCheckCumulativeStats(&row) == false);
 }
 

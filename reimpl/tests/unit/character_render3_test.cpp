@@ -561,10 +561,12 @@ TEST(CharRender3, ScreenToWorldRayGolden) {
     CHECK(Near(dir[0], 0.60854932f));
     CHECK(Near(dir[1], -0.45641199f));
     CHECK(Near(dir[2], 0.64911927f));
-    // scaled = dir * (11-1)/256.
-    CHECK(Near(scaled[0], 0.02377146f));
-    CHECK(Near(scaled[1], -0.01782859f));
-    CHECK(Near(scaled[2], 0.02535622f));
+    // 0x4268ff: fdiv [var_1C] -> divisor is the ROTATED dir.y (var_1C), NOT focal.
+    // scaled = dir * (zFar-zNear)/dir.y; so scaled.y == (zFar-zNear) == 10.
+    // python golden: scaled = (-13.33333, 10.0, -14.22222).
+    CHECK(Near(scaled[0], -13.333333f, 1e-3f));
+    CHECK(Near(scaled[1], 10.0f, 1e-3f));
+    CHECK(Near(scaled[2], -14.222222f, 1e-3f));
     // unit-length direction.
     float len = std::sqrt(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
     CHECK(Near(len, 1.0f, 1e-3f));

@@ -159,8 +159,20 @@ OptionsResult Gfx_Commit(bool accepted, const int values[kGfxWidgetCount], int r
 }
 
 // gilde.exe 0x56d166 — on Cancel, return immediately (no save).  On OK: save back; if the
-// difficulty dropdown changed (and byte_63CC40), rebuild the groundplan; always
-// WriteGfxSettings + ApplyCameraAndScroll.
+// difficulty dropdown changed, write byte_12335B8 + SetObjectsVisible(form,0), and — ONLY
+// when byte_63CC40 (in-game) — rebuild the groundplan + fade; always WriteGfxSettings +
+// ApplyCameraAndScroll.
+//
+// Disasm note (0x56d207..0x56d24c): the comparison is `live(child9) != prior byte_12335B8`
+// (prior == the seeded value), independent of byte_63CC40.  Only the groundplan-rebuild
+// branch (DestroyWindow/CreateWindow/FadeOutToBlack/dword_631DB4=1) is gated on byte_63CC40.
+// The runner encodes the change-detection in `diffSaved`: in-game it passes the prior
+// difficulty so a real change fires RebuildGroundplan(); out-of-game it passes diffValue so
+// the branch is suppressed (matching the original — no groundplan rebuild out-of-game).
+// Game_SaveBack already writes game.difficulty unconditionally, so the saved struct value is
+// identical to the original whether or not the change branch runs.
+// BOUNDARY: the original's out-of-game `SetObjectsVisible(form,0)` on a difficulty change has
+// no observable effect (no groundplan present) and no sink hook; not modeled here.
 OptionsResult Game_Commit(bool accepted, const int values[kGameWidgetCount], int diffValue,
                           int diffSaved, config::GameSettings& game) {
     OptionsResult r;

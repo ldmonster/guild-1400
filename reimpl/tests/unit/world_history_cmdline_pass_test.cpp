@@ -26,6 +26,25 @@ TEST(HistCmdline, CommandTableRecovered) {
     CHECK(std::string(kHistoryCommandNames[26]) == "INVENTAR_PLUS");
 }
 
+// --- FULL byte-exact command-keyword table (aFest @0x633938, 64-byte stride) -
+// Pins every one of the 27 rows by index, so a single-row drift is caught. Values
+// are the source's own recovery (history_commandline_pass.cpp kHistoryCommandNames).
+TEST(HistCmdline, CommandTableFullByteExact) {
+    static const char* const kExpect[27] = {
+        "FEST", "BELAGERUNG_START", "AUFSTAND", "BRAND", "WIRBELSTURM",
+        "STADTKASSE", "VERMOEGEN_STEUER", "VERMOEGEN", "ANSEHEN_BEI_AMTSTRAEGERN",
+        "KILL_PLAYER", "STRAFE_HINRICHTUNG", "STRAFE_KERKER",
+        "AMTSTRAEGER_INVENTAR_PLUS", "GESETZ", "GESETZ_REL", "GLAUBENSWECHSEL",
+        "AUFRUHR", "GILDENSITZE_BRACH", "NACHFRAGE", "SOELDNER_PLUENDERN",
+        "SOELDNER_MARODIEREN", "FERNHANDEL_RAUBRITTER", "SPENDE_ANSEHEN",
+        "BETEILIGUNG", "KOMMENTARE", "PEST", "INVENTAR_PLUS",
+    };
+    CHECK_EQ(kHistoryCommandCount, 27);
+    CHECK_EQ(kHistoryCommandStride, 64);
+    for (int i = 0; i < 27; ++i)
+        CHECK(std::string(kHistoryCommandNames[i]) == kExpect[i]);
+}
+
 // --- HistoryCommandIndex: leading-prefix memcmp, 27 == not found -----------
 TEST(HistCmdline, CommandIndexMatch) {
     CHECK_EQ(HistoryCommandIndex("FEST"), 0);
@@ -58,6 +77,76 @@ TEST(HistCmdline, GroupRefClassify) {
     HistoryGroupRef bad = HistoryClassifyGroupRef("X_SET 9 rest");  // slot 9 >= 4
     CHECK(bad.kind == HistoryGroupKind::kSet);
     CHECK(!bad.valid);
+}
+
+// --- HARDENING: malformed/short tokens must not over-read -------------------
+// The original memcmp's each token against `strlen(name)` keyword bytes; its tokens
+// live in a 6080-byte NUL-padded scratch so the read stays in-bounds. Our callers
+// pass exact-length C strings, so a token shorter than the keyword would have made
+// the original's memcmp read past the token end (caught by ASAN). The fix bounds the
+// comparison at the token's NUL (strncmp), which is behaviour-identical (a short
+// token has its NUL where the keyword has a non-NUL char -> never a prefix match).
+TEST(HistCmdline, CommandIndexShortTokenNoOverread) {
+    // "STAD" is a prefix of "STADTKASSE" but shorter -> NOT a match (the original's
+    // memcmp would read 10 bytes from a 5-byte buffer). Must return the 27 sentinel.
+    CHECK_EQ(HistoryCommandIndex("STAD"), kHistoryCommandCount);
+    // A one-char token shorter than every keyword.
+    CHECK_EQ(HistoryCommandIndex("F"), kHistoryCommandCount);
+    // A token equal to a keyword still matches.
+    CHECK_EQ(HistoryCommandIndex("STADTKASSE"), 5);
+    // "STADTKASSE+500" is longer than "BELAGERUNG_START" (16); the scan must not
+    // over-read the token when comparing against the longer keyword row.
+    CHECK_EQ(HistoryCommandIndex("STADTKASSE+500"), 5);
+}
+
+// The leading group-ref classifier loads a 4-byte prefix dword at head+1 and the
+// slot digit at head+6; on a short head the original (NUL-padded scratch) read NUL,
+// but an exact-length C string would over-read. These pin the strncmp + head[5]
+// guard fix.
+TEST(HistCmdline, GroupRefShortHeadNoOverread) {
+    // 1-char head: head+1 is the NUL; prefix compare must not read 4 bytes past it.
+    CHECK(HistoryClassifyGroupRef("X").kind == HistoryGroupKind::kNone);
+    // 2-char head whose +1 byte starts "_" but is truncated mid-prefix.
+    CHECK(HistoryClassifyGroupRef("X_").kind == HistoryGroupKind::kNone);
+    CHECK(HistoryClassifyGroupRef("X_S").kind == HistoryGroupKind::kNone);
+    CHECK(HistoryClassifyGroupRef("X_SE").kind == HistoryGroupKind::kNone);
+    // Exactly "X_SET" (5 chars): the prefix matches but the slot digit at head[6] is
+    // OOB. The original's NUL-padded scratch reads NUL there -> slot 0; the guard
+    // reproduces that (head[5]==NUL -> slot char '\0' -> ParseInt -> 0).
+    HistoryGroupRef set5 = HistoryClassifyGroupRef("X_SET");
+    CHECK(set5.kind == HistoryGroupKind::kSet);
+    CHECK(set5.valid);
+    CHECK_EQ(set5.slot, 0);
+    // "X_USE" likewise.
+    HistoryGroupRef use5 = HistoryClassifyGroupRef("X_USE");
+    CHECK(use5.kind == HistoryGroupKind::kUse);
+    CHECK_EQ(use5.slot, 0);
+    // Empty head -> kNone (existing early-out).
+    CHECK(HistoryClassifyGroupRef("").kind == HistoryGroupKind::kNone);
+    CHECK(HistoryClassifyGroupRef(nullptr).kind == HistoryGroupKind::kNone);
+}
+
+// A NUL-less / overlong token in the second pass: a body that is one giant token
+// must tokenize and match (or not) without over-reading.
+TEST(HistCmdline, SecondPassOverlongTokenNoOverread) {
+    int fired = 0;
+    auto disp = [&](int, const std::string&, const std::string&, int) { ++fired; };
+    // A 300-char token, no spaces: unmatched (not a keyword prefix) -> no dispatch.
+    std::string big(300, 'Z');
+    auto r = HistoryParseCommandlineSecondPass(big, disp);
+    CHECK(r == HistoryCmdlineResult::kOk);
+    CHECK_EQ(fired, 0);
+    // A short trailing token shorter than any keyword must not over-read at EOF.
+    fired = 0;
+    auto r2 = HistoryParseCommandlineSecondPass("FEST ST", disp);  // "ST" too short
+    CHECK(r2 == HistoryCmdlineResult::kOk);
+    CHECK_EQ(fired, 1);  // only FEST matched
+    // A truncated "_SET"-prefixed body (no slot digit / no body) must not over-read.
+    fired = 0;
+    auto r3 = HistoryParseCommandlineSecondPass("X_SET", disp);
+    // head+7 body start is clamped to the string end; no tokens -> no dispatch.
+    CHECK(r3 == HistoryCmdlineResult::kOk || r3 == HistoryCmdlineResult::kDisabled);
+    CHECK_EQ(fired, 0);
 }
 
 // --- commandline second pass: gates ----------------------------------------

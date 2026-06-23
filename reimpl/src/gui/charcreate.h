@@ -64,9 +64,32 @@ inline constexpr const char* kFormChooseCharacterIntro   = "menu\\choosecharacte
 //   0 paternal grandfather, 1 paternal grandmother,
 //   2 maternal grandfather, 3 maternal grandmother,
 //   4 father,               5 mother.
+// 1:1 NOTE (HARDEN gui_00 — divergence confirmed against disasm, kept for follow-up):
+// The current ApplyActorClick / IsComplete model fills slots 0..5 (parity-gated) and completes
+// after SIX clicks.  The ORIGINAL @0x52bcd4 does NOT.  Disasm ground truth (0x52bf14..0x52bf3e,
+// 0x52c084..0x52c0b4) and aliasing:
+//   * dword_122F258 is the slot base; slot[i] = 0x122F258 + 4*i, so slot4 == dword_122F268.
+//   * Init order @0x52bd1b/0x52bd25: SetGrayColorThunk(0,44,dword_122F258) is a memset of
+//     44 BYTES (=11 dwords) to 0 (VIBE_Memory_FillDwordAlignedThunk a3=byte count); THEN
+//     `for i=0..5: dword_122F254[i]=-1` writes 0x122F254 and slots 0,1,2,3,4 to -1.
+//     => after init: slots 0..4 = -1, slot5 = 0 (left at the gray-fill value).
+//   * Free-slot walk: v7=4; edi=dword_122F268(=slot4); if slot4==-1 -> v7 stays 4 (father slot
+//     open); else advance and test slot5 (!= -1?) -> since slot5 starts at 0, the walk reaches
+//     v7=6 immediately after the father is placed.  Walk only ever inspects slots 4 and 5.
+//   * Click writer @0x52c0b4 writes ONLY dword_122F258[v7], v7 in {4,5}, parity-gated
+//     (even=4 accepts males, odd=5 accepts females).  Grandparent slots 0..3 are NEVER written.
+//   Net observed binary behavior: the scene needs the FATHER (male) click into slot 4; slot 5
+//   (mother) is pre-seeded to 0 by the gray-fill so the walk completes (v7>=6) right after the
+//   father is placed.  This is a SURPRISING result (mother appears never selectable via the
+//   walk) that hinges on the gray-fill-vs-(-1) aliasing; per Rule 8 it is documented with
+//   evidence and FLAGGED rather than guessed into both this module + gui/choosecharacter_run.*
+//   + their tests.  See progress/harden/gui_00.md.  xrefs confirm 0x52c0b4 is the sole click
+//   writer of dword_122F258.
 // The clickable "dummy_*" actor object names (table aDummyGrossvate @0x5274e4, 6x48).
 // ===========================================================================
 inline constexpr int kAncestrySlotCount = 6;
+// gilde.exe 0x52bcd4 — the actor-click free-slot walk starts at slot 4 (the father slot).
+inline constexpr int kAncestryParentBaseSlot = 4;
 inline constexpr const char* kAncestryObjectNames[kAncestrySlotCount] = {
     "dummy_GROSSVATER_VAETERLICH",  // slot 0
     "dummy_GROSSMUTTER_VAETERLICH", // slot 1
@@ -104,15 +127,16 @@ bool ChooseCharacter_ActorIsMale(ChooseCharActor actor);
 // The dynasty slot table dword_122F258[6].  -1 = unfilled.  ApplyActorClick fills the
 // next free slot for the actor's gender (0x52bcd4 LABEL_33: even slots take males, odd
 // females); returns the slot written, or -1 if no slot was available / actor rejected.
+// (See the 1:1 NOTE above: the original click only writes parent slots 4/5.)
 struct DynastyTable {
     int slot[kAncestrySlotCount];
     DynastyTable() { for (int& s : slot) s = -1; }
 };
 
 // gilde.exe 0x52bcd4 — apply one actor click.  `v6` is the running fill counter (the
-// original advances it to the next unfilled slot in 0..5).  On a MALE actor it targets the
-// even slot index, on a FEMALE the odd one; writes the profession code and returns the
-// slot, advancing `*fillCounter`.  Returns -1 when the actor's parity slot is already past.
+// original advances it to the next unfilled slot).  On a MALE actor it targets the even slot
+// index, on a FEMALE the odd one; writes the profession code and returns the slot, advancing
+// `*fillCounter`.  Returns -1 when the actor's parity slot is rejected / past the end.
 int ChooseCharacter_ApplyActorClick(DynastyTable& t, ChooseCharActor actor, int* fillCounter);
 
 // gilde.exe 0x52bcd4 LABEL_36 — the scene completes (chains to Talent/Profession/Preview)
@@ -136,12 +160,14 @@ int Talent_PaternalProfessionByte(int paternalCode, int prev);
 //   0->28, 1->37, 2->4, 3->0, 4->73; other -> unchanged (returns `prev`).
 int Talent_MaternalProfessionByte(int maternalCode, int prev);
 
-// gilde.exe 0x52b088 — a talent's up arrow is enabled when the current value is below the
-// per-talent maximum cap (v46[i+6] > dword_122F270[i] => can decrease/spend), the down
-// arrow when there is budget left (v50 > 0) and the value is above the floor.  Modeled as
-// pure predicates over (value, cap, budget) so the enable logic is testable.
+// gilde.exe 0x52b088 — the two per-talent arrow widgets' DISPLAY-ENABLE predicates (the
+// enable loop @0x52b386/@0x52b3b0; ebp=1 enabled, edi=0 disabled):
+//   DECREASE ("-") widget: enabled when  value <= cap          (v46[i+6] <= dword_122F270[i])
+//   INCREASE ("+") widget: enabled when  budget <= 0 || value >= 126.0  (dbl_622E18)
+// Modeled as pure predicates so the enable logic is testable.  floorThreshold defaults to the
+// recovered dbl_622E18 = 126.0 (the per-row max / starting budget).
 bool Talent_CanDecrease(int value, int cap);                 // v46[i+6] <= dword_122F270[i]
-bool Talent_CanIncrease(int value, int budget, double floorThreshold = 0.0);
+bool Talent_CanIncrease(int value, int budget, double floorThreshold = 126.0);
 
 // ===========================================================================
 // ChooseProfession click resolution (0x52c50c).

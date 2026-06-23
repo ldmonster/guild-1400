@@ -64,6 +64,7 @@
 // =============================================================================
 #include "guild/common/types.h"
 #include "render/frame.h"     // FrameState, FrameHooks (the live frame walk)
+#include "render/shadow_light_list.h"   // ShadowResetLightListActive (resetLights hook)
 #include "render/surface.h"   // Surface (the framebuffer atmosphere composes into)
 
 #include "render/sky.h"       // BlendBandLighting, SkyBandColor (sky background)
@@ -73,6 +74,8 @@
 #include "render/weather.h"   // WeatherIntensity (weather state)
 
 namespace guild::play {
+
+struct SessionAtmos;   // play/session_atmos.h (the brightness/weather driver)
 
 // ---------------------------------------------------------------------------
 // The live atmosphere context the de-inerted hooks receive (passed opaque through
@@ -194,5 +197,52 @@ int EmitAtmosParticles(AtmosBridgeContext* ctx);
 AtmosBridgeInstall ComposeAtmosphereFrame(render::FrameState& fs,
                                           render::FrameHooks& hooks,
                                           AtmosBridgeContext* ctx);
+
+// =============================================================================
+// BRIGHTNESS -> LIGHTING-TABLE REBUILD (the renderer-consumption link the
+// session-atmos slice left pending). The original applies day/night brightness
+// pre-raster, by rebuilding the per-object vertex lighting table:
+//
+//   VIBE_DayCycle_UpdateBrightness @0x4b2504 (SessionAtmos::brightnessStep)
+//     -> VIBE_SkyColor_BlendBandLighting @0x5b85e4
+//          * stores the band-lerped ambient into flt_64A074/78/7C (+luma 70)
+//          * tail @0x5b88cf: VIBE_Light_RefreshAllObjects(force) @0x5c886c
+//     -> the draw walk (VIBE_Render_ProcessSceneNode) lazily re-runs
+//        VIBE_Light_BuildObjectCache @0x5c8218 per stale node, which re-seeds
+//        every vertex's light accumulator from the ambient and publishes the
+//        reduced shade byte into Vertex::lightIdx — the byte the software
+//        rasterizer interpolates into the framebuffer.
+//
+// ApplyAtmosLightingFrame is that exact application step for one SessionAtmos
+// frame: when the brightness step ran BlendBandLighting (atmos.lightingRebuilt),
+// store the ambient (render::LightAtmosStoreAmbient — requires the caller-
+// supplied sky-band rig, atmos.hasSkyBands) and fire the reconstructed
+// render::LightAtmosRefreshAllObjects(atmos.refreshForce). The relit shade then
+// reaches pixels through any renderer that runs render::LightAtmosEnsureNodeLit
+// over its meshes (play::RealCityRenderer Options::atmosRelight).
+// =============================================================================
+struct AtmosLightingApplyResult {
+    bool ambientStored = false;  // the flt_64A074/78/7C store ran (hasSkyBands)
+    bool refreshed     = false;  // RefreshAllObjects fired (>=1 pending rebuild)
+    int  rebuilds      = 0;      // pending BlendBandLighting runs applied
+    u8   force         = 0;      // the force argument passed (atmos.refreshForce)
+    u8   walkResult    = 0;      // RefreshAllObjects' return byte (last call)
+    u32  serial        = 0;      // render::LightAtmos().rebuildSerial after
+};
+
+// Apply one SessionAtmos frame's brightness output to the lighting table.
+// In the original every BlendBandLighting run fires RefreshAllObjects at its
+// tail (@0x5b88cf) — including the Sky_InitScene new-day call that happens
+// INSIDE SessionAtmos::Frame (so the per-frame `lightingRebuilt` flag alone can
+// under-count). `appliedRebuilds` is the caller's cursor over the cumulative
+// SessionAtmos::lightRebuilds counter (init 0): each pending rebuild fires one
+// RefreshAllObjects(atmos.refreshForce) — keeping the dword_64A064 serial in
+// 1:1 step with the original's call count. `frameStampMs` is the engine ms
+// timer (dword_62EB38) stamped into rebuilt objects (+68). A frame whose
+// brightness step skipped the rebuild (hysteresis, flash window,
+// relightDisabled) applies nothing — exactly the original.
+AtmosLightingApplyResult ApplyAtmosLightingFrame(const SessionAtmos& atmos,
+                                                 int frameStampMs,
+                                                 int& appliedRebuilds);
 
 } // namespace guild::play

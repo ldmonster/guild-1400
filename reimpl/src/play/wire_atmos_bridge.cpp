@@ -11,6 +11,9 @@
 // =============================================================================
 #include "play/wire_atmos_bridge.h"
 
+#include "play/session_atmos.h"    // SessionAtmos (the brightness driver)
+#include "render/light_atmos.h"    // the reconstructed lighting-table rebuild
+
 #include <cmath>
 #include <cstring>
 
@@ -212,6 +215,10 @@ void InstallInertAtmosBridge(render::FrameState& fs, render::FrameHooks& hooks,
     g_activeAtmos = ctx;
     hooks.renderParticles = &InertRenderParticles;
     hooks.updateSkyFlares = &InertUpdateSkyFlares;
+    // gilde.exe 0x5f4428 — BeginUniverseFrame always rebuilds the shadow-light list. Wire
+    // the reconstructed collector (render::ShadowResetLightListActive over the active
+    // universe; a null active root is a safe no-op until SetActiveShadowUniverse is set).
+    hooks.resetLights = &render::ShadowResetLightListActive;
 }
 
 AtmosBridgeInstall InstallRealAtmosBridge(render::FrameState& fs,
@@ -306,6 +313,44 @@ void AtmosBridgeContext::MakeSynthetic(AtmosBridgeContext& ctx, int W, int H,
     ctx.weatherHour = 12;
     ctx.windX = -1.0f;
     ctx.windY = 0.5f;
+}
+
+// ===========================================================================
+// BRIGHTNESS -> LIGHTING-TABLE REBUILD (see header). The exact application
+// step of one SessionAtmos frame:
+//   * brightnessStep ran BlendBandLighting (atmos.lightingRebuilt) ->
+//       - the flt_64A074/78/7C ambient store half of 0x5b85e4
+//         (render::LightAtmosStoreAmbient; gated on the caller-supplied sky
+//          rig exactly as SessionAtmos gates its own ambient output), then
+//       - the 0x5b88cf tail call: VIBE_Light_RefreshAllObjects(force)
+//         (render::LightAtmosRefreshAllObjects @0x5c886c — serial bump always;
+//          force<=1 invalidate walk; force>1 eager rebuild walk; floor hook).
+//   * otherwise (hysteresis skip / flash window / relightDisabled): nothing —
+//     the original never reaches BlendBandLighting on those frames.
+// ===========================================================================
+AtmosLightingApplyResult ApplyAtmosLightingFrame(const SessionAtmos& atmos,
+                                                 int frameStampMs,
+                                                 int& appliedRebuilds) {
+    AtmosLightingApplyResult r;
+    r.serial = render::LightAtmos().rebuildSerial;
+    const int pending = atmos.lightRebuilds - appliedRebuilds;
+    if (pending <= 0)
+        return r;                       // no BlendBandLighting since last apply
+    appliedRebuilds = atmos.lightRebuilds;
+    if (atmos.hasSkyBands) {            // the band rows are caller-supplied
+        render::LightAtmosStoreAmbient(atmos.ambient);
+        r.ambientStored = true;
+    }
+    r.force = atmos.refreshForce;       // BlendBandLighting's a4 (last rebuild)
+    // One RefreshAllObjects per BlendBandLighting run (the 0x5b88cf tail call),
+    // so the dword_64A064 serial advances exactly as the original's call count.
+    for (int i = 0; i < pending; ++i)
+        r.walkResult = render::LightAtmosRefreshAllObjects(atmos.refreshForce,
+                                                           frameStampMs);
+    r.rebuilds = pending;
+    r.refreshed = true;
+    r.serial = render::LightAtmos().rebuildSerial;
+    return r;
 }
 
 } // namespace guild::play

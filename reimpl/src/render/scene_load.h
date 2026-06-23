@@ -104,6 +104,16 @@ constexpr u32 kVerLight6       = 0x3A6C00A5u; // >=6 lights
 constexpr u32 kVerLight7       = 0x3A6C00BAu; // 7 lights
 constexpr u32 kVerEventBindings = 0x3A6C00A7u;// per-object event bindings present
 
+// HARDENING (wave-11): cap the child/sibling recursion in ReadObjectRecord. The
+// original recursed without an explicit limit, but a malformed/cyclic .ed3 with a
+// long run of "has child"/"has sibling" presence bytes would recurse one frame
+// per byte and overflow the native stack (the file bytes are untrusted asset
+// input). No valid shipped scene nests anywhere near this — the real node trees
+// are shallow — so this guard never trips on valid data and changes no observable
+// output on the in-bounds path; it only fails the walk safely on a degenerate
+// stream instead of crashing. Depth is "records on the active recursion stack".
+constexpr int kSceneMaxNodeDepth = 4096;
+
 inline bool SceneTagValid(u32 tag) {
     return (tag & 0xFFFF0000u) == kSceneTagBase && tag >= kSceneTagMin;
 }
@@ -160,6 +170,9 @@ public:
     std::string ReadString();
 
     std::size_t pos() const { return pos_; }
+    // Bytes left in the stream — an absolute upper bound on how many further
+    // records/values can be read. Used to cap untrusted pre-reservations.
+    std::size_t remaining() const { return (pos_ < size_) ? size_ - pos_ : 0; }
     bool eof() const { return eof_; }
     bool atEnd() const { return pos_ >= size_; }
 

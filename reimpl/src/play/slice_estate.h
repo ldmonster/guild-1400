@@ -67,7 +67,7 @@ namespace guild::play {
 // `newOwnerId` (the buyer's record handle).
 // ===========================================================================
 struct EstateInteraction {
-    i32 objectId    = 0;     // the bought building (live g_objects id; op56 a2)
+    i32 objectId    = 0;     // the bought building (live g_objects id; op56 a1 @+0x10)
     i32 buyerId     = 0;     // the buying person (the EnqueueCmd15 money-leg payer)
     i16 newOwnerId  = 0;     // the new owner id stamped into obj+39 (op56 derived)
     i16 parentHandle = 0;    // the new parent handle stamped into obj+37
@@ -82,10 +82,21 @@ struct EstateInteraction {
 // ===========================================================================
 inline constexpr u8 kEstateCmdOpcode = 56;       // VIBE_Command_QueueRequestQuad56
 
-// QueueRequestQuad56 packet-staging offsets (recovered @0x495098):
-inline constexpr u32 kEstateNewOwnerOff = 0x10;  // v6 = a1 (new-owner record)
-inline constexpr u32 kEstateObjectOff   = 0x14;  // v7 = a2 (the bought object id)
-inline constexpr u32 kEstateParentOff   = 0x18;  // v8 = a4 (the parent record id)
+// QueueRequestQuad56 packet-staging offsets (recovered @0x495098; field ROLES
+// recovered from the builder EnqueueBuyBuilding @0x588798 and the apply
+// ExSetObjectParent @0x49ae60). The builder call is
+//   QueueRequestQuad56(*(Begin+1), *(v19+1), v11/*not in packet*/, *(v19+1))
+// so a1@+0x10 = the bought OBJECT id (Begin = the reparented object), a2@+0x14 =
+// the seller/new-owner record id, a4@+0x18 = the same record id. The apply reads:
+//   Begin = QueryBegin(..., *(pkt+0x10))                 // the object
+//   parentRec = FindRecordById(*(pkt+0x14))              // -> SetObjectParent a2
+//   ownerRec  = FindRecordById(*(pkt+0x18))              // -> SetObjectParent a3
+//   SetObjectParent(Begin, *parentRec, (u16)*ownerRec)   // +37 = parent, +39 = owner
+// i.e. +0x10 is the OBJECT, +0x14 sources the +37 parent handle, +0x18 sources the
+// +39 owner id. (a3 is staged at ebp-4h and never reaches the wire.)
+inline constexpr u32 kEstateObjectOff   = 0x10;  // v6 = a1 (the bought object id)
+inline constexpr u32 kEstateParentOff   = 0x14;  // v7 = a2 (parent-handle source rec)
+inline constexpr u32 kEstateNewOwnerOff = 0x18;  // v8 = a4 (owner-id source rec)
 
 // The bought-object folded fields SetObjectParent @0x58820c writes (object record
 // raw bytes, folded by HashFullWorld).

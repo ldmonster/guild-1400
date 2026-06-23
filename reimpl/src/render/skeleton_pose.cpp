@@ -20,22 +20,42 @@ inline void TrackBounds(float z, float* outNear, float* outFar) {
 } // namespace
 
 // gilde.exe 0x5cd1d8 — per-track keyframe advance (forward playback core).
-//   Mirrors the non-reverse branch: while phase >= duration(curFrame), subtract the
-//   duration and step the frame via AdvanceFrameIndex; at the [first,last] boundary
-//   apply the loop/clamp/hold mode and set boundary. The reverse (0x2) leg of the
-//   original ping-pongs toward `first`; AdvanceFrameIndex already encodes both legs,
-//   so we drive it with the live `mode` byte exactly as the engine does.
+//   DERIVED HELPER (not the 1:1 driver). The byte-for-byte reconstruction of the full
+//   UpdateSkeletonPose @0x5cd1d8 inner while(1) state machine lives in
+//   render/skeleton_pose_driver.cpp; that is the function in the live call tree. This
+//   routine is a self-contained, narrowed model of the non-reverse forward branch of
+//   that loop, kept for unit-level testing of the phase-consumption arithmetic.
+//
+//   Branch fidelity to the original forward leg (0x5cd1d8): while phase >= dur(curFrame)
+//   step forward; at the [first,last] boundary the clamp leg sets phase = dur-1 and
+//   marks boundary (original `*(v5+8) = v41 - 1`), the loop leg sets the reverse bit and
+//   phase = dur-1-b (b = bit1 of the unmodelled +110 byte; 0 here), the hold leg does
+//   phase -= dur and wraps to first. The +110 active-bit, the ComputeBoneDelta /
+//   SampleBoneTranslation tolerance breaks, and the repeatCount(+108) decrement are part
+//   of the full driver, not this narrowed helper. AdvanceFrameIndex (0x5ccf18) recomputes
+//   toFrame each step exactly as the engine does.
 i32 AdvanceTrackPhase(TrackState& st, const i32* durations, i32 firstFrame,
                       i32 lastFrame, i32 frameCount) {
     int steps = 0;
     st.boundary = false;
+
+    // A track with no frames has nothing to advance — the engine only reaches this
+    // path for an active header (frameCount > 0). Guard the degenerate 0-frame /
+    // null-table case so the unbounded durations[fromFrame] read below can't run off
+    // the buffer (faithful fail-safe; valid input is unaffected). [W11-ANIM]
+    if (frameCount <= 0 || !durations)
+        return 0;
 
     // Bound the loop defensively (the engine relies on monotonic phase consumption;
     // a degenerate zero-duration table could spin, so cap at frameCount*2 + 1).
     int guard = frameCount * 2 + 2;
 
     while (guard-- > 0) {
-        i32 dur = durations[st.fromFrame];
+        // fromFrame is driven by AdvanceFrameIndex (always within [0,frameCount)),
+        // but clamp the read index defensively to the table's bounds so malformed
+        // boundary state cannot index past it. Matches skeleton_pose_driver's dur().
+        i32 fi = (st.fromFrame >= 0 && st.fromFrame < frameCount) ? st.fromFrame : 0;
+        i32 dur = durations[fi];
         if (st.phase < dur)
             break;                       // phase fits within the current segment
 
@@ -47,13 +67,19 @@ i32 AdvanceTrackPhase(TrackState& st, const i32* durations, i32 firstFrame,
             // At the end boundary: apply the mode.
             if ((st.mode & 0x10) != 0) {
                 // Clamp-to-count one-shot: hold at the last segment, mark boundary.
+                // Original (0x5cd1d8 forward branch): `*(v5+8) = v41 - 1`, i.e. the
+                // phase is set to dur-1 unconditionally (no dur>0 guard). Match it.
                 st.boundary = true;
-                st.phase = (dur > 0) ? dur - 1 : 0;
+                st.phase = dur - 1;
                 break;
             } else if ((st.mode & 1) != 0) {
                 // Loop: flip into reverse (ping-pong) — set bit1, reflect the phase.
+                // Original: `*(v5+8) -= ((mode110<<6)>>7) + *(v5+8) - dur + 1`, which
+                // for b = bit1(*(v5+110)) collapses to `phase = dur - 1 - b`. The +110
+                // active byte is not modelled here (b == 0 on a forward entry), so this
+                // is phase = dur - 1 (a fixed value, NOT phase -= (dur-1)).
                 st.mode |= 2;
-                st.phase -= ((dur - 1) > 0 ? (dur - 1) : 0);
+                st.phase = dur - 1;
                 st.fromFrame = st.toFrame;
             } else {
                 // Hold: clear the boundary flag bit, wrap to first.

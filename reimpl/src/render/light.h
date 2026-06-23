@@ -103,6 +103,46 @@ inline u32 ShadeRampOffset(int lightIdx) { return 768u * (u32)lightIdx; }
 // = scaled R/G/B. `pal` is the 256-entry source palette (3 bytes RGB each).
 void BuildShadeRamp(u8* out /*256*768*/, const u8 pal[256 * 3]);
 
+// The .ed3's 7-band time-of-day rig is applied via render::BlendBandLighting
+// (the ambient blend, gilde.exe 0x5b85e4) — reconstructed in render/sky.h; do
+// not redefine it here. play::ComputeSceneAmbient builds its SkyBandColor[7] from
+// the parsed SceneLight rig (SceneLight::pos = the band ambient colour).
+
+// gilde.exe 0x5c88f8 — VIBE_Light_InitFalloffTable: the 1024-entry angular
+// falloff LUT the per-vertex light accumulation indexes by the (negated) cosine.
+//   out[k] = 1.0 - (2/pi) * acos(-k/1023)         for k in [0, 1024)
+// (flt_628CB8 = 2/pi == 0.63661975, step flt_628CB4 = -1/1023; the consumer
+// indexes it with (int)(NdotL * -1023), NdotL in [-1,0].)  acos via std::acos
+// (VIBE_Math_AcosGuarded clamps its argument to [-1,1]).
+void BuildFalloffLUT(float out[1024]);
+
+// gilde.exe 0x5c6f90 — VIBE_Light_ApplyToCachedVertices: per-vertex contribution
+// of one scene light, accumulated into `accum` (RGB, engine 0..255 light scale).
+//
+// POINT light (object type != 7): given the vertex world position/normal and the
+// light's world position + colour (+92) + range (+144) + intensity (+148) +
+// rangeParam (+152):
+//   d = vpos - lightPos ; distSq = |d|^2
+//   if distSq >= range^2: no contribution (out of range)
+//   NdotL = normal . normalize(d)            (d points away from the light)
+//   if NdotL >= 0: no contribution (faces away)
+//   atten  = intensity * 10 (flt_628C20) * objScale / (rangeParam * distSq)
+//   factor = atten * LUT[ clamp((int)(NdotL * -1023), 0, 1023) ]
+//   accum += colour * factor
+void AccumulatePointLight(const float vpos[3], const float vnormal[3],
+                          const float lightPos[3], const float color[3],
+                          float range, float intensity, float rangeParam,
+                          float objScale, const float lut[1024], float accum[3]);
+
+// DIRECTIONAL ("sun", object type == 7): no distance term; the intensity is
+// scaled by 0.001 (flt_628C2C). `dir` is the light direction (normalized here).
+//   NdotL = normal . normalize(dir) ; if NdotL >= 0: nothing
+//   factor = intensity * 0.001 * objScale * LUT[clamp((int)(NdotL*-1023),0,1023)]
+//   accum += colour * factor
+void AccumulateDirectionalLight(const float vnormal[3], const float dir[3],
+                                const float color[3], float intensity,
+                                float objScale, const float lut[1024], float accum[3]);
+
 // gilde.exe 0x42dd4c — VIBE_Light_ComputeRayFalloff(dx, dy, dist).
 // Sun-ray falloff: returns a scalar in [0,1] that fades a god-ray sample by its
 // screen distance. Faithful to the original branch structure.

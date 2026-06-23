@@ -60,4 +60,36 @@ int SelectCloudLayerIndex(WeatherCategory category, int current) {
     return idx;
 }
 
+// gilde.exe 0x4c0040 — per-frame weather state / rain gate.
+WeatherFrame WeatherUpdate(const i32 arc[24], const float windX[24],
+                           const float windY[24], int hour) {
+    WeatherFrame wf{};
+    wf.hour = hour;                       // dword_11BC1C4 = HIWORD(clock) /*0x4c0057*/
+    const i32 code = arc[hour];           // dword_11BC038[hour*4]
+    // Rain gate: bit0 of the weather code. /*0x4c0085 test byte,1*/
+    wf.rainActive = (code & 1) != 0;
+    // Signed division by 5 (idiv). /*0x4c009a..0x4c00a2*/
+    wf.rainSpawn = wf.rainActive ? (code / 5) : 0;
+    // When no snow system exists the original passes the raw code. /*0x4c0416*/
+    wf.rainSpawnNoSnow = code;
+
+    const float wx = windX[hour];         // dword_11BC100[hour] /*0x4c00c1*/
+    const float wy = windY[hour];         // dword_11BC160[hour] /*0x4c00d2*/
+
+    // intensity = peak-of-3 (arc[(h+23)%24], arc[h], arc[(h+1)%24]). /*0x4c00f0..*/
+    wf.intensity = WeatherIntensity(arc, hour);
+
+    // Grow amounts (op==2). trunc toward zero via VIBE_Coord_ConvertX path.
+    wf.snowGrow = SnowGrowAmount(wx, wf.intensity); // trunc(2.0 * -wx * I)
+    wf.rainGrow = RainGrowAmount(wx, wf.intensity); // trunc(0.5 * -wx * I)
+
+    // Base cloud scroll magnitude + the two layer multipliers. /*0x4c0222,374,3c7*/
+    wf.scrollMag  = CloudScrollMagnitude(wx, wy, wf.intensity);
+    wf.scrollFast = (float)((double)wf.scrollMag * kWxScrollFast); // *0.75
+    wf.scrollBack = (float)((double)wf.scrollMag * kWxScrollBack); // *1.5
+
+    wf.category = CategoryFor(wf.intensity);
+    return wf;
+}
+
 } // namespace guild::render

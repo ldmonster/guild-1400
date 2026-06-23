@@ -86,10 +86,12 @@ TEST(RenderLeaves5_ITest, RefLensWiresRealSiblings) {
     CHECK(FEq(sys->position[1], -1.0f));
     CHECK(FEq(sys->position[2], 4.0f));
 
-    // The colour bytes match the REAL RNG oracle for the seeded slots (count-1).
+    // The colour bytes match the REAL RNG oracle for ALL seeded slots. HARDEN:
+    // InitColors' do-while seeds every `count` slot (compare `ecx < count`
+    // @0x42beb6 runs the body count times), not count-1.
     crt::Srand(0x1234);
     Particle* p = static_cast<Particle*>(sys->particles);
-    for (int i = 0; i + 1 < slots; ++i) {
+    for (int i = 0; i < slots; ++i) {
         u8 eb = static_cast<u8>((crt::RandNext() & 0x3F) - 66);
         u8 eg = static_cast<u8>((crt::RandNext() & 0x3F) + 100);
         u8 er = static_cast<u8>((crt::RandNext() & 0x3F) + 50);
@@ -98,8 +100,9 @@ TEST(RenderLeaves5_ITest, RefLensWiresRealSiblings) {
         CHECK_EQ((int)Get<u8>(&p[i], 0x4C), (int)er);
     }
 
-    // The system was wired to the REAL UpdateScatter integrator; drive it through
-    // an Emitter view over the same real particle array (cross-module hand-off).
+    // The system was wired to the REAL SeedParticles integrator (sys+0x304); here
+    // we exercise a cross-module hand-off by driving an Emitter view over the same
+    // real particle array through an integrator (UpdateScatter) directly.
     render::Emitter e{};
     e.count = sys->count;
     e.particles = p;

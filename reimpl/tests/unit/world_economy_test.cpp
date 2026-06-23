@@ -217,6 +217,21 @@ TEST(WorldEconomy, LookupRateScalar) {
     CHECK_EQ((int)EconomyLookupRateScalar(99), 126);
 }
 
+// Boundary: a NEGATIVE id (i8) must not index before the 5-entry table. The
+// original tested only `id < 5`, so a negative id slipped into byte_123525C[neg]
+// (an OOB read in our reconstruction). The faithful low-end guard routes every
+// negative id to the same 126 the >=5 path returns. (ASAN would trap the old
+// OOB read here.)
+TEST(WorldEconomy, LookupRateScalarNegativeIdNoOOB) {
+    const guild::i8 table[5] = {10, 20, 30, 40, 50};
+    EconomySetRateScalarTable(table);
+    CHECK_EQ((int)EconomyLookupRateScalar((guild::i8)-1), 126);
+    CHECK_EQ((int)EconomyLookupRateScalar((guild::i8)-128), 126);
+    // Valid ids still byte-identical after the guard.
+    CHECK_EQ((int)EconomyLookupRateScalar(0), 10);
+    CHECK_EQ((int)EconomyLookupRateScalar(4), 50);
+}
+
 // ---------------------------------------------------------------------------
 // Tax formula vs python golden values.
 // ---------------------------------------------------------------------------
@@ -225,6 +240,21 @@ TEST(WorldTax, TradeIncomeFormula) {
     CHECK_EQ(TaxComputeTradeIncome(7, 1234), 86);
     CHECK_EQ(TaxComputeTradeIncome(10, -50), 0);    // clamped at 0
     CHECK_EQ(TaxComputeTradeIncome(0, 5000), 0);
+}
+
+// Boundary: INT_MAX / INT_MIN inputs. The formula is pure single-precision; the
+// final (i32) cast of an out-of-int-range float mirrors the original's x87 fistp
+// (saturates to the 0x80000000 "indefinite"), which is the engine's envelope, not
+// a memory bug. This test just exercises the extremes under ASAN+UBSAN (no trap,
+// no OOB); the exact saturated value is the documented hardware behavior.
+TEST(WorldTax, TradeIncomeIntExtremesNoTrap) {
+    volatile int a = TaxComputeTradeIncome(2147483647, 2147483647);
+    volatile int b = TaxComputeTradeIncome(-2147483647 - 1, 2147483647);
+    volatile int c = TaxComputeTradeIncome(2147483647, -2147483647 - 1);
+    (void)a; (void)b; (void)c;
+    // Negative account is clamped to 0 (the v21 <= 0 branch) regardless of size.
+    CHECK_EQ(TaxComputeTradeIncome(2147483647, -2147483647 - 1), 0);
+    CHECK(true);
 }
 
 static int g_capturedTax = -1;
@@ -290,4 +320,34 @@ TEST(WorldProduction, DailyHourOutput) {
     CHECK_EQ(ProductionComputeDailyHourOutput(s, e), 240);    // [8,12] in [6,23]
     ProdTime s2{0, 20, 0}, e2{1, 8, 0};
     CHECK_EQ(ProductionComputeDailyHourOutput(s2, e2), 300);  // 180 + 120
+}
+
+// W14-ECON: pin the weekday-dependent work-window selection inside
+// VIBE_Production_ComputeOutputOverTime (gilde.exe 0x59064c). The window is
+// kWorkStartHour[(day%4+4)%4]*60 .. kWorkEndHour[..]*60 (tables {8,7,8,9} /
+// {20,21,20,19}). The other production goldens above only exercise weekday 0
+// ([8,20]); these discriminate weekdays 1/2/3 (entries 7/21, 8/20, 9/19) so the
+// table index path is covered. Expected values trace to the source's own
+// integrateWindow same-day clamp (lo=max(tod,open), hi=min(tod,close)).
+TEST(WorldProduction, OutputWeekdayWindowSelection) {
+    // weekday 1 -> open 07:00: 06:00->08:00 clamps lo to 07:00 -> 60
+    // (weekday 0 with open 08:00 would yield 0).
+    CHECK_EQ(ProductionComputeOutputOverTime(ProdTime{1, 6, 0}, ProdTime{1, 8, 0},
+                                             false), 60);
+    // weekday 1 -> close 21:00: 20:00->21:00 stays inside -> 60
+    // (weekday 0 with close 20:00 would clamp hi to 20:00 -> 0).
+    CHECK_EQ(ProductionComputeOutputOverTime(ProdTime{1, 20, 0}, ProdTime{1, 21, 0},
+                                             false), 60);
+    // weekday 2 -> same window as weekday 0 ([8,20]): 06:00->09:00 clamps lo to
+    // 08:00 -> 60 (selects entry 2, value 8.0).
+    CHECK_EQ(ProductionComputeOutputOverTime(ProdTime{2, 6, 0}, ProdTime{2, 9, 0},
+                                             false), 60);
+    // weekday 3 -> open 09:00: 08:00->10:00 clamps lo to 09:00 -> 60
+    // (weekday 0 with open 08:00 would yield 120).
+    CHECK_EQ(ProductionComputeOutputOverTime(ProdTime{3, 8, 0}, ProdTime{3, 10, 0},
+                                             false), 60);
+    // weekday 3 -> close 19:00: 18:00->20:00 clamps hi to 19:00 -> 60
+    // (weekday 0 with close 20:00 would yield 120).
+    CHECK_EQ(ProductionComputeOutputOverTime(ProdTime{3, 18, 0}, ProdTime{3, 20, 0},
+                                             false), 60);
 }

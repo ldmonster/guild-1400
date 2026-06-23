@@ -33,6 +33,9 @@ struct ColorFormat {
 inline ColorFormat Format565() { return ColorFormat{5, 2, 3, 0, 11, 3}; }
 // RGB555: R=5@10, G=5@5, B=5@0.
 inline ColorFormat Format555() { return ColorFormat{5, 3, 3, 0, 10, 3}; }
+// XRGB8888: R=8@16, G=8@8, B=8@0, no precision drop — the byte order the 32 bpp
+// software surfaces actually store (0xAARRGGBB), for packing text/primitives onto them.
+inline ColorFormat Format8888() { return ColorFormat{8, 0, 0, 0, 16, 0}; }
 
 // ---------------------------------------------------------------------------
 // Surface record — gilde.exe gfx.c "gfx_CreateSurface" (0x40 = 64 bytes).

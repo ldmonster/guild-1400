@@ -163,16 +163,19 @@ TEST(AiActionFinder, FindTwoPeopleInRangeGate) {
     SetAiActionFinderEnv(nullptr);
 }
 
-// CheckObjectState: group!=7 path -> !RandU16(4); seed=1 -> 2 -> false -------
+// CheckObjectState (0x47bcd8): the two RandomModulo calls use DISTINCT moduli
+// (3 then 4), verified vs disasm. group!=7 path -> RandomModulo(4)==0; seed=1
+// first draw = 16838%4 = 2 != 0 -> false. group==7 path -> RandomModulo(3)!=0;
+// seed=1 first draw = 16838%3 = 2 != 0 -> true (short-circuits the second draw).
 TEST(AiActionFinder, CheckObjectState) {
     MockEnv env; SetAiActionFinderEnv(&env);
     env.buildingGroup = 0;
     crt::Srand(1);
-    CHECK_EQ(CheckObjectState(0, 4), false);   // RandU16(4) seed1 = 2 != 0
-    // group==7 with a nonzero first roll -> true (short-circuits second draw)
+    CHECK_EQ(CheckObjectState(0), false);   // RandomModulo(4) seed1 = 2 != 0
+    // group==7 with a nonzero first roll -> true (short-circuits second draw).
     env.buildingGroup = 7;
     crt::Srand(1);
-    CHECK_EQ(CheckObjectState(0, 4), true);
+    CHECK_EQ(CheckObjectState(0), true);
     SetAiActionFinderEnv(nullptr);
 }
 

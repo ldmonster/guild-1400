@@ -105,14 +105,15 @@ TEST(Location3Itest, DialogsRunHeadlessOverInertDefaults) {
 
     // RobberCampStandard: gates pass (hasTarget, not full), form opens, loop ends
     // immediately -> opened but NOT committed (the inert frameStep never confirms).
-    DialogOutcome rc = RobberCampStandard(42, true, table, sel);
+    DialogOutcome rc = RobberCampStandard(42, true, /*requestExists=*/false,
+                                          /*targetBusy=*/true, table, sel);
     CHECK_EQ(rc.opened, true);
     CHECK_EQ(rc.committed, false);
     CHECK_EQ(rc.count, 0);
     CHECK_EQ(rc.action, static_cast<int>(DialogAction::RobberCampStandard));
 
     // RobberCampRaid: form opens, no confirm -> no batch.
-    DialogOutcome rr = RobberCampRaid(table);
+    DialogOutcome rr = RobberCampRaid(/*hasTarget=*/true, /*targetBusy=*/true, table);
     CHECK_EQ(rr.opened, true);
     CHECK_EQ(rr.committed, false);
     CHECK_EQ(rr.action, static_cast<int>(DialogAction::RobberCampRaid));
@@ -123,7 +124,7 @@ TEST(Location3Itest, DialogsRunHeadlessOverInertDefaults) {
     CHECK_EQ(gr.committed, false);
 
     // No-target gate: RobberCampStandard with hasTarget=false never opens.
-    DialogOutcome no = RobberCampStandard(0, false, table, sel);
+    DialogOutcome no = RobberCampStandard(0, false, false, true, table, sel);
     CHECK_EQ(no.opened, false);
     CHECK_EQ(no.committed, false);
 

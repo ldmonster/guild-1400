@@ -9,6 +9,7 @@
 #include "gui/gui_dialogs5.h"   // g_forceQuitLatch, Panel_RunUseObject path
 #include "gui/object.h"         // g_widgets, Widget_AllocSlot, ResetWidgets
 #include "gui/window.h"         // g_currentWindowId
+#include "util/coord.h"         // util::ConvertX (TRUNCATE) — plant-bar price idiom
 
 #include <cstring>
 #include <string>
@@ -154,7 +155,8 @@ TEST(GuiDialogs6, RunInventoryBuildsWhenIdle) {
     Panel_RunInventory(/*city*/3);
 
     CHECK_EQ((int)g_cap.forms.size(), 1);
-    if (!g_cap.forms.empty()) CHECK(g_cap.forms[0] == "panel\\inventory");
+    // gilde.exe @0x54f6c1: aPanelInventory == "panel\inventory_2".
+    if (!g_cap.forms.empty()) CHECK(g_cap.forms[0] == "panel\\inventory_2");
     CHECK_EQ(g_winBorderColor[0], 24);
     CHECK_EQ(g_cap.destroyCount, 1);
     CHECK_EQ(dispatch, 2);              // enter + leave
@@ -195,10 +197,12 @@ TEST(GuiDialogs6, RunInventoryNoOpWhenFlagClear) {
 TEST(GuiDialogs6, RunBuildingRoundEndRendersStatLines) {
     ResetCap(); ResetGuiDialogs6();
     GuiDialogs6Hooks h = MakeHooks();
-    // worth[0]=v11 (->0xA1), worth[1]=v13 (->0xA2), worth[5]=v17 (->0xA5).
+    // gilde.exe @0x552d34: ComputeProductionWorth writes a contiguous a2[] array; the
+    // round-end stat lines read STACK-ALIASED locals at NON-LINEAR a2 indices:
+    //   v11=a2[0] (->0xA1), v13=a2[2] (->0xA2), v17=a2[8] (->0xA5).
     h.buildingValueComputeWorth = [](const void*, unsigned short, int* out) {
-        std::memset(out, 0, 14 * sizeof(int));
-        out[0] = 100; out[1] = 200; out[5] = 300;
+        std::memset(out, 0, 24 * sizeof(int));
+        out[0] = 100; out[2] = 200; out[8] = 300;
     };
     h.buildingGetUpgradeLevel = [](int) { return 4; };
     const GuiDialogs6Hooks* prev = SetGuiDialogs6Hooks(&h);
@@ -312,6 +316,34 @@ TEST(GuiDialogs6, RunPlantBarInertReturnsNull) {
 }
 
 // ---------------------------------------------------------------------------
+// RunPlantBar commit-price idiom (gilde.exe 0x54e?? around 0x5c6b08):
+//   v24 = Building_ComputeMarketPrice(...)
+//   ConvertX;            p1 = (int)v24                 [TRUNCATE]
+//   v25 = (double)p1 * dbl_624490;  dbl_624490 == 0.5  (get_bytes 0x624490,8)
+//   ConvertX;            p2 = (int)v25                 [TRUNCATE again]
+//   v26 = max(p2, 1024)
+// This pins the two-stage truncate + 0.5 scale + 1024 floor that the inert test
+// path cannot reach.  The earlier reconstruction omitted the *0.5/second trunc.
+// ---------------------------------------------------------------------------
+TEST(GuiDialogs6, PlantBarPriceTruncateHalveTruncateFloor) {
+    auto plantPrice = [](double marketPrice) {
+        int p1 = static_cast<int>(util::ConvertX(marketPrice));        // (int)v24
+        int p2 = static_cast<int>(util::ConvertX((double)p1 * 0.5));   // (int)v25
+        return p2 <= 1024 ? 1024 : p2;
+    };
+    // Below the 1024 floor: 3000 -> 1500 -> floor -> 1500.
+    CHECK_EQ(plantPrice(3000.0), 1500);
+    // Halved result lands under the floor: 1500 -> 750 -> clamped to 1024.
+    CHECK_EQ(plantPrice(1500.0), 1024);
+    // Odd intermediate truncates: 2001 -> p1=2001 -> 1000.5 -> trunc 1000 -> 1024.
+    CHECK_EQ(plantPrice(2001.0), 1024);
+    // Fractional market price truncates first: 4001.9 -> 4001 -> 2000.5 -> 2000.
+    CHECK_EQ(plantPrice(4001.9), 2000);
+    // Exactly at twice the floor: 4096 -> 2048 (> 1024).
+    CHECK_EQ(plantPrice(4096.0), 2048);
+}
+
+// ---------------------------------------------------------------------------
 // RunOfficeSession: a1==0 walks the (inert) person table => count 0 => force-quit
 // path, loads special\amt2, removes children, destroys the form, returns null.
 // ---------------------------------------------------------------------------
@@ -383,7 +415,9 @@ TEST(GuiDialogs6, RunThievesGuildTrainBuildsAndTearsDown) {
     int r = Panel_RunThievesGuildTrain(0, 0, nullptr, 0);
     CHECK_EQ(r, 0);
     CHECK_EQ((int)g_cap.forms.size(), 1);
-    if (!g_cap.forms.empty()) CHECK(g_cap.forms[0] == "Locations\\diebe10");
+    // gilde.exe @0x55019f: aLocationsDiebe_10 == "locations\diebesgilde\diebesgilde_trainieren".
+    if (!g_cap.forms.empty())
+        CHECK(g_cap.forms[0] == "locations\\diebesgilde\\diebesgilde_trainieren");
     CHECK(grid >= 1);
     CHECK_EQ(g_cap.destroyCount, 1);
     CHECK_EQ(g_cap.edgeScrollCalls, 1);

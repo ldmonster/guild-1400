@@ -31,7 +31,7 @@
 //                                        SelectBestRecursive(41). Copies 24-byte outs.
 //   0x4c94b4 HairGestureBehavior      — global gate dword_649D60; per member (+140),
 //                                        40% sound-gesture else build a wander path
-//                                        and tag CharAction nodes "HeCharacterBeh".
+//                                        and tag CharAction nodes "he_CharacterBehavior".
 //   0x4e4cf0 DemolishBuildingStep     — state+2 switch: 2 = recall workers + stamp
 //                                        +82 (+5min) advance; 3 = host-peer notices
 //                                        (6239/1419) + single59; else free.
@@ -156,6 +156,10 @@ struct NpcAction12Hooks {
     void (*playExamVoice)(bool passed, int rank);       // Sound_FindBankByName + Voice
     void (*renderExamResult)(int kind, u16 self, int a, int b, int c); // Text_RenderRichString
     void (*dialogOpenBuilding)(i32 a, i32 b);           // Dialog_OpenBuildingForActiveChar
+    // MasterExamStep state-1 UI verdict (dword_75BF04/dword_75BF38). Returns the
+    // recognised verdict code (1210 / 1155) once the panel result matches
+    // *(int*)(packet+8); 0 = not ready / pending / unrecognised -> WAIT.
+    int  (*examPanelVerdict)(HeRecord* h, i32 packet);
     void (*changePlayerAction)(void* self, void* obj, HeRecord* h, u16 marker);    // Character_ChangePlayerAction
     void (*createSoundAction)(i32 entity, int variant); // Character_CreateSoundAction
     // Hair-gesture wander build: returns count, fills coords (float[4]*count).

@@ -170,20 +170,23 @@ i32 WaitThenMoveStep(HeRecord* h) {
         --Cas4_Countdown(h);
         return state;   // still counting down (returns the unchanged state, 0)
     }
-    // countdown expired: roll willingness. threshold = (i16)willingness * scale + bias.
-    int willingness = static_cast<int>(static_cast<i16>(k.cityWillingness(He_CityIndex(h))));
-    // The exact scale/bias (dbl_61EAE4 / dbl_61EAEC) feed a double compare against
-    // the RNG draw; we keep the integer willingness as the threshold (the live
-    // game folds the scale/bias into it). roll >= threshold == accept.
+    // countdown expired: roll willingness.
+    //   threshold = (double)(i16)willingness * 0.5 (dbl_61EAE4) + 64.0 (dbl_61EAEC)
+    //   roll (RandomModulo(256), zero-extended u16) compared as double: >= accept.
+    // gilde.exe 0x4d11dd/0x4d1206.
+    double threshold = static_cast<double>(static_cast<i16>(
+                           k.cityWillingness(He_CityIndex(h)))) * 0.5 + 64.0;
     int roll = static_cast<u16>(k.randomModulo(0x100));
     i32 cityPerson = k.cityPersonId(He_CityIndex(h));
-    int value = 2 * Cas4_Fee176(h);     // 2 * (+176)
-    if (roll >= willingness) {
-        // accept branch: message 3353 + cmd15(cityPerson, value).
+    if (static_cast<double>(roll) >= threshold) {
+        // accept branch (0x4d12a9): value = trunc((double)(+176) * 0.5)
+        // (flt_61EAF4 == 0.5; VIBE_Coord_ConvertX truncates toward zero).
+        int value = static_cast<int>(static_cast<double>(Cas4_Fee176(h)) * 0.5);
         k.sendEntityMessage(cityPerson, 3353);
         k.enqueueCmd15(cityPerson, -1, value, 0);
     } else {
-        // refuse branch: message 3352 + cmd15(cityPerson, value).
+        // refuse branch (0x4d1221): value = 2 * (+176) (integer).
+        int value = 2 * Cas4_Fee176(h);
         k.sendEntityMessage(cityPerson, 3352);
         k.enqueueCmd15(cityPerson, -1, value, 0);
     }
@@ -222,7 +225,15 @@ i32 GossipBroadcast(HeRecord* h) {
                 k.sendEntityMessage(personId, 3365);
             if (target) {
                 int wealth = k.personWealth(*reinterpret_cast<u16*>(person), person);
-                int bribe = wealth * (static_cast<u16>(k.randomModulo(0)) + 2);
+                // gilde.exe 0x4d0ce3..0x4d0d0c:
+                //   scaled = trunc((double)wealth * 0.0099999998 (flt_61EAD4))
+                //            via VIBE_Coord_ConvertX (round-toward-zero), then
+                //   bribe  = scaled * (RandomModulo(4) + 2).
+                // (The modulo arg is eax==4 left from `mov eax,4` before ConvertX;
+                //  ConvertX does not touch eax. See 0x4d0ce9/0x4d0cfa.)
+                int scaled = static_cast<int>(static_cast<double>(wealth) *
+                                              0.0099999997764825821);
+                int bribe = scaled * (static_cast<u16>(k.randomModulo(4)) + 2);
                 k.queueRequest16(personId, -1, bribe, 0);
                 if (c2 == 6 || c2 == 7)
                     k.sendEntityMessage(personId, 3366);
@@ -256,7 +267,13 @@ i32 DuelArmCombatant(HeRecord* h, HeRecord* opponent, HeRecord* self) {
         else
             rank = k.randomModulo(3) + 1;                // RandomModulo(3) + 1
     }
-    k.productionRating(opponent, 4);                     // EvalProductionRating(opp,4)*scale
+    // EvalProductionRating(opp,4) * flt_61EA84 -> ConvertX (truncate) -> var_18
+    // (the converted value is consumed only as a scratch local; not load-bearing).
+    k.productionRating(opponent, 4);
+    // gilde.exe 0x4cfb7b: an unconditional RandomModulo draw (arg eax==8 left from
+    // `mov eax,8` before ConvertX; ConvertX leaves eax). The result is discarded
+    // but the draw MUST happen to keep the RNG stream in sync.
+    (void)k.randomModulo(8);
     k.highlightGuildMembers(self, rank);
     // QueueRequestCoord27(opponent->id, self->id, -20).
     k.queueCoord27(*reinterpret_cast<i32*>(HeBytes(opponent) + 4),

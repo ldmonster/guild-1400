@@ -31,22 +31,28 @@ double Distance2D(int ax, int dy, int cy, int bx) {
 }
 
 // gilde.exe 0x602968 — VIBE_Math_StoreAndZero (__stdcall)
-//   ConvertX();  *out = value;  return value - value;
-// The leading ConvertX truncates whatever is on st0 (the caller's scratch); the
-// observable result is the store plus a NaN-preserving zero.
+//   fld value; fld st; call ConvertX (truncates st0->trunc(value)); fsub st(1),st;
+//   fstp [out] (stores trunc(value)); return st0 (== value - trunc(value)).
+// So: *out = trunc(value) and the return value is the fractional part of `value`
+// (sign-preserving), NOT zero. Verified against disasm @0x602969-0x60297e.
 double StoreAndZero(double value, double* out) {
-    *out = value;
-    return value - value;
+    double t = ConvertX(value);   // trunc toward zero (frndint, RC=chop)
+    *out = t;
+    return value - t;
 }
 
 // gilde.exe 0x5eef4c — VIBE_Math_NormalizeAngle
-//   StoreAndZero(value -> tmp); if (value < 0) tmp += -1.0; return tmp;
-// (dbl_62BFFC == -1.0.) Net effect: floor-toward-zero then bias by -1 when
-// negative == std::floor for the integral-stepping callers.
+//   StoreAndZero(value -> tmp);  // tmp = trunc(value)
+//   if (value < 0.0) tmp += dbl_62BFFC(==-1.0);  return tmp;
+// StoreAndZero writes trunc(value) to the slot (see 0x602968); the original then
+// reads that integral value back and biases by -1 when value<0. Net == floor for
+// non-integral negatives, trunc for non-negatives. Verified @0x5eef61-0x5eef82.
 double NormalizeAngle(double value) {
-    double tmp = value;
+    double slot;
+    StoreAndZero(value, &slot);   // slot = trunc(value)
+    double tmp = slot;
     if (value < 0.0)
-        tmp += -1.0;
+        tmp += -1.0;              // dbl_62BFFC == -1.0
     return tmp;
 }
 
@@ -174,7 +180,7 @@ double VectorAngleBetween(float* a, float* b) {
         return 0.0;
     if (std::fabs(-bx - ax) <= kTol && std::fabs(-by - ay) <= kTol
         && std::fabs(-bz - az) <= kTol)
-        return -3.1415927;
+        return -3.14159274101257324f;  // 0xC0490FDB == float -pi (loaded as float)
     float crossX = bz * ay - by * az;
     float crossY = bx * az - bz * ax;
     float crossZ = by * ax - bx * ay;
@@ -182,7 +188,8 @@ double VectorAngleBetween(float* a, float* b) {
     // reference axis = {0,1,0}: pick crossY.
     if (0.0f * crossX + 1.0f * crossY + 0.0f * crossZ > 0.0f)
         return static_cast<float>(-AcosGuarded(dot));
-    return static_cast<float>(AcosGuarded(dot) + -6.28318530718);
+    // dbl_628CE8 == -6.283185307179586 (exact -2*pi double).
+    return static_cast<float>(AcosGuarded(dot) + -6.283185307179586);
 }
 
 // gilde.exe 0x5ca504 — VIBE_Math_VectorAngleWrapped (__usercall)
@@ -190,7 +197,9 @@ double VectorAngleBetween(float* a, float* b) {
 double VectorAngleWrapped(float* a, float* b) {
     double ang = VectorAngleBetween(a, b);
     float angf = static_cast<float>(ang);
-    if (ang >= -3.14159265359)
+    // dbl_628CF0 == -3.141592653589793 (exact -pi double); flt_628CF8 == 0x40C90FDB
+    // (2*pi as float). Compare the full double `ang`; add the float 2*pi to angf.
+    if (ang >= -3.141592653589793)
         return angf;
     return static_cast<float>(angf + 6.2831854820251465f);
 }

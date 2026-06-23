@@ -120,7 +120,10 @@ TEST(SimCharCore, CollectByOwnerMatchesHomeId) {
     // ownerKeyId 0 collects the wild (home == -1).
     n = CollectByOwner(0, col.data(), (int)col.size(), out, 31);
     CHECK_EQ(n, 1);
-    CHECK_EQ(out[0], col.back());
+    // 1:1 (gilde.exe 0x4b99ac): the result buffer index is PRE-incremented, so
+    // the first match lands at out[1]; out[0] is the reserved slot (untouched).
+    CHECK_EQ(out[1], col.back());
+    CHECK_EQ(out[0], (LiveActor*)nullptr);
 }
 
 TEST(SimCharCore, CollectByOwnerHidesOverflow) {
@@ -143,6 +146,26 @@ TEST(SimCharCore, CollectByOwnerHidesOverflow) {
     CHECK_EQ(n, 12);
     // matches 9..12 are the overflow -> 4 hidden (engine: matches>8).
     CHECK_EQ(hidden, 4);
+}
+
+// 1:1 GOLDEN (gilde.exe 0x4b99ac): result buffer uses a PRE-incremented index, so
+// matches land at out[1], out[2], ... and out[0] stays the reserved slot.
+TEST(SimCharCore, CollectByOwnerWritesAtIndexOneBase) {
+    World w;
+    std::vector<LiveActor*> col;
+    LiveActor* m0 = w.add(-1, 100, 0, 0, 0, 0);
+    /* non-match */ w.add(-1, 200, 0, 0, 0, 0);
+    LiveActor* m1 = w.add(-1, 100, 0, 0, 0, 0);
+    LiveActor* m2 = w.add(-1, 100, 0, 0, 0, 0);
+    for (auto& a : w.actors) col.push_back(&a);
+
+    LiveActor* out[32] = {};
+    int n = CollectByOwner(100, col.data(), (int)col.size(), out, 32);
+    CHECK_EQ(n, 3);
+    CHECK_EQ(out[0], (LiveActor*)nullptr);   // reserved slot, untouched
+    CHECK_EQ(out[1], m0);
+    CHECK_EQ(out[2], m1);
+    CHECK_EQ(out[3], m2);
 }
 
 // ---- index / free-slot / find -------------------------------------------
@@ -261,6 +284,42 @@ TEST(SimCharCore, FlaggedLocalPasses) {
     CHECK_EQ((a->flagsA & kLaRedraw), 0);
     (void)b;
     SetCharStateHooks(nullptr);
+}
+
+// --- HARDENING: the flagged-local scan reaches the top of the 512-slot table --
+// ProcessFlaggedLocal / RefreshFlaggedLocal walk g_live[0..kLiveCapacity). Place a
+// flagged active actor in the LAST slot (511) and verify the scan reaches it and
+// stays in-bounds (ASAN would trip on a read past g_live[512]).
+TEST(SimCharCore, FlaggedLocalScanReachesLastSlot) {
+    ResetCharacterQuery();
+    MeshHandle mesh{0, {0, 0, 0}};
+    LiveActor a{};
+    a.mesh = &mesh;
+    a.universe = &g_universes[0];
+    a.universeId = 100;
+    a.flagsA |= kLaRedraw;
+    const int last = kLiveCapacity - 1;     // 511
+    g_live[last] = &a;
+    g_activeUniverse = &g_universes[0];
+
+    static int pivots, vis; pivots = vis = 0;
+    struct H {
+        static void pv(LiveActor*) { ++pivots; }
+        static void vz(LiveActor*) { ++vis; }
+    };
+    CharStateHooks hooks = { &H::pv, &H::vz };
+    SetCharStateHooks(&hooks);
+
+    CHECK_EQ(ProcessFlaggedLocal(), 1);     // found the slot-511 actor
+    CHECK_EQ(pivots, 1);
+    int cleared = RefreshFlaggedLocal();
+    CHECK_EQ(cleared, 1);
+    CHECK_EQ(vis, 1);
+    CHECK_EQ((a.flagsA & kLaRedraw), 0);
+
+    SetCharStateHooks(nullptr);
+    g_live[last] = nullptr;
+    ResetCharacterQuery();
 }
 
 TEST(SimCharCore, RefreshFlaggedLocalMidTalkSkipsVisibility) {

@@ -178,4 +178,161 @@ int MissionRunInfoDialog(int frameArg) {
     return form;   // return VIBE_Form_Destroy(v4)
 }
 
+// ---------------------------------------------------------------------------
+// RewardSummary / Completion / Offer decode helpers + bodies (W16 reconstruct).
+// ---------------------------------------------------------------------------
+
+namespace {
+// gilde.exe 0x539fd8 — the four per-line frame loops share one body. With audio on:
+//   handle = PlayPositionalSample(-8, slot, "AUFTRAEGE_ALLGEMEIN");
+//   while (VoiceIsPlaying(handle)) {
+//     RunFrameLoop;
+//     if (dword_75BF38 != -1 && childId == dword_62D22C) { if playing StopVoice; break; }
+//   }
+// With audio off (dword_62EB38 + 250 > dword_62EB38, i.e. always while ticks advance):
+//   do RunFrameLoop while ((dword_75BF38 == -1 || childId != dword_62D22C) && deadline > tick);
+// The 4th line is identical except the early-exit returns Form_Destroy directly and
+// it uses the ERFOLG sample. We model the deadline math (250-tick budget) exactly.
+void RunRewardLine(const MissionDialogHooks& h, int form, int frameArg,
+                   int slot, const char* sample, int childId) {
+    MissionDialogFrame f;
+    if (h.audioIsInitialized && h.audioIsInitialized()) {
+        int handle = h.playPositionalSample
+                         ? h.playPositionalSample(-8 /*0xFFFFFFF8*/, slot, sample)
+                         : 0;
+        while (h.voiceHandleIsPlaying ? h.voiceHandleIsPlaying(handle) : 0) {
+            if (h.runFrameLoop) h.runFrameLoop(frameArg, frameArg);
+            if (h.readFrame) h.readFrame(&f);
+            // if (dword_75BF38 != -1 && childId == dword_62D22C) { stop; break; }
+            if (f.lastDialogResult != kMissionDialogNone && childId == f.clickedObjectId) {
+                if (h.voiceHandleIsPlaying && h.voiceHandleIsPlaying(handle) && h.stopVoice)
+                    h.stopVoice(1);
+                break;
+            }
+        }
+    } else {
+        // deadline = tick0 + 250; loop while skip not requested AND deadline > tick.
+        const int tick0    = h.readGameTick ? h.readGameTick() : 0;
+        const unsigned deadline = static_cast<unsigned>(tick0) + 250u;
+        // 0x53a092: the `>=` guard (deadline >= tick0) is always true for +250.
+        do {
+            if (h.runFrameLoop) h.runFrameLoop(frameArg, frameArg);
+            if (h.readFrame) h.readFrame(&f);
+            const bool clicked =
+                f.lastDialogResult != kMissionDialogNone && childId == f.clickedObjectId;
+            if (clicked) break;
+            const unsigned tick =
+                static_cast<unsigned>(h.readGameTick ? h.readGameTick() : 0);
+            if (deadline <= tick) break;
+        } while (true);
+    }
+}
+}  // namespace
+
+// gilde.exe 0x539fd8 — VIBE_Mission_RunRewardSummary.
+int MissionRunRewardSummary(const u8* rewardRecord, int frameArg) {
+    const MissionDialogHooks& h = GetMissionDialogHooks();
+    if (h.voiceQueueFlushAll) h.voiceQueueFlushAll(frameArg);   // VoiceQueue_FlushAll(a3)
+
+    int form = h.createForm ? h.createForm("special\\mission") : -1;
+    if (h.centerChildWindows) h.centerChildWindows(form);
+    if (h.selectWindow) h.selectWindow(form, 0);
+    if (h.renderText) h.renderText(0x17A8);   // line 1 heading
+    if (h.selectWindow) h.selectWindow(form, 2);
+    if (h.renderText) h.renderText(0u);       // RenderRichString(&unk_623D6C)
+    int childId = -1;
+    if (h.renderText) {
+        h.renderText(0x7D);
+        if (h.getChildObjectId) childId = h.getChildObjectId(form, 0x7D);
+    }
+
+    RunRewardLine(h, form, frameArg, 0, "AUFTRAEGE_ALLGEMEIN", childId);
+    if (h.selectWindow) h.selectWindow(form, 1);
+    if (h.renderText) h.renderText(0x17A9);
+    RunRewardLine(h, form, frameArg, 1, "AUFTRAEGE_ALLGEMEIN", childId);
+    if (h.selectWindow) h.selectWindow(form, 1);
+    if (h.renderText) h.renderText(0x17AA);
+    RunRewardLine(h, form, frameArg, 2, "AUFTRAEGE_ALLGEMEIN", childId);
+
+    if (h.selectWindow) h.selectWindow(form, 1);
+    if (h.renderText) h.renderText(0u);       // &unk_623D6C
+    if (h.renderText) h.renderText(0x17AB);
+    // RenderRichString(*(reward+4) + 2): substitution id (inert when no record).
+    if (h.renderTextArg && rewardRecord) {
+        unsigned subId =
+            static_cast<unsigned>(rewardRecord[4] | (rewardRecord[5] << 8) |
+                                  (rewardRecord[6] << 16) | (rewardRecord[7] << 24)) + 2u;
+        h.renderTextArg(0u, subId);
+    }
+    // 4th line: "_AUFTRAEGE_ERFOLG_HS_%.2d" with reward[+12]; frameArg |= 0x80.
+    RunRewardLine(h, form, frameArg | 0x80, 0, "_AUFTRAEGE_ERFOLG_HS_..", childId);
+
+    if (h.destroyForm) h.destroyForm(form);
+    return form;   // return VIBE_Form_Destroy(v5)
+}
+
+// gilde.exe 0x53ac34 — VIBE_Mission_RunCompletionDialog.
+MissionCompletionOutcome MissionRunCompletionDialog(int outcomeCode,
+                                                    i32 activeMissionId,
+                                                    int frameArg) {
+    const MissionDialogHooks& h = GetMissionDialogHooks();
+    int form = h.createForm ? h.createForm("special\\mission") : -1;
+    if (h.centerChildWindows) h.centerChildWindows(form);
+    if (h.selectWindow) h.selectWindow(form, 0);
+    // a1: BYTE1 |= 1; LOBYTE &= 0xF6 -> reward summary flags.
+    MissionRunRewardSummary(nullptr, frameArg);
+    if (h.selectWindow) h.selectWindow(form, 1);
+    if (h.renderText) h.renderText(0x17A2);    // RenderRichString(0x17A2, *v1)
+
+    // dword_75BF38 = -1; do { if (dword_63CC24 == -1) dword_631614 = 1; } while (loop)
+    MissionDialogFrame f;
+    do {
+        if (MissionCompletionStep(activeMissionId)) break;   // dword_63CC24==-1 -> close
+        if (h.readFrame) h.readFrame(&f);
+        if (!(h.runFrameLoop ? h.runFrameLoop(frameArg | 0x80, frameArg | 0x80) : 0))
+            break;
+    } while (true);
+
+    if (h.destroyForm) h.destroyForm(form);
+    return MissionDecodeCompletion(outcomeCode);   // mission_rules 0x53ad50 switch
+}
+
+bool MissionOfferGiveButtonPresent(i32 historySeed) {
+    return static_cast<unsigned>(historySeed) < 4u;   // v31 < 4 (unsigned compare)
+}
+
+// gilde.exe 0x53a854 — VIBE_Mission_RunOfferDialog.
+MissionOfferAction MissionRunOfferDialog(const u8* rewardRecord, int frameArg,
+                                         i32 historySeed,
+                                         i32 giveId, i32 declineId, i32 abandonId) {
+    const MissionDialogHooks& h = GetMissionDialogHooks();
+    // a1: BYTE1 |= 1; LOBYTE &= 0xF6.
+    MissionRunRewardSummary(rewardRecord, frameArg);
+
+    int form = h.createForm ? h.createForm("special\\mission") : -1;
+    if (h.centerChildWindows) h.centerChildWindows(form);
+    if (h.selectWindow) h.selectWindow(form, 0);
+    if (h.renderText) h.renderText(0x17A1);
+
+    // The give button (6053) is only rendered when historySeed < 4.
+    int give = MissionOfferGiveButtonPresent(historySeed) ? giveId : -1;
+    int decline = declineId;   // 6054 (keep)
+    int abandon = abandonId;   // 6055 (abandon)
+
+    MissionOfferAction result = MissionOfferAction::kIdle;
+    MissionDialogFrame f;
+    while (h.runFrameLoop ? h.runFrameLoop(frameArg | 0x80, frameArg | 0x80) : 0) {
+        if (h.readFrame) h.readFrame(&f);
+        MissionOfferAction a = MissionOfferStep(f, give, decline, abandon);
+        if (a != MissionOfferAction::kIdle) {
+            result = a;   // latches dword_631614 in the original; close the loop
+            break;
+        }
+    }
+
+    if (h.destroyForm) h.destroyForm(form);
+    // Post-loop: v21 (give-when-not-keep) -> Failure; v33 (abandon) -> reload.
+    return result;
+}
+
 }  // namespace guild::world

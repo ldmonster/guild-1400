@@ -66,9 +66,9 @@ TEST(WaterVerticesE2E, MultiFramePondFlow) {
         for (int c = 0; c < 16; ++c)
             for (int k = 0; k < 4; ++k)
                 CHECK(std::fabs(m.waveOut[4 * c + k]) <= m.amp[k] + 1e-3f);
-        // phase accumulators reduced into [0, 2π) by the propagation Fmod
-        // (phase[3] keeps its tiny seed since +0x144 is never written):
-        for (int k = 0; k < 3; ++k) {
+        // all four phase accumulators reduced into [0, 2π) by the in-place
+        // propagation Fmod (0x5be428: phase[k]=Fmod(speed[k]*dt+phase[k],2π)):
+        for (int k = 0; k < 4; ++k) {
             CHECK(m.phase[k] >= 0.0f);
             CHECK(m.phase[k] < (float)kTwoPi + 1e-3f);
         }

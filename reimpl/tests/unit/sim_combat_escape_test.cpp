@@ -242,3 +242,48 @@ TEST(SimCombatEscape, NearestEscape) {
     std::vector<const void*> none;
     CHECK(guild::sim::FindNearestEscapeTile(unit, none, origin) == nullptr);
 }
+
+// --- Wave-12 hardening: degenerate / boundary inputs -----------------------
+
+// Escape with no valid tile: every tile impassable AND a steps=0 sweep must both
+// report not-found and never index the entries grid out of range.
+TEST(SimCombatEscape, NoValidTileSweeps) {
+    Grid g;
+    for (int z = 0; z < 8; ++z)
+        for (int x = 0; x < 8; ++x)
+            g.block(x, z, 0);                 // all impassable
+    std::vector<Unit> units = {{0.0f, 0.0f, 0.0f, true}};
+    std::vector<guild::i32> as, es;
+    auto f = MakeField(g, units, {}, {0}, as, es);
+
+    guild::sim::TileSearchResult r;
+    // steps == 0 -> the sweep returns immediately (the `if (steps <= 0)` guard).
+    CHECK(!guild::sim::FindSafestTileInRange(f, 3, 3, 0, r));
+    CHECK(!guild::sim::FindMostThreatenedTile(f, 3, 3, 0, r));
+    // all-impassable, non-zero steps -> still not found, no OOB on the grid.
+    CHECK(!guild::sim::FindSafestTileInRange(f, 3, 3, 3, r));
+}
+
+// A 1x1 grid: the spiral must clamp every probed (x,z) to the single valid cell.
+TEST(SimCombatEscape, SingleCellGridClampsIndices) {
+    Grid g(/*n*/ 1, /*scale*/ 10.0f);          // only tile (0,0) exists
+    std::vector<Unit> units = {{0.0f, 0.0f, 0.0f, true}};  // enemy on the cell
+    std::vector<guild::i32> as, es;
+    auto f = MakeField(g, units, {}, {0}, as, es);
+    // Centre off-grid (5,5): clamps to (0,0); large steps must not over-index.
+    guild::sim::TileSearchResult r;
+    guild::sim::FindSafestTileInRange(f, 5, 5, 4, r);
+    // No assertion on the result value (engine-clamp behavior); the point is ASAN
+    // sees no out-of-bounds read on the 1-cell entries/heights arrays.
+    CHECK(g.hm.size == 1);
+}
+
+// Threat scoring with an all-empty roster (every slot -1) contributes nothing and
+// touches no unit accessor.
+TEST(SimCombatEscape, EmptyRosterZeroScore) {
+    Grid g;
+    std::vector<Unit> units;                    // no units at all
+    std::vector<guild::i32> as, es;
+    auto f = MakeField(g, units, {}, {}, as, es);  // both rosters all -1
+    CHECK(Near(guild::sim::ComputeTileThreatScore(f, 3, 3, 1.0e6f), 0.0));
+}

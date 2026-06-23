@@ -215,16 +215,13 @@ int SpanFillTexturedSample(render::Surface* fb, const render::Polygon& tri) {
         ++g_frameTexturedPolys;
         return 1;
     }
-    // Untextured poly -> the default flat/shaded geometry path (slot default).
-    render::RasterVertex rv[3];
-    const render::Vertex* vp[3] = {tri.v0, tri.v1, tri.v2};
-    for (int i = 0; i < 3; ++i) {
-        rv[i].x = vp[i]->screenX;
-        rv[i].y = vp[i]->screenY;
-        rv[i].light = vp[i]->lightIdx;
-    }
-    render::RasterizeTexturedTriangle(fb, rv);
-    return 1;
+    // Untextured poly -> the slot-4 default (render::SpanFillTexturedOpaque),
+    // which routes by surface format: 8bpp -> the shaded path @0x5F7D58
+    // (unchanged), 16bpp -> the 1x1 white default binding through the textured
+    // leaf (VIBE_Texture_BindActive @0x5db564 slot==0 semantics; meshlist.cpp).
+    // Calling RasterizeTexturedTriangle directly here wrote 8-bit shade bytes
+    // into the 16bpp framebuffer (the wave-3 "pink polygon" artifact).
+    return render::SpanFillTexturedOpaque(fb, tri);
 }
 
 // A SpanDispatch whose opaque (4) + blend (3) slots route through the textured
@@ -264,10 +261,24 @@ int ObjectMeshRenderer::projectMesh(render::MeshGeometry* geom,
     if (!geom) return 0;
     int before = db_.count;
     render::DrawList sink = db_.AppendSink();
+    // LIGHT-CACHE SHADE (Options::cacheShade): a lit universe OBJECT's vertex
+    // shade is the VIBE_Light_BuildObjectCache @0x5c8218 byte the resolver's
+    // geometry carries; the Y-depth term ProjectVerticesToScreen writes is the
+    // CHARACTER shading. Snapshot the cache shade and re-stamp it after the
+    // projection (the same engine truth universe_render applies by overwriting
+    // the projected lightIdx with the cache shade).
+    if (cacheShade_ && geom->vertices && geom->vertexCount > 0) {
+        cacheShadeSave_.resize((size_t)geom->vertexCount);
+        for (int i = 0; i < geom->vertexCount; ++i)
+            cacheShadeSave_[(size_t)i] = geom->vertices[i].lightIdx;
+    }
     // 0x40 (double-sided) so a freshly seated mesh's winding always appends; the
     // on-screen [0,screenW) clip in ProjectVerticesToScreen still culls off-frame.
     render::ProjectVerticesToScreen(geom, pp, /*objFlags530=*/0x40,
                                     /*viewCull42=*/0, &sink);
+    if (cacheShade_ && geom->vertices && geom->vertexCount > 0)
+        for (int i = 0; i < geom->vertexCount; ++i)
+            geom->vertices[i].lightIdx = cacheShadeSave_[(size_t)i];
     db_.count = sink.count;
     return db_.count - before;
 }
@@ -313,6 +324,7 @@ int ObjectMeshRenderer::projectQuad(const WorldPlacement& wp, const Options& opt
 MeshRenderStats ObjectMeshRenderer::render(const Options& opt, render::Surface* fb) {
     using namespace guild::sim;
     stats_ = MeshRenderStats{};
+    cacheShade_ = opt.cacheShade;
     if (!fb) return stats_;
 
     const int fbW = fb->width;
@@ -335,8 +347,10 @@ MeshRenderStats ObjectMeshRenderer::render(const Options& opt, render::Surface* 
 
     // Place one entity: decode its world placement, resolve its mesh, seat + project
     // (mesh) or fall back to a quad. Returns true if anything was emitted.
-    auto place = [&](const EntityRef& ref) -> bool {
-        if (drawn >= opt.maxObjects) return false;
+    // `cap` is the draw-budget bound: opt.maxObjects for the object/scene scans,
+    // opt.maxObjects + opt.maxPersons for the person scan (separate budgets).
+    auto place = [&](const EntityRef& ref, int cap) -> bool {
+        if (drawn >= cap) return false;
 
         const void* node = opt.nodeResolver ? opt.nodeResolver(ref) : nullptr;
         WorldPlacement wp = node ? ObjectWorldPlacement(nullptr, node)
@@ -403,7 +417,7 @@ MeshRenderStats ObjectMeshRenderer::render(const Options& opt, render::Surface* 
                 ref.id   = g_sceneNodes[n].id;
                 ref.slot = n;
                 ref.type = g_sceneNodes[n].type;
-                place(ref);
+                place(ref, opt.maxObjects);
                 int c = g_sceneNodes[n].childPtr;
                 if (c >= 0 && c < count && !visited[c]) stack[sp++] = c;
             }
@@ -419,7 +433,35 @@ MeshRenderStats ObjectMeshRenderer::render(const Options& opt, render::Surface* 
             ref.id   = g_objects[i].id;
             ref.slot = i;
             ref.type = g_objects[i].alive;
-            place(ref);
+            place(ref, opt.maxObjects);
+        }
+    }
+
+    // 2b. Live persons (linear g_persons scan) — OPT-IN (scanPersons, default
+    //     false -> behaviour unchanged). A row is a live person when its marker
+    //     word != -1 (free slot) and its kind byte (+2) is a "real person"
+    //     (< 10 — the record gate of VIBE_Person_IsValidActiveRecord @0x4f8e60).
+    //     Persons go through the SAME place() (node resolver -> world seat ->
+    //     project) and land in the SAME draw list, so the radix sort + raster
+    //     flush below covers objects and persons in one pass, as the engine's
+    //     single per-frame draw list does.
+    if (opt.scanPersons) {
+        int personsDrawn = 0;
+        for (int i = 0; i < kPersonCapacity && personsDrawn < opt.maxPersons; ++i) {
+            const Person& p = g_persons[i];
+            if (p.marker == -1) continue;
+            if (p.kind >= 10) continue;
+            EntityRef ref;
+            ref.kind = EntityKind::Person;
+            ref.id   = p.id;
+            ref.slot = i;
+            ref.type = p.kind;
+            int meshBefore = stats_.meshObjects;
+            if (place(ref, opt.maxObjects + opt.maxPersons)) {
+                ++personsDrawn;
+                if (stats_.meshObjects > meshBefore) ++stats_.personMeshes;
+                else                                 ++stats_.personQuads;
+            }
         }
     }
 

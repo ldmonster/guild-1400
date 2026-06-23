@@ -75,7 +75,11 @@ int ObjectCollectMatchingProts(u8 buildingTypeByte, const i8* remap) {
     if (!g_sceneTypesLoaded) {
         return 1;
     }
-    const BuildingTypeDef* selfDef = BuildingTypeDefAt(buildingTypeByte);
+    // 0x586531: `movsx edx, byte ptr [edi]` — the building type byte is read
+    // SIGNED (sign-extended) for both the >= compare and the kind index. Match
+    // the sign-extension faithfully (matters only for type bytes >= 128).
+    const int v5signed = static_cast<int>(static_cast<i8>(buildingTypeByte));
+    const BuildingTypeDef* selfDef = BuildingTypeDefAt(static_cast<u8>(v5signed));
     u8 selfKind = selfDef ? selfDef->kind : 0;  // *(dword_13CE294 + 589*v5)
 
     i16 count = 0;
@@ -84,10 +88,10 @@ int ObjectCollectMatchingProts(u8 buildingTypeByte, const i8* remap) {
         if (static_cast<u8>(v4) == 72) {  // (_BYTE)v4 != 72 guard
             continue;
         }
-        // v5 = *a1 (building type byte); compare v5 >= (char)remap and the kinds.
+        // v5 = (char)*a1; compare v5 >= (char)remap (signed) and the kinds.
         const BuildingTypeDef* remapDef = BuildingTypeDefAt(static_cast<u8>(v4));
         u8 remapKind = remapDef ? remapDef->kind : 0;  // *(589*v4 + base)
-        if (static_cast<int>(buildingTypeByte) >= v4 && remapKind == selfKind) {
+        if (v5signed >= v4 && remapKind == selfKind) {
             g_objSpawnList[static_cast<u16>(count)] = static_cast<u16>(i);
             ++count;
         }

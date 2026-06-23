@@ -95,10 +95,24 @@ TEST(NetSessionWinsock, SourceFileNameMatchesBinary) {
 // ReportWinsockError routes the classified diagnostic through the installable
 // hook. With a capturing hook installed we observe the exact (file,line,sev,msg).
 namespace {
-struct Capture { const char* file; int line; int sev; const char* msg; bool hit; };
+// The diagnostic `msg` may point into ReportWinsockError's *stack* buffer (the
+// unknown-code path formats into a local char[256]). That pointer is only valid
+// for the duration of the synchronous hook call, exactly as in the original (the
+// error-log sink consumes the string before the function returns). So the sink
+// must COPY the message contents here — stashing the raw pointer and reading it
+// after ReportWinsockError returns is a use-after-return (ASAN-caught) bug.
+struct Capture { const char* file; int line; int sev; char msg[256]; bool hit; };
 Capture g_cap;
 void CapturingSink(const char* f, int l, int s, const char* m) {
-    g_cap = {f, l, s, m, true};
+    g_cap.file = f;
+    g_cap.line = l;
+    g_cap.sev  = s;
+    g_cap.msg[0] = '\0';
+    if (m) {
+        std::strncpy(g_cap.msg, m, sizeof(g_cap.msg) - 1);
+        g_cap.msg[sizeof(g_cap.msg) - 1] = '\0';
+    }
+    g_cap.hit = true;
 }
 }  // namespace
 
@@ -119,8 +133,7 @@ TEST(NetSessionWinsock, ReportRoutesThroughHook) {
     net::ReportWinsockError(424242);  // unknown -> line 89, formatted message
     CHECK(g_cap.hit);
     CHECK_EQ(g_cap.line, 89);
-    if (g_cap.msg)
-        CHECK(std::strcmp(g_cap.msg, "Unknown winsock error 424242!!!") == 0);
+    CHECK(std::strcmp(g_cap.msg, "Unknown winsock error 424242!!!") == 0);
 
     net::NetReportHooks() = saved;  // restore inert default
 }

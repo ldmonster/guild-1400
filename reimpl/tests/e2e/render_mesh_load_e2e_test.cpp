@@ -117,8 +117,10 @@ TEST(MeshLoadE2E, LoadCubeFull) {
 
     // The morph-bake maps (x,y,z) -> (-x, z, y); for the symmetric +/-1 cube the
     // bounds stay [-1,1]^3 (python golden).
-    CHECK(feq(m.radius, std::sqrt(3.0f)));
-    CHECK(feq(m.radius2, 2.0f * std::sqrt(3.0f)));
+    // HARDEN (gilde.exe 0x5d1ff5): +472 (m.radius) ends as the AABB diagonal,
+    // +468 (m.radius2) holds max-|vertex| — these were swapped vs the binary.
+    CHECK(feq(m.radius, 2.0f * std::sqrt(3.0f)));
+    CHECK(feq(m.radius2, std::sqrt(3.0f)));
     CHECK(feq(m.centroid[0], 0.0f));
     CHECK(feq(m.centroid[1], 0.0f));
     CHECK(feq(m.centroid[2], 0.0f));

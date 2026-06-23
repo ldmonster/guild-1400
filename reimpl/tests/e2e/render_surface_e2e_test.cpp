@@ -34,15 +34,22 @@ TEST(RenderE2E, DrawSaveReloadRoundtrip24) {
             SurfaceSetPixelRgb(s, 16 + x, 2 + y, v, v, v);
         }
 
-    // capture the surface as a flat top-down R,G,B buffer for save.
+    // Capture the surface as a flat top-down R,G,B buffer for save. We read the
+    // raw pixel bytes at the SAME address VIBE_Surface_SetPixelRgb wrote them:
+    // gilde.exe @0x423f32 lays a 24bpp pixel at  pixels + (widthPx*y) + (3*x)
+    // (the row term widthPx*y is NOT scaled by bytespp). NOTE the original's
+    // VIBE_Surface_GetPixelRgb @0x423e11 reads at a DIFFERENT address
+    // (pixels + widthPx*y*3 + 3*x), so SurfaceGetPixelRgb would NOT recover what
+    // SetPixelRgb wrote for y>0 — a 1:1 quirk of the binary's 24bpp Set/Get pair
+    // (pinned in render_surface_test RenderSurface.SetPixel24Bgr). Here we read
+    // along the Set layout so the draw/save/reload demo recovers the drawn pixels.
     std::vector<u8> rgb((size_t)W * H * 3);
     for (int y = 0; y < H; ++y)
         for (int x = 0; x < W; ++x) {
-            u8 px[3];
-            SurfaceGetPixelRgb(s, x, y, px);
-            rgb[(size_t)(y * W + x) * 3 + 0] = px[0];
-            rgb[(size_t)(y * W + x) * 3 + 1] = px[1];
-            rgb[(size_t)(y * W + x) * 3 + 2] = px[2];
+            const u8* p = s->pixels + (size_t)s->widthPx * y + (size_t)3 * x;
+            rgb[(size_t)(y * W + x) * 3 + 0] = p[0];
+            rgb[(size_t)(y * W + x) * 3 + 1] = p[1];
+            rgb[(size_t)(y * W + x) * 3 + 2] = p[2];
         }
 
     // 3. save to BMP bytes, 4. reload.

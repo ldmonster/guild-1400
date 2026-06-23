@@ -68,9 +68,15 @@ void BeginUniverseFrame(FrameState& fs, const FrameHooks& hooks, char a2) {
         hooks.clearRect();
     }
 
-    // Reset the running depth bounds + per-frame poly counters.
+    // Reset the running depth bounds + per-frame poly counters (0x5b3982..5b39b8):
+    //   dword_64A060 = 0; flt_13FCF3C = 0.0; dword_64A058 = 0;
+    //   *(*(obj+492)+256) = 0; flt_13FD168[0] = 1e10; *(obj+492)+252) = 0;
+    fs.polyCounterA = 0;                  // dword_64A060 = 0
     fs.runningFar = 0.0f;                 // flt_13FCF3C = 0.0
+    fs.polyCounterB = 0;                  // dword_64A058 = 0
+    fs.shadowPolyCount = 0;               // *(*(obj+492)+256) = 0
     fs.runningNear = 1.0e10f;             // flt_13FD168[0] = 1e10
+    fs.framePolyCount = 0;                // *(*(obj+492)+252) = 0
 
     // Terrain (with the fog-range sub-step, which is terrain-coupled).
     if (fs.hasTerrain && hooks.renderTerrain)
@@ -129,11 +135,38 @@ i32 DrawUniverseAndStats(FrameState& fs, const FrameHooks& hooks,
     ++fs.reentrancy;
 
     if (a2) {
+        // v14 = dword_62EB38; ScrollUvCoords(dword_62EB38);  (0x5b3c7a)
         i32 now = hooks.timeNow ? hooks.timeNow() : 0;
+        if (hooks.scrollUvCoords)
+            hooks.scrollUvCoords(now);
 
-        // Animation pose walk (gated by a3 in the original's nested 64-list loop).
-        if (a3 && hooks.updateAnim)
-            hooks.updateAnim(a2);
+        // Unconditional projection walk: v7 = result|0x181;
+        //   WalkAndInvoke(off_649D64, 0, v8, v7, v14);  (0x5b3c96)
+        const i16 walkFlags = (i16)((i16)fs.appendedPolys | 0x181);
+        if (hooks.projectWalk)
+            hooks.projectWalk(walkFlags, now);
+
+        // a3-gated animation pose walk over the 64 per-zone character lists.
+        // for (i=0; i<64; ++i) { if (i != dword_649D60) { head = dword_13ECF48[i*246];
+        //   if (head && head != &dword_13FCF4C) { node=head;
+        //     do { UpdateSkeletonPose(off_649D64,node,v7,v14|0x80000000);
+        //          node=node[124]; } while (node != &dword_13FCF4C); } } }
+        if (a3 && hooks.animListHead && hooks.animSentinel && hooks.animNext &&
+            hooks.animPose) {
+            void* sentinel = hooks.animSentinel();
+            for (int i = 0; i < 64; ++i) {
+                if (i == fs.animSkipIndex)         // i != dword_649D60
+                    continue;
+                void* head = hooks.animListHead(i); // dword_13ECF48[i*246]
+                if (!head || head == sentinel)
+                    continue;
+                void* node = head;
+                do {
+                    hooks.animPose(node, walkFlags, now /* | 0x80000000 high bit */);
+                    node = hooks.animNext(node);    // node[124]
+                } while (node != sentinel);
+            }
+        }
 
         // fps window A: report every >60 ticks.
         i32 framesA = fs.fpsFrameAccA + 1;
@@ -156,10 +189,21 @@ i32 DrawUniverseAndStats(FrameState& fs, const FrameHooks& hooks,
     }
 
     if (a4)
-        ++fs.frameCounter;
+        ++fs.frameCounter;            // ++dword_649D58
 
-    // Per-frame poly counters reset (the original zeroes *(obj+492)+252/+256 and
-    // dword_1408A64/68). Modeled as the appended-poly snapshot the caller reads.
+    // Per-frame poly counters reset (0x5b3c19..0x5b3c50):
+    //   byte_64A068 = 0;
+    //   *(*(obj+492)+256) = 0;
+    //   *(*(obj+492)+252) = *(*(obj+492)+256);   (== 0)
+    //   dword_1408A68 = 0; dword_1408A64 = 0;
+    fs.drawFrameFlag = 0;             // byte_64A068 = 0
+    fs.shadowPolyCount = 0;           // *(*(obj+492)+256) = 0
+    fs.framePolyCount = fs.shadowPolyCount; // *(*(obj+492)+252) = *(*(obj+492)+256)
+    fs.mirrorPolyB = 0;              // dword_1408A68 = 0
+    fs.mirrorPolyA = 0;              // dword_1408A64 = 0
+
+    // result = *(obj+492); the engine returns the obj's drawdata ptr. We model the
+    // observable per-frame poly count the caller reads.
     --fs.reentrancy;
     return fs.appendedPolys;
 }

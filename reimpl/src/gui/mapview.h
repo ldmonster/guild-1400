@@ -31,6 +31,11 @@ inline constexpr int kMapViewH = 360; // visible height (world - 360 = max scrol
 extern int g_mapWidth;   // dword_1233440  world bitmap width  (px)
 extern int g_mapHeight;  // dword_1233444  world bitmap height (px)
 
+// dword_12334F0 / dword_12334F4 — last clamped scroll offset, written unconditionally
+// by StepScrollOffset.  Write-only in the original (no readers); kept for 1:1 fidelity.
+extern int g_mapLastClampedX; // dword_12334F0
+extern int g_mapLastClampedY; // dword_12334F4
+
 // ---------------------------------------------------------------------------
 // World->screen marker projection transform constants (recovered as exact bytes).
 //   dbl_624058 = 0.5      camera-origin scale  (applied to *(camera+32))
@@ -77,11 +82,31 @@ int MapView_StepScrollOffset(ScrollOffset& off, int mouseX, int mouseY,
                              int boundLoX, int boundHiX, int boundLoY, int boundHiY,
                              bool edgeUp, bool edgeDown, bool edgeLeft, bool edgeRight);
 
-// gilde.exe 0x5437d8 — VIBE_MapView_AddCornerObjects: the four corner decoration
-// objects are placed at fixed (x,y) map coords (0,0),(0,418),(0,120),(579,120) via
-// Object_AddToWindow(win, y, x, gfx+n).  We expose the placement table so the corner
-// layout is testable without the renderer.
-struct CornerPlacement { i16 x, y; };
+// gilde.exe 0x5437d8 — VIBE_MapView_AddCornerObjects(win@eax, gfxBase@edx).
+//
+// Disassembly facts (each placement is Object_AddToWindow(win@ecx, y@dx, x@ax,
+// gfx@ebx) followed by ZOrder_RemoveObject(result@eax)):
+//   obj0:  x = mx,  y = my,   gfx = gfxBase+0
+//   obj1:  x = mx,  y = 0x1A2 (418),  gfx = gfxBase+1
+//   obj2:  x = mx,  y = 0x78  (120),  gfx = gfxBase+2
+//   obj3:  x = 0x243 (579),  y = 0x78 (120),  gfx = gfxBase+3
+// where (mx,my) is the live cursor pixel offset (the original loads it off the
+// packed mouse globals via the >>16 of two stack-aliased dwords; var_18/var_20, the
+// bases the 0x1A2/0x78/0x243 constants add to, are explicitly 0). Each placed
+// object is immediately unlinked from the z-order (ZOrder_RemoveObject) so the
+// corners draw beneath the rest of the map window. The function returns the last
+// ZOrder_RemoveObject result.
+//
+// The placement TABLE below is the (mx,my) == (0,0) snapshot, exposed for renderer-
+// free layout tests; the runtime function adds the cursor offset.
+struct CornerPlacement { i16 x, y; };           // {x@ax, y@dx} of each Object_AddToWindow
 extern const CornerPlacement kMapCornerPlacements[4];
+
+// gilde.exe 0x5437d8 — place the four corner decoration objects on window `win`,
+// gfx ids gfxBase+0..+3, at the cursor offset (cursorX, cursorY). Returns the last
+// ZOrder_RemoveObject result (the original's return value). Routes Object_AddToWindow
+// (gui/window.cpp) + ZOrder_RemoveObject (gui/zorder.cpp) — the real reconstructed
+// leaves — preserving the placement coords and the per-object remove ORDER.
+int MapView_AddCornerObjects(int win, int gfxBase, int cursorX, int cursorY);
 
 } // namespace guild::gui

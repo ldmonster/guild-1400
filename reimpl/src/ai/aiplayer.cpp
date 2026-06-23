@@ -1,5 +1,6 @@
 #include "ai/aiplayer.h"
 
+#include "sim/ai_meister.h"   // guild::sim::DispatchMeisterCalc (wave-19 Calc bodies)
 #include "util/math_random.h"
 #include "util/math_rng_float.h"
 
@@ -44,6 +45,24 @@ MeisterRoutine ClassifyMeisterRoutine(int category, u8 aiClass) {
     case kAiClassProduction9: return MeisterRoutine::kPlanProduction;
     default:                  return MeisterRoutine::kNone;
     }
+}
+
+// gilde.exe 0x4533a8 — VIBE_Ai_EvaluateMeister dispatch tail. Connects the two
+// reconstructed pieces along the original's real call edge: classify by
+// category+class, then dispatch to the matching CalcMeister* (Farming/Wache/Diebe/
+// Ambush) reconstructed in src/sim/ai_meister*. The decompile (0x4533a8) routes:
+//   MapTypeToCategory == 1/4 -> CraftProduction(class 8/14) / Production
+//   MapTypeToCategory == 2   -> CalcMeisterFarming
+//   else switch(class): 19->Wache 4->Diebe 16->Ambush 5->Bank 9->PlanProduction
+// ClassifyMeisterRoutine encodes exactly that mapping; DispatchMeisterCalc runs the
+// 4 reconstructed routines and no-ops Production/Bank/PlanProduction (their own
+// planner module owns them — deferred there). meisterRec is the original's v2.
+MeisterRoutine EvaluateMeister(int category, u8 aiClass, void* meisterRec,
+                               int attackBudget) {
+    MeisterRoutine routine = ClassifyMeisterRoutine(category, aiClass);
+    guild::sim::DispatchMeisterCalc(static_cast<int>(routine),
+                                    static_cast<u8*>(meisterRec), attackBudget);
+    return routine;
 }
 
 // gilde.exe 0x47d0e8 (core) — single-attack acceptance probability rule.

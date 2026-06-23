@@ -61,15 +61,17 @@ TEST(SimIntEvalE2E, SocialInteractionFlow) {
     EvalActor a = MakeActor();
 
     // --- Step 1: choose a gesture. The actor can use slot 0 (item 341). With a
-    // 9-slot table and slot 0 usable, the "use now" branch fires. The RNG slot pick
-    // lands on a usable slot; for gesture, slot 0 goes through the planner (mode 3).
+    // 9-slot table and slot 0 usable, the "use now" branch fires. Per 0x46ef04 the
+    // gesture use-now branch ONLY routes slot 8 through the planner (mode 3); every
+    // other usable slot builds the frames and returns the default code 28 directly
+    // without calling SelectBestRecursive.
     g_usableSlotE2E = 0;
     ai::EvalFrame ga, gb;
     char gres = EvalChooseGesture(0, &a, &ga, 0, &gb);
-    // planner accepts -> returns the frame kind (1 == "use now").
-    CHECK_EQ((int)gres, 1);
-    CHECK_EQ((int)ga.kind(), 1);
+    CHECK_EQ((int)gres, 28);             // slot 0 -> direct default, no planner
+    CHECK_EQ((int)ga.kind(), 1);         // "use now" frame still built
     CHECK_EQ((int)ga.w[1], g_usableObj); // use-frame arg0 == resolved object id
+    CHECK_EQ(g_calls, 0);                // gesture slot 0 did NOT consult the planner
 
     // --- Step 2: a talk action. Slot 0 (item 371) usable -> "use now"; talk slot 0
     // goes through the planner (mode 4), which accepts -> kind 1.
@@ -86,8 +88,9 @@ TEST(SimIntEvalE2E, SocialInteractionFlow) {
     CHECK_EQ((int)sa.kind(), 1);
     CHECK_EQ((int)sb.w[1], 777); // companion frame carries the resolved peer
 
-    // The planner was consulted once per accepted social action.
-    CHECK_EQ(g_calls, 3);
+    // The planner was consulted once each for the talk + social-gesture accepts
+    // (the gesture slot-0 path returned directly without it).
+    CHECK_EQ(g_calls, 2);
 }
 
 // === Send-message command emission ==========================================

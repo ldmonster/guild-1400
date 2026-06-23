@@ -81,14 +81,18 @@ int EvalPurchaseDesire(float wealthGauge, int lawWealthCur, float favPersonCtx,
 // Distributes a wealth budget across three destinations weighted by distance.
 //   budget = trunc((total_wealth) * 0.025);
 //   for k in 0..2: d[k] = distance2d(0, dest[k]); maxd = max(d);
-//   for k in 0..2: out.weight[k] = trunc(budget * (d[k]/maxd));
+//                  out.base[k] = kChoiceTable[k][0];                       // out+4
+//                  out.pick[k] = kChoiceTable[k][1 + RandomModulo(3)];     // out+5
+//   for k in 0..2: out.weight[k] = trunc(budget * (d[k]/maxd));           // out+0
 // `personWealth` is the VIBE_Person_ComputeTotalWealth(persons) result; `dist` the
-// three sampled distances (env.distance2d at the three dest indices). The original
-// also writes choice bytes (a random pick per slot via RandomModulo(3)); we return
-// the three integer weights and the chosen-byte indices.
+// three sampled distances (env.distance2d at the three dest indices). Per slot the
+// original writes a fixed "base" byte and a random pick byte resolved through a
+// per-slot 4-byte option table (dword_4664B8): row k = {base, opt0, opt1, opt2}, the
+// pick = row[1 + RandomModulo(3)]. row0={4,0,3,1} row1={3,1,2,0} row2={2,0,4,1}.
 struct ChoiceWeights {
     int weight[3] = {0, 0, 0};
-    int pick[3]   = {0, 0, 0};  // RandomModulo(3) per slot (the chosen sub-option)
+    int base[3]   = {0, 0, 0};  // dword_4664B8[k][0]   (written to out+4)
+    int pick[3]   = {0, 0, 0};  // dword_4664B8[k][1 + RandomModulo(3)]  (out+5)
 };
 ChoiceWeights ComputeChoiceWeights(int personWealth, const float dist[3],
                                    const MethodEnv& env);
@@ -132,8 +136,8 @@ struct SessionInputs {
     // type 0 (social) scalar leaves:
     float socGauge = 0.f, socTrait = 0.f, socBudgetF = 0.f, socFavBA = 0.f, socFavCA = 0.f;
     int   socBudgetI = 0;
-    // type 1/2/6 RNG modulus (always 2 for type 6):
-    u16   randModulus = 2;
+    // NOTE: types 1/2/6 take NO modulus input — the binary hardcodes them
+    // (RandomBoolCheck=2 @0x46797c, RandomValue=7 @0x467994, case6=2 @0x4a48e2).
     // type 3 (favorability) leaves:
     bool  favAFound = false; float favBA = 0.f, favCA = 0.f;
     // type 4 (conflict) leaves:

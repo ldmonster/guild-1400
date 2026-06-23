@@ -152,3 +152,35 @@ TEST(DialogMarketUnit, ClickOffButtonNoIntent) {
     CHECK(!c.hitButton);
     CHECK(c.interaction.side == MarketSide::kNone);
 }
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-12): a trade tree with MANY rows (more than the buy-slot grid),
+// an out-of-range ware (good index), and a tiny framebuffer must not over-read
+// the slot tables or write the surface out of bounds (the render ops clip).
+// ---------------------------------------------------------------------------
+TEST(DialogMarketUnit, ManyRowsAndOOBWareNoOOB) {
+    SeedWares();
+    std::vector<TradeRow> rows;
+    for (int i = 0; i < 200; ++i)
+        rows.push_back({ (i16)(i + 1), 50, 200, 0, 0, 0 });
+    rows.push_back({ (i16)30000, 10, 80, 0, 0, 0 });   // far-out-of-range ware
+    rows.push_back({ (i16)-7,    10, 80, 0, 0, 0 });   // negative ware
+    MarketDialog d = BuildSyntheticMarketDialog(rows, 0, 0, 64, 64);
+    CHECK_EQ((int)d.rows.size(), 202);
+
+    DialogRenderStats st;
+    render::Surface* s = RenderMarketDialog(d, 16, 16, st);   // tiny fb -> clip
+    CHECK(s != nullptr);
+    if (s) render::SurfaceDestroy(s);
+}
+
+TEST(DialogMarketUnit, EmptyRowsRenders) {
+    SeedWares();
+    std::vector<TradeRow> rows;                              // zero rows
+    MarketDialog d = BuildSyntheticMarketDialog(rows, 0, 0, 64, 64);
+    CHECK_EQ((int)d.rows.size(), 0);
+    DialogRenderStats st;
+    render::Surface* s = RenderMarketDialog(d, 32, 32, st);
+    CHECK(s != nullptr);
+    if (s) render::SurfaceDestroy(s);
+}

@@ -128,6 +128,22 @@ struct Building5Hooks {
         (void)a; (void)b; (void)c;
     }
 
+    // gilde.exe dword_63C8F0 — RequestGateFlagSync's top-level guard reads
+    //   *(int*)((char*)&dword_63C8F0 + 1) >> 24 <= -1
+    // i.e. the signed high byte of the misaligned dword at 0x63C8F1 (byte at
+    // 0x63C8F4). When that value is <= -1 the gate sync immediately frees the
+    // handler entry and bails. It is global session/game-mode state set outside
+    // the buildings module, so it is routed through a hook. The hook returns the
+    // raw int it shifts (default 0 -> 0 >> 24 == 0 -> guard not taken).
+    virtual std::int32_t GateSyncGuardWord() { return 0; }
+
+    // gilde.exe byte_1233514 — the difficulty / reserve-cap byte read by
+    // ForEachBauplatzReserve as  v9 = reserve && (idx < (u8)cap || cap == 2).
+    // It is genuine runtime difficulty state set outside the buildings module, so
+    // it is routed through a hook rather than faked. Default mirrors the binary's
+    // fresh BSS state (0).
+    virtual std::uint8_t DifficultyReserveCap() { return 0; }
+
     // gilde.exe 0x583150 — VIBE_GameTime_Advance(rec, addDays, addSeconds,
     // addMinutes): advance a 14-byte packed time record. Routed so the itest can
     // forward the REAL sim::GameTimeAdvance. Inert: no-op, returns 0.

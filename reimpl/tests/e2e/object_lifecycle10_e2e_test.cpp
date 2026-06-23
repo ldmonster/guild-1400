@@ -1,9 +1,15 @@
 #include "test.h"
 
 #include "sim/object_lifecycle10.h"
+#include "render/mesh_attach_textures.h"   // render::frame:: shared draw-block layout
 
 #include <cstring>
 #include <vector>
+
+// Reconciled per-LOD-frame STOCK/resident-gate slot (LOD-frame_base 244 + a2[4]
+// relocated slot 24 == 268; verbatim engine +260 on a 32-bit build).
+static constexpr int kResidentGate =
+    guild::render::frame::kLodFrameBase + guild::render::frame::kStockSlot;
 
 using namespace guild;
 using namespace guild::sim;
@@ -80,7 +86,7 @@ TEST(ObjLifecycle10E2E, SpawnInitAttachFindTeardownFlow) {
     void* draw = ObjectAllocDrawData(&node);
     CHECK(draw != nullptr);
     if (draw) {
-        SetBlockPtr(draw, 260, reinterpret_cast<void*>(static_cast<std::intptr_t>(1)));
+        SetBlockPtr(draw, kResidentGate, reinterpret_cast<void*>(static_cast<std::intptr_t>(1)));
         static_cast<unsigned char*>(draw)[2316] = 0;   // 0 submeshes => no tex walk
     }
 

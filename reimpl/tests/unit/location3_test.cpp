@@ -160,7 +160,7 @@ TEST(Location3, ActionCodes) {
 TEST(Location3, InertHooksRobberCampRaidNoCommit) {
     SetLocationDialogHooks(nullptr);
     auto t = MakeSlots({1, 1}, {5, 6});
-    DialogOutcome o = RobberCampRaid(t);
+    DialogOutcome o = RobberCampRaid(/*hasTarget=*/true, /*targetBusy=*/true, t);
     CHECK(o.opened);
     CHECK(!o.committed);   // default frameStep ends the loop -> never confirmed
 }
@@ -170,9 +170,34 @@ TEST(Location3, RobberCampStandardNoTarget) {
     Recorder rec;
     auto t = MakeSlots({1}, {9});
     auto sel = MakeSel({{true, true, 42}});
-    DialogOutcome o = RobberCampStandard(0, /*hasTarget=*/false, t, sel);
+    DialogOutcome o = RobberCampStandard(0, /*hasTarget=*/false,
+                                         /*requestExists=*/false, /*targetBusy=*/true, t, sel);
     CHECK(!o.opened);
     CHECK(!o.committed);
+    CHECK_EQ(rec.formsOpened, 0);
+}
+
+TEST(Location3, RobberCampStandardExistingRequestAborts) {
+    Recorder rec;
+    auto t = MakeSlots({1}, {9});
+    auto sel = MakeSel({{true, true, 42}});
+    // gilde.exe 0x512712: matching handler found -> msg 5790, return before form.
+    DialogOutcome o = RobberCampStandard(1, true, /*requestExists=*/true, true, t, sel);
+    CHECK(!o.opened);
+    CHECK_EQ(rec.messages.size(), 1u);
+    CHECK_EQ(rec.messages[0], 5790);
+    CHECK_EQ(rec.formsOpened, 0);
+}
+
+TEST(Location3, RobberCampStandardBusyGate) {
+    Recorder rec;
+    auto t = MakeSlots({1}, {9});
+    auto sel = MakeSel({{true, true, 42}});
+    // gilde.exe 0x512748: !IsAnimalTargetBusy -> msg 5782, return before form.
+    DialogOutcome o = RobberCampStandard(1, true, false, /*targetBusy=*/false, t, sel);
+    CHECK(!o.opened);
+    CHECK_EQ(rec.messages.size(), 1u);
+    CHECK_EQ(rec.messages[0], 5782);
     CHECK_EQ(rec.formsOpened, 0);
 }
 
@@ -180,7 +205,7 @@ TEST(Location3, RobberCampStandardFullAborts) {
     Recorder rec;
     auto t = MakeSlots(std::vector<std::uint8_t>(5, 0), std::vector<std::int32_t>(5, 0));
     auto sel = MakeSel({{true, true, 42}});
-    DialogOutcome o = RobberCampStandard(1, true, t, sel);
+    DialogOutcome o = RobberCampStandard(1, true, false, true, t, sel);
     CHECK(!o.opened);
     CHECK_EQ(rec.messages.size(), 1u);   // "full" message shown
     CHECK_EQ(rec.formsOpened, 0);
@@ -191,7 +216,7 @@ TEST(Location3, RobberCampStandardConfirmQueuesOneId) {
     rec.confirm();
     auto t = MakeSlots({1, 0}, {9, 0});
     auto sel = MakeSel({{true, false, 1}, {true, true, 77}, {true, true, 88}});
-    DialogOutcome o = RobberCampStandard(1, true, t, sel);
+    DialogOutcome o = RobberCampStandard(1, true, false, /*targetBusy=*/true, t, sel);
     CHECK(o.opened);
     CHECK(o.committed);
     CHECK_EQ(o.action, 98);
@@ -207,7 +232,7 @@ TEST(Location3, RobberCampRaidConfirmQueuesAll) {
     Recorder rec;
     rec.confirm();
     auto t = MakeSlots({0, 1, 1, 0, 1}, {0, 201, 202, 0, 204});
-    DialogOutcome o = RobberCampRaid(t);
+    DialogOutcome o = RobberCampRaid(/*hasTarget=*/true, /*targetBusy=*/true, t);
     CHECK(o.committed);
     CHECK_EQ(o.action, 117);
     CHECK_EQ(rec.batchCode, 117);
@@ -220,10 +245,30 @@ TEST(Location3, RobberCampRaidEmptyShowsMessage) {
     Recorder rec;
     rec.confirm();
     auto t = MakeSlots({0, 0, 0}, {0, 0, 0});
-    DialogOutcome o = RobberCampRaid(t);
+    DialogOutcome o = RobberCampRaid(/*hasTarget=*/true, /*targetBusy=*/true, t);
     CHECK(o.opened);
     CHECK(!o.committed);
     CHECK_EQ(rec.messages.size(), 1u);
+}
+
+TEST(Location3, RobberCampRaidBusyGate) {
+    Recorder rec;
+    rec.confirm();
+    auto t = MakeSlots({1, 1}, {1, 2});
+    // gilde.exe 0x512ed7: !IsAnimalTargetBusy -> msg 5791, return before form.
+    DialogOutcome o = RobberCampRaid(/*hasTarget=*/true, /*targetBusy=*/false, t);
+    CHECK(!o.opened);
+    CHECK_EQ(rec.messages.size(), 1u);
+    CHECK_EQ(rec.messages[0], 5791);
+}
+
+TEST(Location3, RobberCampRaidNoTargetNoOpen) {
+    Recorder rec;
+    rec.confirm();
+    auto t = MakeSlots({1, 1}, {1, 2});
+    DialogOutcome o = RobberCampRaid(/*hasTarget=*/false, /*targetBusy=*/true, t);
+    CHECK(!o.opened);
+    CHECK_EQ(rec.formsOpened, 0);
 }
 
 // ---- ThiefBurglaryDialog gates --------------------------------------------

@@ -388,3 +388,48 @@ TEST(CombatProjectile2, NearestKnifeTarget) {
     std::vector<KnifeTarget> far = { {2, true, 150.0f} };
     CHECK(NearestKnifeTargetDist(1, far) == -1.0f);
 }
+
+// --- Wave-12 hardening: degenerate targets / undersized tables -------------
+
+// Projectile knife scan with no valid target: empty list, all same-faction, and
+// all-dead must each return -1.0 (no target) without indexing past the vector.
+TEST(CombatProjectile2, NearestKnifeTargetNoValidTarget) {
+    std::vector<KnifeTarget> empty;
+    CHECK(NearestKnifeTargetDist(1, empty) == -1.0f);
+    // All same faction as self -> all skipped.
+    std::vector<KnifeTarget> sameFaction = { {1, true, 10.0f}, {1, true, 5.0f} };
+    CHECK(NearestKnifeTargetDist(1, sameFaction) == -1.0f);
+    // Enemy faction but all dead -> all skipped.
+    std::vector<KnifeTarget> allDead = { {2, false, 10.0f}, {2, false, 5.0f} };
+    CHECK(NearestKnifeTargetDist(1, allDead) == -1.0f);
+}
+
+// SelectBeatingTarget with an UNDERSIZED filter table: the 5*row+col index can
+// reach 0..24, but a short table must be bounded (the idx < size() guard) so the
+// random filter byte defaults to 0 instead of reading out of range.
+TEST(CombatOrders, SelectBeatingTargetUndersizedFilterTable) {
+    crt::Srand(999);
+    std::vector<i32> seeds = {11};
+    std::vector<u8> shortTable(3, 7);          // far smaller than the 25-entry grid
+    auto q = [](int, u8) { return std::vector<i32>{21, 22, 23}; };
+    int pick = SelectBeatingTarget(seeds, shortTable, q);
+    CHECK(pick != -1);                          // no OOB, still returns a candidate
+    // An empty filter table is also safe (every lookup defaults to 0).
+    std::vector<u8> noTable;
+    crt::Srand(999);
+    int pick2 = SelectBeatingTarget(seeds, noTable, q);
+    CHECK(pick2 != -1);
+}
+
+// SelectBeatingTarget fills at most 16 candidates even when the seeds AND every
+// query batch over-supply ids — the fixed candidates[16] must not overflow.
+TEST(CombatOrders, SelectBeatingTargetSaturatesAtSixteen) {
+    crt::Srand(3);
+    // 20 seeds: only the first 16 fit; the rest must be dropped (no overflow).
+    std::vector<i32> seeds;
+    for (int i = 0; i < 20; ++i) seeds.push_back(1000 + i);
+    std::vector<u8> table(25, 1);
+    auto q = [](int, u8) { return std::vector<i32>{1, 2, 3, 4, 5}; };
+    int pick = SelectBeatingTarget(seeds, table, q);
+    CHECK(pick != -1);
+}

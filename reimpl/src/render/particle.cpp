@@ -109,7 +109,7 @@ char UpdateEmitter(Emitter& e, u32 now) {
     int aliveDone = 0;            // v36 — count snapped this frame
     int spawnCounter = 0;         // v6 — respawned-this-frame counter
     e.hdr20 = (u8)(e.hdr20 & 0xFD); // clear bit1 (will set if none snapped)
-    if (e.count > 0) {
+    if (e.count > 0 && e.particles) {  // wave-10: + null-array guard (was count>0)
         Particle* p = e.particles;
         for (int idx = 0; idx < e.count; ++idx, ++p) {
             bool followBranch =
@@ -118,9 +118,13 @@ char UpdateEmitter(Emitter& e, u32 now) {
 
             if (followBranch) {
                 if ((p->flags & 1) != 0) {
+                    // disasm 0x42bb1d: dt (st0) is fst-stored to a FLOAT slot but
+                    // kept on the x87 stack; px uses the un-rounded 80-bit dt while
+                    // py/pz reload the float-rounded fdt. Mirror: px from double dt,
+                    // py/pz from float fdt.
                     double dt = (double)(u32)(now - p->birthTime) * kEmDt;
                     float fdt = (float)dt;
-                    p->px = fdt * p->vx + p->px;
+                    p->px = (float)(dt * p->vx + p->px);
                     p->py = fdt * p->vy + p->py;
                     float npz = fdt * p->vz;
                     p->birthTime = now;
@@ -231,12 +235,17 @@ char SeedParticles(Emitter& e, u32 now) {
         }
     }
     // Pass 2: gravity integrate + bounce for active slots.
+    // wave-10 (W10-PARTICLE): the original derefs the slot array unconditionally
+    // in this loop; guard the null array (never the in-bounds path) so a degenerate
+    // system can't OOB. With a valid array the loop is byte-identical.
     Particle* p = e.particles;
-    for (int i = 0; i < e.count; ++i, ++p) {
+    for (int i = 0; e.particles && i < e.count; ++i, ++p) {
         if ((p->flags & 1) != 0) {
+            // disasm 0x42c054: dt fst-stored to a float slot but kept 80-bit; px
+            // uses the un-rounded 80-bit dt, py/pz reload the float-rounded fdt.
             double dt = (double)(u32)(now - p->birthTime) * kSdDt;
             float fdt = (float)dt;
-            p->px = fdt * p->vx + p->px;
+            p->px = (float)(dt * p->vx + p->px);
             p->py = fdt * p->vy + p->py;
             float npz = fdt * p->vz + p->pz;
             p->birthTime = now;
@@ -264,16 +273,22 @@ char SeedParticles(Emitter& e, u32 now) {
 // gilde.exe 0x42c140 — VIBE_Particle_UpdateTrail. Active slots integrate + age;
 // dead slots respawn into a trail (10 RNG draws). Returns 1.
 char UpdateTrail(Emitter& e, u32 now) {
+    // wave-10 (W10-PARTICLE): null-array guard (the original loops the slot array
+    // unconditionally; a null array is a never-reached crash). Valid-array path
+    // is byte-identical.
     Particle* p = e.particles;
-    for (int i = 0; i < e.count; ++i, ++p) {
+    for (int i = 0; e.particles && i < e.count; ++i, ++p) {
         if ((p->flags & 1) != 0) {
-            float dt = (float)((double)(u32)(now - p->birthTime) * kTrDt);
-            p->px = dt * p->vx + p->px;
-            p->py = dt * p->vy + p->py;
-            float npz = dt * p->vz + p->pz;
+            // disasm 0x42c17c: dt (st0) is kept at extended x87 precision and used
+            // for all four updates WITHOUT a float round-trip (no fst to a dword
+            // slot, unlike SeedParticles). Keep dt as double — never round to float.
+            double dt = (double)(u32)(now - p->birthTime) * kTrDt;
+            p->px = (float)(dt * p->vx + p->px);
+            p->py = (float)(dt * p->vy + p->py);
+            float npz = (float)(dt * p->vz + p->pz);
             p->birthTime = now;
             p->pz = npz;
-            float nlife = p->life - dt * e.baseVy;
+            float nlife = (float)(p->life - dt * e.baseVy);
             p->life = nlife;
             if (nlife <= 0.0f)
                 p->flags &= ~1u;
@@ -321,16 +336,18 @@ char UpdateGravity(Emitter& e, u32 now) {
     int dead = 0;                 // v4
     int halfCount = (int)((u32)e.hdr20 >> 1); // v32 = a1[8] >> 1
     // (original uses a1[8] = the +0x20 flags dword; >>1 == half of it)
-    if (e.count > 0) {
+    if (e.count > 0 && e.particles) {  // wave-10: + null-array guard (was count>0)
         Particle* p = e.particles;
         for (int idx = 0; idx < e.count; ++idx, ++p) {
             if ((p->flags & 1) != 0) {
+                // disasm 0x42c656: dt (st0) stays at extended x87 precision and is
+                // used WITHOUT a float round-trip for both the seed accum and vy.
                 double dt = (double)(u32)(now - p->birthTime) * kGrDt;
                 p->px = p->life + p->vx;   // +56 = +16 + +0
                 p->py = p->a1 + p->vy;     // +60 = +20 + +4
                 p->pz = p->a2 + p->vz;     // +64 = +24 + +8
-                p->seed = (float)(dt * kGrTime) + p->seed; // +72 += dt*0.8
-                p->vy = p->vy - (float)dt;
+                p->seed = (float)(dt * kGrTime + p->seed); // +72 += dt*0.8 (80-bit)
+                p->vy = (float)(p->vy - dt);
                 if (p->py < kGrKill)
                     p->flags &= ~1u;
                 p->life = p->px; // +16 = +56
@@ -348,18 +365,23 @@ char UpdateGravity(Emitter& e, u32 now) {
         return 0;
     if ((e.hdr20 & 1) != 0 && dead > halfCount) {
         Particle* p = e.particles;
-        for (int i = 0; i < e.count && i < halfCount; ++i, ++p) {
+        for (int i = 0; e.particles && i < e.count && i < halfCount; ++i, ++p) {
             if ((p->flags & 1) == 0) {
                 p->flags |= 1u;
                 p->px = (double)Rnd() * kRandNorm + kGrBias05;
                 p->py = (double)Rnd() * kRandNorm * (e.baseVy + 1.0f) + e.velScale;
                 p->pz = (double)Rnd() * kRandNorm + kGrBias05;
                 p->vx = (double)Rnd() * kRandNorm * kGrV2 * e.baseVy - e.baseVy;
-                float t1 = (p->a1 + kGrBias55) * e.damping;
-                p->vy = (float)(kGrA - (double)Rnd() * kRandNorm * kGrSp10 + t1);
-                float t2 = p->vy * e.baseVx + kGrB;
+                // disasm 0x42c549: t1 = (py + -55.0) * baseVz  ([edx+3Ch]=py,
+                // [ecx+8]=baseVz). The Hex-Rays "a1 * damping" reading is wrong.
+                float t1 = (p->py + kGrBias55) * e.baseVz;
+                // vy (st0) is kept at 80-bit for the t2 mul (binary fst, not fstp);
+                // store the float vy but feed the un-rounded value into t2.
+                double vyEx = (double)kGrA - (double)Rnd() * kRandNorm * kGrSp10 + t1;
+                p->vy = (float)vyEx;
+                float t2 = (float)(vyEx * e.baseVx + kGrB);
                 float t3 = (p->py + kGrBias55) * e.baseVx;
-                p->vz = (float)((double)Rnd() * kRandNorm * kGrSp05 + t2) + t3;
+                p->vz = (float)((double)Rnd() * kRandNorm * kGrSp05 + t2 + t3);
                 p->birthTime = now;
                 p->seed = e.lifeBase;
                 p->life = p->px;
@@ -379,6 +401,14 @@ char UpdateGravity(Emitter& e, u32 now) {
 // over the [0,1] normalized life window; no RNG. Returns "still pulsing".
 bool UpdateCosineWave(Emitter& e, u32 now) {
     Particle* p0 = e.particles;
+    // wave-10 (W10-PARTICLE) memory-safety guard: the original unconditionally
+    // dereferences particle[0] for the time base (it is only ever called on a
+    // system whose slot array is allocated). A null array here would be a hard
+    // crash the original never reached; treat it as "no live particles" so the
+    // headless/degenerate path is safe. (FAITHFUL: the in-bounds path with a
+    // valid array is byte-identical; this only intercepts the never-taken null.)
+    if (!p0)
+        return false;
     u32 dur = e.hdr20; // *((u32*)a1+8) = emitter+0x20 = window duration
     double t = (double)(now - p0->birthTime) / (double)dur;
     if (t >= 0.0 && t <= 1.0) {
@@ -405,7 +435,9 @@ bool UpdateFadeOut(Emitter& e, u32 now) {
     int dead = 0;
     Particle* p = e.particles;
     u32 dur = e.hdr20; // *(u32*)(v2+32) = emitter+0x20 -> emitter duration
-    for (int i = 0; i < e.count; ++i, ++p) {
+    // wave-10 (W10-PARTICLE): null-array guard (see SeedParticles). Valid-array
+    // path byte-identical.
+    for (int i = 0; e.particles && i < e.count; ++i, ++p) {
         u32 birth = p->birthTime;
         if (now < birth || now > dur + birth) {
             p->flags &= ~1u;
@@ -440,8 +472,9 @@ bool UpdateScatter(Emitter& e, u32 now) {
         e.hdr20 &= ~1u;
         if (e.scatterPalette && e.scatterPalette[112])
             frameMod = e.scatterPalette[112];
+        // wave-10 (W10-PARTICLE): null-array guard (see SeedParticles).
         Particle* p = e.particles;
-        for (int i = 0; i < e.count; ++i, ++p) {
+        for (int i = 0; e.particles && i < e.count; ++i, ++p) {
             if ((p->flags & 1) == 0) {
                 // AND mask is byte3 of colMask for all three channels (loaded
                 // once into dl); the additive base is byte2/byte1/byte0.
@@ -480,10 +513,14 @@ bool UpdateScatter(Emitter& e, u32 now) {
     }
     int dead = 0;
     Particle* p = e.particles;
-    for (int j = 0; j < e.count; ++j, ++p) {
+    // wave-10 (W10-PARTICLE): null-array guard (see SeedParticles).
+    for (int j = 0; e.particles && j < e.count; ++j, ++p) {
         if ((p->flags & 1) != 0) {
-            float dt = (float)((double)(u32)(now - p->birthTime) * kScDt);
-            p->px = dt * p->vx + p->px;
+            // disasm 0x42ce2e: dt fst-stored to a float slot but kept 80-bit; px
+            // uses the un-rounded 80-bit dt, py/pz reload the float-rounded dt.
+            double dtEx = (double)(u32)(now - p->birthTime) * kScDt;
+            float dt = (float)dtEx;
+            p->px = (float)(dtEx * p->vx + p->px);
             p->py = dt * p->vy + p->py;
             float npz = dt * p->vz + p->pz;
             p->birthTime = now;
@@ -504,7 +541,9 @@ bool UpdateScatter(Emitter& e, u32 now) {
                     p->vz = 0.0f;
                 }
             }
-            float nlife = p->life - dt * e.damping;
+            // disasm 0x42ceb7: fmul [ebx+8] == emitter+0x8 == baseVz (NOT damping
+            // +0x18). Hex-Rays' "a1+8" is baseVz; the prior reading was wrong.
+            float nlife = p->life - dt * e.baseVz;
             p->life = nlife;
             if (nlife <= 0.0f)
                 p->flags &= ~1u;

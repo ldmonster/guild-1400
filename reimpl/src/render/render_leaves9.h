@@ -31,6 +31,8 @@
 //                           draw call DrawFromBankMode1/5 brackets.
 //   VIBE_Shape_ConvertRgbTo16 (0x5d7c0c) / VIBE_Shape_Convert8To16 (0x5d7924) —
 //                           the two depth-conversion leaves ConvertToNew selects.
+//                           RECONSTRUCTED in render/shape_convert16; install with
+//                           render::InstallShapeConvertersIntoLeaves9().
 // =============================================================================
 
 namespace guild::render {

@@ -120,4 +120,19 @@ private:
     std::vector<std::string> order_;  // mirrors the registry link order
 };
 
+// ---------------------------------------------------------------------------
+// gilde.exe 0x5D345C — VIBE_Mesh_LoadOrFindByName (full LOD-variant orchestrator).
+// Reproduces the binary's load-or-find sequence on top of the existing cache:
+//   1. BuildLodFileName(name, dir, base, 0, key)  — the base-LOD leaf name + key.
+//   2. cache.Find(key) else cache.Find(base)      — registry lookup (FindStockObject).
+//   3. on a miss: cache.LoadOrFind(base, key)     — load + register the base.
+//   4. BuildLodFileName(..., -1, ...)             — the "_s" variant (if LOD enabled).
+//   5. mode==1: LOD frames 1..2 via BuildLodFileName(..., i, ...).
+// Each loaded variant is registered in the SAME cache (reusing LoadOrFind / the base
+// loader — no duplicate parser). Returns the base mesh handle (the original's eax),
+// or nullptr if the base failed to load. `name` is the leaf mesh name (a1); `dir`
+// is the parallel name/dir key (a2) carried into the cache key, may be null.
+// ---------------------------------------------------------------------------
+Mesh* Mesh_LoadOrFindByName(MeshAssetCache& cache, const char* name, const char* dir);
+
 } // namespace guild::render

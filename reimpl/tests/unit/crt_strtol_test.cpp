@@ -72,6 +72,30 @@ TEST(CrtStrtol, AtoiMatchesLibc) {
 }
 
 // ---------------------------------------------------------------------------
+// Wave-11 hardening: Atoi 2's-complement wrap on overflow (the original's 32-bit
+// imul/add wraps; libc atoi overflow is itself UB so we can't oracle it). These
+// pin the documented wraparound and the INT_MIN safe-negate, and must be clean
+// under -fsanitize=signed-integer-overflow.
+// ---------------------------------------------------------------------------
+TEST(CrtStrtol, AtoiWraparoundDefined) {
+    // INT_MIN negate-to-self path (the 0u - (u32)acc fix).
+    CHECK_EQ(crt::Atoi("-2147483648"), -2147483647 - 1);
+    // INT_MAX exactly.
+    CHECK_EQ(crt::Atoi("2147483647"), 2147483647);
+    // Overflow past INT_MAX wraps in 32-bit 2's complement:
+    //   "2147483648" -> 2147483648u as int == INT_MIN
+    CHECK_EQ(crt::Atoi("2147483648"), -2147483647 - 1);
+    // "4294967296" == 2^32 -> wraps to 0.
+    CHECK_EQ(crt::Atoi("4294967296"), 0);
+    // A long all-9 run must not trip UBSAN; only the low 32 bits matter.
+    volatile int sink = crt::Atoi("999999999999999999");
+    (void)sink;
+    // Negative overflow: "-3000000000" = 0 - 3000000000u.
+    CHECK_EQ(crt::Atoi("-3000000000"),
+             static_cast<int>(0u - 3000000000u));
+}
+
+// ---------------------------------------------------------------------------
 // Strtol_Parse (the exported strtol/strtoul) vs libc strtol/strtoul.
 // ---------------------------------------------------------------------------
 // glibc has two documented divergences from the MSVC original this code reconstructs:
@@ -273,6 +297,44 @@ TEST(CrtStrtol, StrToUpper) {
     CHECK(std::string(buf) == "HELLO, WORLD 123!");
     char empty[] = "";
     CHECK(crt::StrToUpper(empty) == empty);
+}
+
+// Wave-11 hardening: exact LONG_MIN (no clamp), the 2's-complement negate path,
+// and the base-validation rejects — clean under -fsanitize=undefined.
+TEST(CrtStrtol, StrToLongIntMinNoClamp) {
+    const char* end = nullptr;
+    crt::Errno() = 0;
+    // "-2147483648" is exactly representable: acc == 0x80000000, sign '-' ->
+    // negate via 0u-acc == 0x80000000, no ERANGE.
+    i32 v = static_cast<i32>(crt::StrToLong("-2147483648", &end, 1, 10));
+    CHECK_EQ(v, INT32_MIN);
+    CHECK_EQ(crt::Errno(), 0);
+}
+
+TEST(CrtStrtol, StrToLongBaseRejects) {
+    const char* end = nullptr;
+    crt::Errno() = 0;
+    CHECK_EQ(crt::StrToLong("10", &end, /*base*/1, /*base*/1), 0u);
+    CHECK_EQ(crt::Errno(), crt::kEINVAL);
+    crt::Errno() = 0;
+    CHECK_EQ(crt::StrToLong("10", &end, 1, 37), 0u);
+    CHECK_EQ(crt::Errno(), crt::kEINVAL);
+}
+
+// Strtol_Parse on empty / all-whitespace input: no digits -> endptr at start,
+// value 0, no over-read past the NUL.
+TEST(CrtStrtol, StrtolParseEmptyAndWhitespace) {
+    const char* end = nullptr;
+    const char* empty = "";
+    CHECK_EQ(crt::Strtol(empty, &end, 10), 0L);
+    CHECK(end == empty);
+    const char* ws = "   \t  ";
+    CHECK_EQ(crt::Strtol(ws, &end, 10), 0L);
+    CHECK(end == ws); // reset to start when no digit consumed
+    // sign with no digits also yields start.
+    const char* sign = "  -";
+    CHECK_EQ(crt::Strtol(sign, &end, 10), 0L);
+    CHECK(end == sign);
 }
 
 TEST(CrtStrtol, StringToUpperLower) {

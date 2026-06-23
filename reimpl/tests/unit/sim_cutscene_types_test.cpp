@@ -60,7 +60,10 @@ TEST(SimCutsceneTypes, DuelProcessIntroChoiceShootHit) {
     CHECK(r.hit);
     CHECK(r.damage >= 15 && r.damage <= 44);  // non-aim band
     CHECK(tgt.hp < 100);                       // HP loss applied
-    CHECK_EQ((int)st.scoreA, r.damage);
+    // Score is keyed on the TARGET (gilde.exe 0x4a4c36 cmp esi,dword_11B4E30):
+    // A shoots B, so the damage accumulates into scoreB, not scoreA.
+    CHECK_EQ((int)st.scoreB, r.damage);
+    CHECK_EQ((int)st.scoreA, 0);
 }
 
 TEST(SimCutsceneTypes, DuelProcessIntroChoiceShootMiss) {
@@ -302,6 +305,23 @@ TEST(SimCutsceneTypes, AuctionAbortsWhenOwnerUnresolved) {
     CHECK(out.aborted);
 }
 
+// Lease split uses 32-bit float factors + fistp ROUND-TO-NEAREST-EVEN, not
+// truncation (gilde.exe 0x4a94c5..0x4a94e6). With a winning bid of 2:
+//   2 * 0.89999998f = 1.79999996 -> nearbyint = 2  (truncation would give 1).
+// This distinguishes the faithful rounding from the old (int) cast.
+TEST(SimCutsceneTypes, AuctionLeaseSplitRoundsToNearest) {
+    AuctionCutsceneHooks h{};
+    std::vector<AuctionBidder> bidders = { {1, true} };
+    std::vector<std::vector<AuctionBid>> rounds = {
+        { {2, true} },           // single bidder, bid 2 -> wins immediately
+    };
+    AuctionOutcome out = CutsceneAuction(AuctionRegion::kForest, bidders, rounds, 1, h);
+    CHECK(out.sold);
+    CHECK_EQ(out.winningBid, 2);
+    CHECK_EQ(out.toOwner, 2);   // round(2 * 0.9f) = 2, NOT trunc -> 1
+    CHECK_EQ(out.toOther, 0);   // round(2 * 0.1f) = 0
+}
+
 // ===========================================================================
 // BroadcastMessage (type-10 step).
 // ===========================================================================
@@ -326,4 +346,77 @@ TEST(SimCutsceneTypes, BroadcastMessageNoBuilding) {
     int r = CutsceneBroadcastMessage(false, parts, kinds, 1, CountSpeech, nullptr);
     CHECK_EQ(r, 0);
     CHECK_EQ(g_speechCount, 0);
+}
+
+// ===========================================================================
+// Wave-12 hardening: empty / many participant arrays for the auction, duel and
+// wedding cutscenes. The bidder/round/participant scans must stay within their
+// declared bounds (kAuctionMaxBidders=8, kAuctionMaxRounds=5). ASAN+UBSAN clean.
+// ===========================================================================
+
+// Zero participants in BroadcastMessage: loop runs zero times, no deref.
+TEST(SimCutsceneTypesHarden, BroadcastZeroParticipants) {
+    g_speechCount = 0;
+    int r = CutsceneBroadcastMessage(true, nullptr, nullptr, 0, CountSpeech, nullptr);
+    CHECK_EQ(r, 1);                 // building resolves; nothing to broadcast
+    CHECK_EQ(g_speechCount, 0);
+}
+
+// More bidders than kAuctionMaxBidders: the scan clamps to 8, no OOB on bids.
+TEST(SimCutsceneTypesHarden, AuctionOverManyBidders) {
+    std::vector<AuctionBidder> bidders;
+    for (int i = 0; i < 50; ++i)               // way over the 8 cap
+        bidders.push_back(AuctionBidder{ /*personId*/ i, /*resolves*/ true });
+    // one round, fewer bids than bidders -> the i<bids.size() guard handles it.
+    std::vector<std::vector<AuctionBid>> rounds;
+    rounds.push_back({});                       // empty bid list for round 0
+    AuctionCutsceneHooks hooks{};
+    AuctionOutcome out = CutsceneAuction(AuctionRegion::kForest, bidders, rounds,
+                                         /*startPrice*/ 100, hooks,
+                                         /*ownerResolves*/ true);
+    // no active bids -> no sale, but the scan stayed bounded (no crash).
+    CHECK(!out.sold);
+    CHECK(out.rounds <= kAuctionMaxRounds);
+}
+
+// Zero bidders / zero rounds: the while loop never runs.
+TEST(SimCutsceneTypesHarden, AuctionEmpty) {
+    std::vector<AuctionBidder> bidders;
+    std::vector<std::vector<AuctionBid>> rounds;
+    AuctionCutsceneHooks hooks{};
+    AuctionOutcome out = CutsceneAuction(AuctionRegion::kQuarry, bidders, rounds,
+                                         50, hooks, true);
+    CHECK(!out.sold);
+    CHECK_EQ(out.rounds, 0);
+
+    // owner does not resolve -> aborted, no scan at all.
+    AuctionOutcome ab = CutsceneAuction(AuctionRegion::kMine, bidders, rounds,
+                                        50, hooks, /*ownerResolves*/ false);
+    CHECK(ab.aborted);
+}
+
+// Wedding eligibility with a large otherPlayers array: bounded by otherCount.
+TEST(SimCutsceneTypesHarden, MarriageManyOthers) {
+    WeddingPerson a{}; a.personId = 1; a.resolves = true; a.kind = 6; a.factionTag = 1;
+    WeddingPerson b{}; b.personId = 2; b.resolves = true; b.kind = 6; b.factionTag = 2;
+    std::vector<guild::i32> others;
+    for (int i = 0; i < 100; ++i) others.push_back(1000 + i);
+    WeddingCutsceneHooks hooks{};
+    int r = CutsceneCheckMarriageEligible(a, b, others.data(),
+                                          static_cast<int>(others.size()), hooks);
+    CHECK_EQ(r, 1);                 // both player-class, different factions
+
+    // zero others -> still eligible, no deref of the (possibly null) array.
+    int r0 = CutsceneCheckMarriageEligible(a, b, nullptr, 0, hooks);
+    CHECK_EQ(r0, 1);
+}
+
+// Wedding with one/both spouses unresolved -> aborted, no panel walk.
+TEST(SimCutsceneTypesHarden, WeddingUnresolvedSpouse) {
+    WeddingPerson a{}; a.personId = 1; a.resolves = true;  a.kind = 6;
+    WeddingPerson b{}; b.personId = -1; b.resolves = false; b.kind = 6;
+    WeddingCutsceneHooks hooks{};
+    WeddingOutcome out = CutsceneWedding(a, b, "Anna", "Bob", hooks);
+    CHECK(out.aborted);
+    CHECK(!out.married);
 }

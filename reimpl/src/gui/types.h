@@ -93,6 +93,17 @@ struct Widget {
     template <typename T> T&       at(int off)       { return *reinterpret_cast<T*>(raw + off); }
     template <typename T> const T& at(int off) const { return *reinterpret_cast<const T*>(raw + off); }
 
+    // Unaligned by-value load, byte-identical to the original x86 unaligned `mov`/read.
+    // Several leaves read a dword at an unaligned widget offset (e.g. +110/+14/+18) and
+    // immediately `>> 16`. On x86 the original CPU loads those unaligned; binding a
+    // misaligned `int&` is C++ UB (and a strict-alignment host would fault), so do the
+    // load through memcpy. The returned value is identical to the original read.
+    template <typename T> T ld(int off) const {
+        T v;
+        std::memcpy(&v, raw + off, sizeof(T));
+        return v;
+    }
+
     i32&  marker()      { return at<i32>(0); }     // +0
     i32&  inUse()       { return at<i32>(4); }     // +4
     i32&  id()          { return at<i32>(8); }     // +8

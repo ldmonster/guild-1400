@@ -205,10 +205,12 @@ TEST(SimCmdRecvE2E, FragmentedStreamAndGroup) {
     // speech: the reassembled buffer equals header28||speech; set it directly.
     directWorld.speech_len = static_cast<u32>(expectedBlock.size());
     std::memcpy(directWorld.speech, expectedBlock.data(), expectedBlock.size());
-    // group: ExecCommandGroup stamps begin+end op 1; the dispatch loop gates the
-    // reprocessed BEGIN frame off (a group was open), so only the END frame (op 1)
-    // and the framed command (0x21) actually dispatch — group_begin_seen == 1.
-    directWorld.group_begin_seen = 1; // only the end frame (op 1) dispatches
+    // group: ExecCommandGroup stamps begin+end opcode 1. Per the binary
+    // (gilde.exe 0x494088, edx-gate disasm 0x494166: ExecCommandGroup returns 1 so
+    // edx stays 1), on group close BOTH the reprocessed BEGIN frame (now op 1) and
+    // the END frame (op 1) dispatch, plus the framed command (0x21). The begin and
+    // end frames share opcode 1 => H_GroupBegin1 fires twice => group_begin_seen==2.
+    directWorld.group_begin_seen = 2; // begin frame (op1) + end frame (op1)
     directWorld.group_cmd_seen   = 1;
 
     // --- verify the network round-trip matches the direct apply ---

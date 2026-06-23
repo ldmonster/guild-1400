@@ -25,14 +25,20 @@
 // char follows the '%' introducer; an optional decimal digit before the letter
 // is the field index `v209`, -1 when absent):
 //
-//   %%      -> emit byte 0x16             (literal-percent placeholder glyph)
-//   %i      -> grouped decimal int with '.' thousands separators
-//   %c      -> emit byte 0x14 (count icon).  "%i%c" when preceded by a digit-int
-//   %f /%Nf -> fixed-point float (N decimals; default 2) via the CRT float path
-//   %m      -> money string (coin icon 0x11), VIBE_Money_FormatWithSeparators
-//   %T      -> date "<season> <year>"     (PackToRecord + season-name lookup)
-//   %s      -> text-DB string substitution / delimited field (field index = digit)
-//   {rN}    -> random text variant N (RandomModulo over the {rN} group)
+// Recovered byte-exactly from the disasm dispatch tree (al = code letter after
+// the optional field digit). The module owns these self-contained leaves:
+//   %%       -> emit byte 0x16            (literal-percent placeholder glyph) [0x25, line 625]
+//   %i       -> grouped decimal int with '.' thousands separators            [0x69, line 1200]
+//   %a       -> count icon "%i%c" (icon byte 0x14) when preceded by '%'      [0x61, line 969]
+//   %S / %T  -> money string (coin icon 0x11), VIBE_Money_FormatWithSeparators [0x53/0x54, line 374]
+//   %D       -> date "<season> <year>"    (PackToRecord + season-name lookup) [0x44, line 549]
+//
+// Deferred (v215 case/gender state machine + VIBE_String_GetDelimitedField over
+// runtime text tables dword_8C36B0/dword_8C379C/dword_8C3790/dword_8C37A8, data
+// not in tree): %r/%E/%F/%U/%b/%e/%B/%C and the %f fixed-point float path, the
+// %N item-label leaf, the %W font/window select, and the {rN}/%r random pick.
+// Earlier notes mislabeled the table as %m=money, %T=date, %s=string; the binary
+// uses %S/%T=money, %D=date and has no standalone %s/%m/%c code.
 //
 //   Case/gender sub-specifiers that set the `v215` state for the FOLLOWING %s
 //   (consumed inline): 'b'(0x62) 'U'(0x55) 'E'(0x45) 'B'(0x42) 'e'(0x65)

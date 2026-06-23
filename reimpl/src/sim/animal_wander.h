@@ -158,7 +158,10 @@ AnimalRec* Animal_FindHerdGrouping(AnimalRec* rec);
 
 // Test/integration helper exposing the herd grouping math (HerdGroupFrom) with an
 // explicit candidate set + optional out-buffer (the gathered x,y,z point triples).
-// Returns the gathered float count (the value stamped into AnimalRec+8).
+// Returns the gathered float count (the value stamped into AnimalRec+8). The
+// grouping stores triples while (count < 16), so the final triple can land at
+// count==15 and write indices 15,16,17 — if `outPoints` is non-null it must hold
+// at least 18 floats. (The engine path passes null / the large AnimalRec scratch.)
 int Animal_HerdGroupFrom(const BuildingAnchor* cand, int n, float* outPoints);
 
 // ===========================================================================

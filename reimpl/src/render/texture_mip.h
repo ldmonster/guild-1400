@@ -70,7 +70,7 @@ u32 BuildBlendLut(u8* out, u32 n);
 int MipBlockSize(int width, int height);
 
 // gilde.exe 0x5db234 (tail) — mip width derivation: mipWidth = baseWidth >> shift
-// (byte_64A350). Saturates to >= 1.
+// (byte_64A350). Bare unsigned shift (`shr eax,cl`); NO saturation in the binary.
 int MipWidth(int baseWidth, int shift);
 
 // Number of mip levels for a power-of-two square of side `width`:

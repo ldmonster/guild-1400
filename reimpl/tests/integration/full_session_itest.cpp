@@ -77,7 +77,13 @@ TEST(FullSessionItest, MenuToPlayRealFramesActionChangesFrameCleanQuit) {
     // -- the action changed the world AND the visible frame --
     CHECK(t.actionIssued);
     CHECK(t.actionChangedWorld());
-    CHECK(t.frameBeforeNonClear != t.frameAfterNonClear);  // the city visibly changed
+    // The city visibly changed: compare frame CONTENT (FNV over the backbuffer).
+    // Since the wave-3 level-shaded untextured fill, the nonClear COUNT can be
+    // identical across a same-coverage layout change (the despawned object's
+    // quad moves another object into its 8-slot place), so the count alone is
+    // no longer a sufficient witness.
+    CHECK(t.frameBeforeHash != 0 && t.frameAfterHash != 0);
+    CHECK(t.frameBeforeHash != t.frameAfterHash);          // the city visibly changed
     CHECK(t.economyPasses > 0);
 
     // -- clean quit (the REAL MenuMainDecide kQuit -> ModeFsm done) --

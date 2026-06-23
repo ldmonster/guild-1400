@@ -28,7 +28,8 @@ bool ElectionIsCandidate(const ElectionCandidate& c) {
 
 // gilde.exe 0x481228 — election decision.
 ElectionOutcome ElectionRunGuildMaster(const ElectionCandidate* pool,
-                                       int poolCount, i32 incumbentId) {
+                                       int poolCount, i32 incumbentId,
+                                       i32 incumbentWealth, bool incumbentValid) {
     ElectionOutcome out;
     if (!pool || poolCount <= 0)
         return out;
@@ -65,23 +66,30 @@ ElectionOutcome ElectionRunGuildMaster(const ElectionCandidate* pool,
     if (!out.quorumMet)
         return out;
 
-    // Winner: strictly-greater total wealth (first of equal wealth wins). The
-    // original seeds best at the result of the first ComputeTotalWealth call with
-    // v9=0, so index 0 is the initial leader, then > replaces it.
-    int bestIdx = 0;
-    i32 bestWealth = candidateWealth[0];
-    for (int k = 1; k < collected; ++k) {
+    // Winner pick (the v10/v14 loop @0x4812ff). The running-best wealth (ecx/v14)
+    // is SEEDED with the INCUMBENT's ComputeTotalWealth (or 0 when there is no
+    // incumbent record — the loc_4813AB `xor ecx,ecx` path), and the winner pointer
+    // (v10/esi) starts NULL. The loop runs over ALL candidates from index 0 and
+    // replaces the winner only when a candidate's wealth is STRICTLY greater than
+    // the running best. A candidate must therefore out-earn the incumbent to win;
+    // if none does, there is no winner and no install.
+    i32 bestWealth = incumbentValid ? incumbentWealth : 0;
+    int bestIdx    = -1;  // v10 starts NULL
+    for (int k = 0; k < collected; ++k) {
         if (candidateWealth[k] > bestWealth) {
             bestWealth = candidateWealth[k];
             bestIdx    = k;
         }
     }
-    out.winnerIndex  = bestIdx;
-    out.winnerId     = candidateIds[bestIdx];
-    out.winnerWealth = bestWealth;
 
-    // Install gate: winner exists and differs from the incumbent (v9 != v8).
-    out.install = candidateIds[bestIdx] != incumbentId;
+    out.winnerIndex  = bestIdx;
+    if (bestIdx >= 0) {
+        out.winnerId     = candidateIds[bestIdx];
+        out.winnerWealth = bestWealth;
+        // Install gate: winner exists (v10 != 0) and differs from the incumbent
+        // (v10 != RecordById, i.e. winnerId != incumbentId).
+        out.install = candidateIds[bestIdx] != incumbentId;
+    }
     return out;
 }
 

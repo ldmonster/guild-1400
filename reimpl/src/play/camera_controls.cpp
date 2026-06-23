@@ -31,15 +31,18 @@ float Clampf(float v, float lo, float hi) {
 // decays toward 0 by `step`, snapping to 0 on the zero crossing (the original's
 // "subtract step, if it overshot past 0 clamp to 0" decay).
 float RampAxis(float vel, int dir, float step) {
+    // UpdatePan ramps with NO post-clamp: it only adds the step while strictly
+    // inside the bound, so the velocity can overshoot the bound by up to one step
+    // (the engine writes `if (vel < 50) vel += step;` — never clamps afterward).
     if (dir > 0) {
         if (vel == 0.0f) vel = kPanVelKick;        // 1092616192 seed
-        if (vel < kPanVelMax) vel += step;
-        return Clampf(vel, kPanVelMin, kPanVelMax);
+        if (vel < kPanVelMax) vel += step;         // @0x4b3..  no clamp after
+        return vel;
     }
     if (dir < 0) {
         if (vel == 0.0f) vel = -kPanVelKick;       // -1054867456 seed
-        if (vel > kPanVelMin) vel -= step;
-        return Clampf(vel, kPanVelMin, kPanVelMax);
+        if (vel > kPanVelMin) vel -= step;         // @0x4b3..  no clamp after
+        return vel;
     }
     // Idle: decay toward zero (mirrors the dword_631DF0/F8 decay tails).
     if (vel > 0.0f) {

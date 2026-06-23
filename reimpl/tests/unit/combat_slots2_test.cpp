@@ -13,23 +13,23 @@ namespace {
 bool Near(double a, double b, double eps = 1e-6) { return std::fabs(a - b) <= eps; }
 }
 
-// --- RoundTier: round-to-nearest of clamp(cash * 0.1f, 0..7) --------------
-// NOTE: the scale is the FLOAT constant flt_625994 == 0.1f (not the double 0.1),
-// so cash*0.1f for cash divisible by 5 lands just ABOVE the .5 tie (0.1f ~=
-// 0.100000001490116) and rounds UP. The expectations below are the FLOAT-faithful
-// results matching the original's x87 fmul-by-float / fistp.
+// --- RoundTier: TRUNCATE toward zero of clamp(cash * 0.1f, 0..7) ----------
+// The conversion is VIBE_Coord_ConvertX @0x5c6b08 (decompiled wave-15: sets x87
+// RC=11 = round-toward-ZERO, frndint) at the 0x57eb64 call site `ConvertX(); v13 =
+// (int)v12`, so the tier TRUNCATES — NOT round-to-nearest (the earlier golden was
+// wrong; corrected to the binary). scale flt_625994 == 0.1f.
 TEST(CombatSlots2, RoundTierClampAndRound) {
     CHECK_EQ(RoundTier(0), 0);
     CHECK_EQ(RoundTier(-5), 0);      // negative clamps to 0
-    CHECK_EQ(RoundTier(5), 1);       // 5*0.1f ~= 0.5000000074 -> 1
+    CHECK_EQ(RoundTier(5), 0);       // 5*0.1f ~= 0.5000000074 -> trunc 0
     CHECK_EQ(RoundTier(14), 1);      // 1.40... -> 1
-    CHECK_EQ(RoundTier(15), 2);      // 1.50... -> 2
+    CHECK_EQ(RoundTier(15), 1);      // 1.50... -> trunc 1
     CHECK_EQ(RoundTier(24), 2);      // 2.40... -> 2
-    CHECK_EQ(RoundTier(25), 3);      // 2.50... -> 3
-    CHECK_EQ(RoundTier(35), 4);      // 3.50... -> 4
-    CHECK_EQ(RoundTier(45), 5);      // 4.50... -> 5
-    CHECK_EQ(RoundTier(55), 6);      // 5.50... -> 6
-    CHECK_EQ(RoundTier(65), 7);      // 6.50... -> 7
+    CHECK_EQ(RoundTier(25), 2);      // 2.50... -> trunc 2
+    CHECK_EQ(RoundTier(35), 3);      // 3.50... -> trunc 3
+    CHECK_EQ(RoundTier(45), 4);      // 4.50... -> trunc 4
+    CHECK_EQ(RoundTier(55), 5);      // 5.50... -> trunc 5
+    CHECK_EQ(RoundTier(65), 6);      // 6.50... -> trunc 6
     CHECK_EQ(RoundTier(70), 7);      // 7.0 -> 7 (ceiling)
     CHECK_EQ(RoundTier(1000), 7);    // clamps to ceiling 7
 }

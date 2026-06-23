@@ -422,21 +422,24 @@ int ReserveWorkstationItems(std::vector<WsStation>& stations, std::size_t statio
             continue;
         WsItem& it = items[static_cast<std::size_t>(idx)];
 
-        // clamp the item reserve target (field18) to the station's, set 0x2 bit.
-        if (it.field18 >= s.reserveTarget)
-            it.field18 = s.reserveTarget;
+        // clamp item.flags50 (+50 dword_B54480, [edx+30h]) to station.reserveTarget
+        // ([ebx+48h] = +76), set the 0x2 bit on the item (0x45bda8 or [edx+3Ch],2).
+        if (it.flags50 >= s.reserveTarget)
+            it.flags50 = s.reserveTarget;
         it.bits |= 0x2;
 
         int need = td ? td->inputNeed[k] : 0;
 
-        // special service ids: just stamp the 0x10 headroom flag when there is
-        // capacity and the chained production is below 4x the slot need.
-        if (it.id == 449 || it.id == 450 || it.id == 451 ||
-            it.id == 452 || it.id == 453 || it.id == 454) {
+        // special service ids (452,453,454,449,450,451): stamp the 0x10 headroom
+        // flag when the producer has capacity and on-hand < 4x the slot need.
+        if (it.id == 452 || it.id == 453 || it.id == 454 ||
+            it.id == 449 || it.id == 450 || it.id == 451) {
             if (it.backIndex >= 0) {
                 WsStation& prod = stations[static_cast<std::size_t>(it.backIndex)];
-                if (4 * (prod.incoming + prod.stock) < prod.freeCap &&
-                    it.stock + it.reserved < 4 * need) {
+                // 0x45bdd5: 4*(stock+incoming) < freeCap  (shl eax,2)
+                // 0x45be06: reserved+stock < 4*need
+                if (4 * (prod.stock + prod.incoming) < prod.freeCap &&
+                    it.reserved + it.stock < 4 * need) {
                     it.bits |= 0x10;
                 }
             }
@@ -444,36 +447,58 @@ int ReserveWorkstationItems(std::vector<WsStation>& stations, std::size_t statio
         }
 
         if (it.backIndex == -1) {
-            // raw material: only when not yet on hand (reserved+stock short).
-            if (it.stock + it.reserved >= 4 * need)
+            // raw material. precondition (0x45bf3e): reserved+stock < 4*need.
+            if (it.reserved + it.stock >= 4 * need)
                 continue;
             std::vector<StockSeller> sellers = needs.sellers ? needs.sellers(it.id)
                                                              : std::vector<StockSeller>{};
+            // iterate ALL sellers (no break; original falls through to loc_45BF80).
             for (const StockSeller& sl : sellers) {
                 if (sl.isSelf || sl.category == 2 || !sl.hasObject)
                     continue;
-                if (need > sl.deficit)
+                if (need > sl.deficit)             // 0x45bfd2 cmp need,deficit; jg
                     continue;
+                it.sourceBuilding = sl.building;   // [edx+8] = seller (+10)
                 if (sl.sameOwner) {
-                    // free transfer within the faction: reserve the full chain qty.
-                    it.field18 = it.stock; // *((DWORD*)v5+5) = *((DWORD*)v5+11)
-                } else {
-                    // priced reservation: clamp to deficit (the recovered supply
-                    // math is in CheckWorkstationCapacity::AffordableSupply).
-                    int qty = sl.deficit;
-                    if (qty >= need && qty > it.field18)
-                        it.field18 = qty;
+                    it.required = it.freeCap;       // 0x45c0f0 [edx+14h]=[edx+2Ch]
+                    continue;
                 }
-                break; // first viable seller wins (the original's first match)
+                // priced supply math (0x45bffe..0x45c0e5).
+                int v23 = s.freeCap >> 1;           // [ebx+40h] sar 1
+                if (v23 < 1)
+                    v23 = 1;
+                int chainQty = need * v23 - (it.reserved + it.stock);
+                int floor1 = (it.freeCap >> 1) - it.reserved; // [edx+2Ch]>>1 - resv
+                if (chainQty <= floor1)
+                    chainQty = floor1;
+                int cap1 = it.freeCap - it.reserved - 1;
+                if (cap1 < chainQty)
+                    chainQty = cap1;
+                float budgetQty = static_cast<float>(needs.budget) *
+                                  (1.0f / it.unitPrice);
+                float chosen = (budgetQty >= static_cast<float>(chainQty))
+                                   ? static_cast<float>(chainQty)
+                                   : budgetQty;
+                int v20 = static_cast<int>(static_cast<double>(chosen)); // fistp trunc
+                int q = (sl.deficit >= v20) ? v20 : sl.deficit;
+                if (q < need)                       // 0x45c0d6 jl loc_45BF80
+                    continue;
+                if (q < it.required)                // 0x45c0e1
+                    q = it.required;
+                it.required = q;                    // 0x45c0e5 [edx+14h]=eax
             }
         } else {
-            // chained product: clamp the producer's reserve target, set its 0x2
-            // bit, and recurse when it has capacity headroom.
+            // chained product: clamp producer reserveTarget, set its 0x2 bit,
+            // recurse when it has capacity headroom (+ set 0x8 when typedef
+            // divisorOutputs < producer.freeCap).
             WsStation& prod = stations[static_cast<std::size_t>(it.backIndex)];
             if (prod.reserveTarget >= s.reserveTarget)
                 prod.reserveTarget = s.reserveTarget;
             prod.bits |= 0x2;
-            if (4 * (prod.incoming + prod.stock) < prod.freeCap) {
+            if (4 * (prod.stock + prod.incoming) < prod.freeCap) {
+                const WsTypeDef* ptd = env.type_def(prod.typeId);
+                if (ptd && ptd->divisorOutputs < prod.freeCap) // 0x45beec/bef4
+                    prod.bits |= 0x8;
                 ReserveWorkstationItems(stations, static_cast<std::size_t>(it.backIndex),
                                         items, env, needs);
             }

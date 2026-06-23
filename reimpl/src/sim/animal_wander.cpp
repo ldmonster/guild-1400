@@ -105,8 +105,15 @@ bool Animal_CollectSpawnBuilding(SpawnBuildingCollector* ctx, const char* record
                                  void* record) {
     if (recordName && ctx->wantedName && std::strcmp(recordName, ctx->wantedName) == 0) {
         int n = ctx->count;
-        ctx->count = n + 1;
-        ctx->records[n] = record;
+        // HARDEN (wave-10): the records[] array holds 32 slots. The original
+        // appends then returns `count < 32`, so the WalkAndInvoke caller stops the
+        // moment count hits 32 — index n is always < 32 on the in-bounds path
+        // (byte-identical). Guard the write so a direct call with count already at
+        // the cap cannot scribble past records[31].
+        if (n >= 0 && n < 32) {
+            ctx->records[n] = record;
+            ctx->count = n + 1;
+        }
     }
     return ctx->count < 32;
 }
@@ -244,11 +251,19 @@ int Animal_FindDoorTarget(int town, float* outPos) {
 //       n = BuildWanderPath(rec.pos, steps, path);
 //       for each path point: if WorldToTile(point) -> issue walk action(col,row,tag)
 //   else:
-//       [cat-only: if (rec.kind==0) RandomModulo(100);]   // odds burn
+//       Cat (0x483e7b):   if (rec.kind==0) RandomModulo(100);  // conditional burn
+//       Sheep (0x484015): RandomModulo(100);                   // UNCONDITIONAL burn
 //       sound = RandomModulo(3) + 1; CreateSoundAction(actor, sound);
+// RNG-draw count is load-bearing: the sheep sound branch ALWAYS spends an extra
+// d100 (verified at 0x484015 — no guard), whereas the cat branch only spends it
+// when the kind byte (rec+4) is 0 (0x483e7b). `soundBurn` selects the policy:
+//   kCatSoundBurn  -> burn iff rec->kind == 0
+//   kSheepSoundBurn-> always burn
 // ===========================================================================
+enum SoundBurnPolicy { kCatSoundBurn, kSheepSoundBurn };
+
 static char UpdateAnimalAI(AnimalRec* rec, int actionPending, int wanderOdds,
-                           const char* tag, bool catSoundBurn) {
+                           const char* tag, SoundBurnPolicy soundBurn) {
     char ret = 0;
     if (actionPending)        // *(actor+296) != 0 -> idle-gate fails, return early
         return ret;
@@ -271,8 +286,10 @@ static char UpdateAnimalAI(AnimalRec* rec, int actionPending, int wanderOdds,
             }
         }
     } else {
-        // Cat-only odds burn when its kind byte (rec+4) is 0 (the SpawnCat type).
-        if (catSoundBurn && rec->kind == 0)
+        // Sound branch d100 burn: sheep ALWAYS burns (0x484015), cat burns only
+        // when its kind byte (rec+4) is 0 (0x483e7b). This extra draw is part of
+        // the RNG stream and must match exactly.
+        if (soundBurn == kSheepSoundBurn || (soundBurn == kCatSoundBurn && rec->kind == 0))
             util::RandomModulo(100);
         int sound = static_cast<u16>(util::RandomModulo(3)) + 1;  // 1..3 (v4+1)
         g_sceneOps->IssueSoundAction(rec, sound);
@@ -282,11 +299,11 @@ static char UpdateAnimalAI(AnimalRec* rec, int actionPending, int wanderOdds,
 }
 
 char Animal_UpdateCat(AnimalRec* rec, int actionPending) {
-    return UpdateAnimalAI(rec, actionPending, 30, "anm_UpdateCat", /*catSoundBurn=*/true);
+    return UpdateAnimalAI(rec, actionPending, 30, "anm_UpdateCat", kCatSoundBurn);
 }
 
 char Animal_UpdateSheep(AnimalRec* rec, int actionPending) {
-    return UpdateAnimalAI(rec, actionPending, 20, "anm_UpdateSheep", /*catSoundBurn=*/false);
+    return UpdateAnimalAI(rec, actionPending, 20, "anm_UpdateSheep", kSheepSoundBurn);
 }
 
 // ===========================================================================

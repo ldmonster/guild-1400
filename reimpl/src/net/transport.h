@@ -101,8 +101,15 @@ public:
     // bytes[1..2] give the total length. Pass nullptr/len 0 to mean "nothing".
     void SetSendBuffer(u8* buf) { tx_buf_ = buf; }
     // Buffer ReceivePacket reassembles into (dword_764CE4). Must be large enough
-    // for the largest frame (<= record stride 0x99 in practice).
-    void SetRecvBuffer(u8* buf) { rx_buf_ = buf; }
+    // for the largest frame (<= record stride 0x99 in practice). `cap` is the
+    // capacity of `buf` in bytes; pass it so ReceivePacket can refuse a frame whose
+    // declared on-wire length (HdrLen) would run past the buffer. cap==0 means
+    // "capacity unknown" — the only remaining guard is the structural total<3 check
+    // (a frame can never be smaller than its own 3-byte header) which is safe on
+    // every valid frame and never fires on the in-bounds path. Callers that know the
+    // buffer size SHOULD pass it; the original's reassembly buffer is the 153-byte
+    // command record (kPacketStride), so a valid frame is always in [3, cap].
+    void SetRecvBuffer(u8* buf, u16 cap = 0) { rx_buf_ = buf; rx_cap_ = cap; }
 
     // VIBE_Net_SendPacket @0x43bc54 — flush the send buffer. Partial-send aware:
     // advances the cursor and returns Progress until the whole frame is out, then
@@ -141,6 +148,7 @@ private:
 
     u8*  tx_buf_ = nullptr;   // dword_764CE8 — outbound frame (Command-owned)
     u8*  rx_buf_ = nullptr;   // dword_764CE4 — inbound reassembly buffer
+    u16  rx_cap_ = 0;         // capacity of rx_buf_ in bytes (0 == unknown)
     u16  tx_cursor_ = 0;      // word_764CEE — bytes already sent of current frame
     u16  rx_cursor_ = 0;      // word_764CEC — bytes already received of current frame
 

@@ -148,6 +148,31 @@ TEST(GuiTextFileTable, FreeAllClearsEveryRecord) {
     CHECK_EQ(t.FindSlot("b"), -1);
 }
 
+// DISASM @0x44d8a4: FreeAllTextFiles keys SOLELY on the blob pointer
+// (dword_77BF18[i] != 0). A live slot that owns no blob must be left untouched —
+// its name/indices survive. Earlier model wrongly also zeroed used-but-blobless
+// slots; this golden pins the binary-faithful behavior.
+TEST(GuiTextFileTable, FreeAllKeepsBloblessNamedSlots) {
+    TextFileTable t;
+    int s0 = t.Acquire("withblob");
+    int s1 = t.Acquire("noblob");
+    t.At(s0).blob = {1, 2, 3};
+    // s1 has a name (live) but no blob.
+
+    t.FreeAllTextFiles();
+
+    // Slot with a blob: freed and fully zeroed.
+    CHECK(t.At(s0).blob.empty());
+    CHECK(t.At(s0).name.empty());
+    CHECK(!t.At(s0).used);
+    CHECK_EQ(t.FindSlot("withblob"), -1);
+
+    // Slot with no blob: untouched, still findable.
+    CHECK(t.At(s1).used);
+    CHECK(t.At(s1).name == "noblob");
+    CHECK_EQ(t.FindSlot("noblob"), s1);
+}
+
 TEST(GuiTextFileTable, SlotCapAt128) {
     TextFileTable t;
     CHECK_EQ(t.Count(), kTextFileSlots);  // 128

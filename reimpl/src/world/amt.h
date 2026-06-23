@@ -163,11 +163,14 @@ WagePair AmtComputeOfficeWages(int rankA, int rankB, float lawRate,
 struct LoanDecision {
     i32  perTurnInterest = 0; // base charged when the holder is in debt
     i32  overdraftLimit = 0;  // 2 * base
-    bool foreclose = false;   // debt beyond limit with no lender
+    bool foreclose = false;   // debt beyond limit, no lender AND no creditor record
     bool charge = false;      // holder owes -> charge interest this turn
+    bool dunLender = false;   // 0x57b41b: lender present -> -10 relation penalty
 };
+// noCreditor models dword_12CE96C[i]==-1 (the "no creditor on record" marker);
+// the binary foreclosure gate requires it in addition to !hasLender.
 LoanDecision AmtEvaluateLoan(int lawSlot, u8 currency, i32 heldCurrency,
-                             bool hasLender);
+                             bool hasLender, bool noCreditor = true);
 
 // ===========================================================================
 // Goods distribution helpers (gilde.exe 0x57dd84). The pass counts "active"

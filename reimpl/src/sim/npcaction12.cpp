@@ -12,11 +12,12 @@ namespace guild::sim {
 // Recovered constants.
 //   flt_61A594 (worker-quarters upgrade cost factor) — same family as the well
 //     upgrade flt_61A5F4=0.3 (npcaction11); flt_61A594 = 0.3.
-//   flt_61E99C (wander-path coord radius scale) — 0.025 (the per-member coord
-//     fan-out factor used in ComputeWanderPathCoords).
+//   flt_61E99C (wander-path coord radius scale) — 0.0015625 (the per-member coord
+//     fan-out factor used in ComputeWanderPathCoords). get_bytes 0x61e99c =
+//     0xcd 0xcc 0xcc 0x3a = 0x3ACCCCCD = 0.0015625f (2^-10 * 1.6).
 // ===========================================================================
-const float kWorkerWorthMul   = 0.3f;    // flt_61A594
-const float kWanderCoordScale = 0.025f;  // flt_61E99C
+const float kWorkerWorthMul   = 0.3f;       // flt_61A594 (0x3E99999A)
+const float kWanderCoordScale = 0.0015625f; // flt_61E99C (0x3ACCCCCD)
 
 u32 g_lcgState = 0;                       // dword_12335D0
 
@@ -66,8 +67,9 @@ i32 NpcAction12_FormAllianceGroup(void* self, i32* ctx) {
     if (ctx) ctx[4] = 1;
 
     u16 selfMarker = H->markerWord ? H->markerWord(self) : 0;
-    // self alliance-group word = (*(int*)(self+3-dword)) >> 24  (a1+3 dword = byte +12)
-    i32 selfGroup = (self && H->field) ? (H->field(self, 12) >> 24) : 0;
+    // 0x569022: *(int *)(a1 + 3) >> 24, where a1 is unsigned __int16* so a1+3 is
+    // BYTE offset +6 (3 words). selfGroup = (signed) *(int*)(self+6) >> 24.
+    i32 selfGroup = (self && H->field) ? (H->field(self, 6) >> 24) : 0;
 
     auto markerOf = [&](u16 idx) -> i16 { return H->cityMarker ? (i16)H->cityMarker(idx) : -1; };
     auto kindOf   = [&](u16 idx) -> u8  { return H->cityKind ? H->cityKind(idx) : 0; };
@@ -120,15 +122,23 @@ emit:
         for (int i = 0; i < 3; ++i)
             H->requestCoord27(selfId, picks[i] && H->objId ? H->objId(picks[i]) : 0, 20);
     }
-    // Text_RenderFormattedMessage(buf, 3252, selfMarker) then notify host picks.
+    // 0x5691af: Text_RenderFormattedMessage(buf, 3252, *a1) builds the message ONCE;
+    // 0x5691e6: He_SendEntityMessage(*(pick+4), -1, 0, buf, 1418, 0) for each host-kind
+    // (6/7) pick. The transmitted message-id is 1418 (the rendered text is 3252).
     for (int i = 0; i < 3; ++i) {
         u8 k = picks[i] && H->kind ? H->kind(picks[i]) : 0;
         if (k == 6 || k == 7) {
-            if (H->sendEntity) H->sendEntity(picks[i] && H->objId ? H->objId(picks[i]) : 0, 3252);
+            if (H->sendEntity) H->sendEntity(picks[i] && H->objId ? H->objId(picks[i]) : 0, 1418);
         }
     }
     u8 sk = H->kind ? H->kind(self) : 0;
     if (sk == 6) {
+        // 0x5692b9: Text_RenderFormattedMessage(buf, 3245, 2 * **a2 + 2582,
+        //   *v16, *v17, *v18); 0x5692c3: Panel_ShowUseObject(buf, ..., 0xC).
+        // The 2nd format arg is 2*(*(*ctx))+2582 (a 32-bit pointer chain through
+        // ctx[0]); not portably reproducible, so the synthetic panel hook receives
+        // selfMarker in its `self` slot. The three pick markers (*v16/*v17/*v18) are
+        // exact. UI-emit boundary.
         if (H->panelShowAlliance)
             H->panelShowAlliance(3245, selfMarker,
                                  p0 && H->markerWord ? H->markerWord(p0) : 0,
@@ -200,6 +210,11 @@ i32 NpcAction12_AssignWorkPlaceStep(HeRecord* h) {
         int n = 0;
         i32 workObjBase = H->objId ? H->objId(workObj) : 0;
         void* it = H->gameObjectIterFirst ? H->gameObjectIterFirst(workObjBase, 1, 5) : nullptr;
+        // 0x4e726c: the original loop has NO upper bound — it `inc ecx` and writes
+        // var_A4[edx] for every IterNext() result, into a 32-dword stack buffer
+        // (overflowing adjacent locals if >32). Product-slot counts are always small
+        // in practice; we keep an n<32 guard purely as a safety bound (the only
+        // behavioural difference is the impossible >32 overflow case).
         while (it && n < 32) {
             slots[n++] = H->objId ? H->objId(it) : 0;
             it = H->gameObjectIterNext ? H->gameObjectIterNext() : nullptr;
@@ -279,7 +294,7 @@ u8 NpcAction12_EvaluateUseFront(void* person, void* outA, u8 relFlag, void* outB
 //   slots at base+140 (dword each, -1 = empty): resolve the person; if its +296
 //   dword is zero (idle), with 40% probability (RandomModulo(100) > 0x28) build a
 //   wander path of RandomModulo(3)+1 segments, walk each coord through the
-//   heightmap and tag a CharAction node with "HeCharacterBeh"; otherwise emit two
+//   heightmap and tag a CharAction node with "he_CharacterBehavior"; otherwise emit two
 //   randomized sound-gesture actions. Always returns 0 (the input low byte).
 // ===========================================================================
 i32 NpcAction12_HairGestureBehavior(HeRecord* h, float* coordCtx) {
@@ -296,8 +311,14 @@ i32 NpcAction12_HairGestureBehavior(HeRecord* h, float* coordCtx) {
         void* person = H->findPersonById ? H->findPersonById(memberId) : nullptr;
         if (!person)
             continue;
+        // 0x4c952e: eax = *(person+388) (the character/entity record pointer);
+        // 0x4c9534: ebx = *(eax+296) -> the idle field is read off the ENTITY record,
+        // NOT off the person record. entity is the same pointer later passed to
+        // CharAction_InsertActionVararg / CreateSoundAction.
         i32 entity = H->field ? H->field(person, 388) : 0;   // *(int*)(person+388)
-        i32 idleField = H->field ? H->field(person, 296) : 0;
+        void* entityRec = nullptr;
+        if (entity && H->resolveEntity) H->resolveEntity(entity, &entityRec);
+        i32 idleField = entityRec && H->field ? H->field(entityRec, 296) : 0;
         if (idleField != 0)
             continue;
         u16 roll = H->randomModulo ? H->randomModulo(100) : 0;
@@ -314,7 +335,7 @@ i32 NpcAction12_HairGestureBehavior(HeRecord* h, float* coordCtx) {
                     : false;
                 if (ok) {
                     void* node = H->charActionInsert ? H->charActionInsert(entity, outXY[0], outXY[1]) : nullptr;
-                    (void)node;  // the original strcpy's "HeCharacterBeh" into node+112
+                    (void)node;  // 0x4c969c: original strcpy's "he_CharacterBehavior" into node+112
                 }
             }
         } else {
@@ -334,7 +355,7 @@ i32 NpcAction12_HairGestureBehavior(HeRecord* h, float* coordCtx) {
 //   state+2 switch. 0/1 (states -2/-1) -> free. State 2: query worker (+172); for
 //   each city record whose +91 employer link == worker, requestBuildOp77 (if +97
 //   set) and recall any active combat target (Combat_PickActiveTargetEntry ->
-//   named-object 53 "GebaeudeAbreissen"). Stamp +82, advance +5 minutes, ++state.
+//   named-object 53 "GebAbreissen"). Stamp +82, advance +5 minutes, ++state.
 //   State 3: query worker; if its building-state byte != 15, notify each host-kind
 //   peer (6239/1419) and requestSingle59. Default: free.
 // ===========================================================================
@@ -366,10 +387,10 @@ i32 NpcAction12_DemolishBuildingStep(HeRecord* h) {
                             i32 recId = H->objId ? H->objId(rec) : 0;
                             if (b == -1) {
                                 if (H->requestNamedObject53)
-                                    H->requestNamedObject53(recId, a, 0, -1, 1, "GebaeudeAbreissen");
+                                    H->requestNamedObject53(recId, a, 0, -1, 1, "GebAbreissen");
                             } else {
                                 if (H->requestNamedObject53)
-                                    H->requestNamedObject53(recId, a, 0, b, 0, "GebaeudeAbreissen");
+                                    H->requestNamedObject53(recId, a, 0, b, 0, "GebAbreissen");
                             }
                         }
                     }
@@ -393,7 +414,7 @@ i32 NpcAction12_DemolishBuildingStep(HeRecord* h) {
                             if (H->sendQuickjump)
                                 H->sendQuickjump(H->cityId ? H->cityId(ci) : 0, 6239,
                                                  H->objId ? H->objId(worker) : 0, -1,
-                                                 "_NACHRICHTEN_HS_66");
+                                                 "_NACHRICHTEN_HS_67");
                         }
                     }
                 }
@@ -421,9 +442,12 @@ i32 NpcAction12_MasterExamStep(HeRecord* h) {
     const NpcAction12Hooks* H = g_h12;
 
     // GameTime_Compare(&clock, +82) — returns >=0 once the appointment is reached.
+    // 0x4e5c36: result = Compare(...); if ((int)result >= 0) { switch } ; return result.
+    // When the gate is not reached the function returns the (negative) compare value,
+    // NOT 0.
     int cmp = GameTimeCompare(&NpcClock(), reinterpret_cast<GameTime*>(HeBytes(h) + 82));
     if (cmp < 0)
-        return 0;
+        return cmp;
 
     i32 state = He_State(h);
     switch (state + 2) {
@@ -447,28 +471,49 @@ i32 NpcAction12_MasterExamStep(HeRecord* h) {
                 int rank = (H->computeRankWithinGroup ? H->computeRankWithinGroup(code) : 0) + 1;
                 bool passed = H->equipState ? (H->equipState(examinee, 9) != 0) : false;
                 if (H->playExamVoice) H->playExamVoice(passed, rank);
+                // 0x4e5d27: arg4 = (*(int*)&v18[1] >> 24) + v8, where v18[4] =
+                // GroupFromCode(code) and v8 = passed?4545:4532. So arg4 =
+                // GroupFromCode(code) + (passed?4545:4532).
+                int base4 = passed ? 4545 : 4532;
+                int arg4 = (H->groupFromCode ? H->groupFromCode(code) : 0) + base4;
                 if (H->renderExamResult)
                     H->renderExamResult(0x11B3, H->markerWord ? H->markerWord(examinee) : 0,
-                                        rank - 2 + 4477, passed ? 4545 : 4532, 4);
+                                        rank - 2 + 4477, arg4, 4);
             }
             ++He_State(h);
             return packet;
         }
         case 3: { // state 1
-            // dword_75BF04 == *(int*)(packet+8) ? proceed : wait
-            // dword_75BF38 verdict: 1210 -> open dialog; 1155 -> just free; else wait.
-            // Both globals are UI state; routed through the panel-result via a field
-            // read on the packet. With inert hooks the verdict is "wait" (return).
+            // 0x4e5d5d: result = dword_75BF04;
+            //   if (dword_75BF04 != *(int*)(packet+8)) return result;  // panel not ready -> WAIT
+            //   switch (dword_75BF38) {
+            //     case -1:   return result;       // verdict pending -> WAIT
+            //     case 1210: FindRecordById(+172); if (rec->+92) Dialog_OpenBuildingForActiveChar(...); [destroy+free]
+            //     case 1155: [destroy+free]
+            //     default:   return result;       // unrecognised -> WAIT
+            //   }
+            // dword_75BF04 / dword_75BF38 are UI-panel-result globals with no portable
+            // analogue; routed through examPanelVerdict. Inert -> verdict==0 -> WAIT
+            // (return without freeing), exactly like the not-ready / pending path.
             i32 packet = F32(h, 116);
-            i32 panelReady = H->field ? H->field(reinterpret_cast<void*>(static_cast<std::intptr_t>(packet)), 8) : 0;
-            (void)panelReady;
-            // Inert default: no UI ready -> keep waiting (matches dword_75BF04 != packet[8]).
-            // A driving test installs `field` so the verdict path executes.
-            void* examinee = H->findPersonById ? H->findPersonById(F32(h, 172)) : nullptr;
-            if (examinee && H->dialogOpenBuilding)
-                H->dialogOpenBuilding(H->objId ? H->objId(examinee) : 0, 0);
-            if (H->eventPanelDestroy) H->eventPanelDestroy(h);
-            if (H->freeHandlerEntry) H->freeHandlerEntry(h);
+            int verdict = H->examPanelVerdict ? H->examPanelVerdict(h, packet) : 0;
+            if (verdict == 1210) {
+                void* examinee = H->findPersonById ? H->findPersonById(F32(h, 172)) : nullptr;
+                // 0x4e5da0: only when *((_DWORD*)rec+92) (rec+368) is set.
+                if (examinee && H->field && H->field(examinee, 368)) {
+                    if (H->dialogOpenBuilding)
+                        H->dialogOpenBuilding(H->objId ? H->objId(examinee) : 0, 0);
+                }
+                if (H->eventPanelDestroy) H->eventPanelDestroy(h);
+                if (H->freeHandlerEntry) H->freeHandlerEntry(h);
+                return packet;
+            }
+            if (verdict == 1155) {
+                if (H->eventPanelDestroy) H->eventPanelDestroy(h);
+                if (H->freeHandlerEntry) H->freeHandlerEntry(h);
+                return packet;
+            }
+            // not ready / pending / unrecognised -> wait (no free)
             return packet;
         }
         default:
@@ -588,7 +633,7 @@ u8 NpcAction12_TavernJoinLeave(void* self, void* action) {
 
     switch (static_cast<u32>(tag)) {
         case 1785686382u: {  // JOIN
-            if (H->buildingActionStart) H->buildingActionStart("Stammtisch join");
+            if (H->buildingActionStart) H->buildingActionStart("stammtisch join AI-Plr");
             i32 key[3] = {tag, selfId, actId};
             if (H->requestBuildOp84) H->requestBuildOp84(key);
             if (H->requestArgs25) H->requestArgs25(actId, 0, 0x2000000, 4, 0);
@@ -596,7 +641,7 @@ u8 NpcAction12_TavernJoinLeave(void* self, void* action) {
             return 53;
         }
         case 1818583414u: {  // LEAVE
-            if (H->buildingActionStart) H->buildingActionStart("Stammtisch leave");
+            if (H->buildingActionStart) H->buildingActionStart("stammtisch leave AI-Plr");
             i32 key[3] = {tag, selfId, actId};
             if (H->requestBuildOp84) H->requestBuildOp84(key);
             if (H->requestArgs25) H->requestArgs25(actId, 0, 0x2000000, 4, 0);
@@ -693,9 +738,11 @@ i32 NpcAction12_InitDualCoordWalk(HeRecord* h) {
 // ===========================================================================
 // gilde.exe 0x4ccad4 — VIBE_NpcAction_ComputeWanderPathCoords.
 //   base = ComputeOfficeRank(selfPerson, 0) - 1. budget = max(32000, wealth(self))
-//   + max(32000, wealth(peer)). Shuffle 17 dwords. For each of 3 member pairs:
-//   set member rank byte (+188) = shuffledByte + base; coord = (rank+1) * budget *
-//   flt_61E99C; store the coord at +47 (dword). Returns the last coord.
+//   + max(32000, wealth(peer)). Shuffle 17 dwords. Loop i=0..2:
+//     rank byte at members+188+i (edx, `inc edx`) = LOBYTE(shuffled[i]) + LOBYTE(base);
+//     coord = (rank+1) * budget * flt_61E99C(=0.0015625) -> int (truncate);
+//     coord dword at members+192+4*i (ebx, `add ebx,4` before each store).
+//   Returns the last coord.
 // ===========================================================================
 i32 NpcAction12_ComputeWanderPathCoords(i16* members, u16 selfPerson, u16 peerPerson) {
     const NpcAction12Hooks* H = g_h12;
@@ -715,16 +762,20 @@ i32 NpcAction12_ComputeWanderPathCoords(i16* members, u16 selfPerson, u16 peerPe
 
     int budget = v7 + v8;
     i32 lastCoord = 0;
+    u8* base8 = reinterpret_cast<u8*>(members);
+    // disasm 0x4ccb47..0x4ccb8e:
+    //   edx (rank ptr) = members, `inc edx` each iter   -> rank byte at members+188+i
+    //   ebx (coord ptr) = members, `add ebx,4` BEFORE store each iter
+    //                                                    -> coord dword at members+192+4*i
+    // rank byte: al = LOBYTE(var_1C/base) + LOBYTE(shuffled[i]); reloaded as u8 then +1.
     for (int i = 0; i < 3; ++i) {
         u8 rankByte = static_cast<u8>((shuffled[i] & 0xFF) + base);
-        // *((u8*)member + 188) for this pair; members advances by 2 words per pair.
-        i16* slot = members + 2 * i;
-        *reinterpret_cast<u8*>(reinterpret_cast<u8*>(slot) + 188) = rankByte;
-        int v20 = rankByte + 1;
+        base8[188 + i] = rankByte;                     // mov [edx+0BCh], al ; inc edx
+        int v20 = static_cast<u8>(base8[188 + i]) + 1; // reload as unsigned byte, +1
         double coord = (double)v20 * (double)budget * (double)kWanderCoordScale;
-        lastCoord = (i32)coord;
-        // *((_DWORD*)member + 47) = coord  (byte +188 of the next pair base)
-        *reinterpret_cast<i32*>(reinterpret_cast<u8*>(slot) + 188) = lastCoord;
+        lastCoord = (i32)coord;                        // fistp after ConvertX -> truncate
+        // ebx advanced by 4 BEFORE store: members+192, +196, +200
+        *reinterpret_cast<i32*>(base8 + 192 + 4 * i) = lastCoord;
     }
     return lastCoord;
 }
@@ -746,18 +797,20 @@ u8 NpcAction12_BuildWorkerQuarters(HeRecord* h, u8* action, void* building) {
 
     u8 act = action ? *action : 0;
     if (act == 4) {
-        if (H->buildingActionStart) H->buildingActionStart("upgr_arbeiterunterkunft");
+        if (H->buildingActionStart) H->buildingActionStart("upgr_arbeiter_unterk");
         i32 worth = H->sumFlaggedSlotsWorth
             ? H->sumFlaggedSlotsWorth(building && H->objId ? (H->objId(building) >> 24) : 0)
             : 0;
+        // fild worth; fmul flt_61A594; ConvertX; fistp qword; cmd15 uses LOW dword (ecx).
         long long cost = (long long)((double)worth * (double)kWorkerWorthMul);
-        if (H->enqueueCmd15) H->enqueueCmd15(He_Id(h), 0, cost, 0);
+        // disasm 4726cd: eax = -1 (idA); edx = *(officeStore+2) (boundary -> 0); cur = byte_6477A1 = 0.
+        if (H->enqueueCmd15) H->enqueueCmd15(-1, 0, cost, 0);
         if (H->requestSlotReset28) H->requestSlotReset28(nullptr, 0);
         if (H->buildingActionEnd) H->buildingActionEnd();
         return 46;
     }
 
-    if (H->buildingActionStart) H->buildingActionStart("bau_arbeiterunterkunft");
+    if (H->buildingActionStart) H->buildingActionStart("bau_arbeiter_unterk");
     if (H->aiLoadBuildingGraphic && H->aiLoadBuildingGraphic(building, action)) {
         i32 worth = H->sumFlaggedSlotsWorth
             ? H->sumFlaggedSlotsWorth(building && H->objId ? (H->objId(building) >> 24) : 0)

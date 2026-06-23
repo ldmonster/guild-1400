@@ -152,6 +152,11 @@ void ResetInteractionLeafTrace();
 // returns the low result bits the caller OR's into its action code. Default: 0.
 using PrivilegeLeafFn = int (*)(int leafId, ContextActor* actor, InteractionEventRec* ev);
 void SetPrivilegeLeafHook(PrivilegeLeafFn fn);
+// Returns the currently-installed privilege-leaf hook (the inert default if none
+// was set). Lets a second installer (e.g. the SET-B panels) CHAIN onto the prior
+// hook (e.g. the SET-A adapter) instead of clobbering it — the single g_privilegeHook
+// slot is shared by both batches.
+PrivilegeLeafFn GetPrivilegeLeafHook();
 
 // VIBE_Command_Enqueue* — the lockstep command builder the Perform* handlers emit
 // through. The hook receives the action tag (e.g. "sabotage") and the staged

@@ -105,7 +105,12 @@ TEST(GuiFormLoader, InitTablesStampsIndices) {
     CHECK_EQ(g_windows[0].at<i32>(0), 0);
     CHECK_EQ(g_windows[95].at<i32>(0), 95);
     CHECK_EQ(g_widgets[0].marker(), 0);
-    CHECK_EQ(g_widgets[511].marker(), 511);
+    // The original stamps 512 records, but the reimpl's g_widgets carries
+    // kMaxWidgets (511) slots (511 is load-bearing in zorder.cpp's recovered
+    // arithmetic); Form_InitTables clamps so the 512th stamp cannot write past
+    // the array (previously an OOB write into the adjacent global — and this
+    // check's former g_widgets[511] read was equally out of bounds).
+    CHECK_EQ(g_widgets[kMaxWidgets - 1].marker(), kMaxWidgets - 1);
 }
 
 TEST(GuiFormLoader, RejectsTooManyObjects) {
@@ -252,4 +257,35 @@ TEST(GuiMarkupBuild, PlainTextCreatesNoObjects) {
     int slot = MakeWindow(0, 0, 300, 200);
     auto objs = BuildMarkupIntoWindow(slot, "Hello $F2 world $A more");
     CHECK_EQ(static_cast<int>(objs.size()), 0); // layout-only tokens + text: no widgets
+}
+
+// ===== Wave-11 hardening: malformed .gfx loader inputs (ASAN/UBSAN) ==================
+
+TEST(GuiFormLoaderHarden, ZeroAndOneByteBuffers) {
+    FreshGui();
+    CHECK(!Form_LoadFromBuffer(nullptr, 0));        // len < 4 -> reject
+    u8 b1 = 0x05;
+    CHECK(!Form_LoadFromBuffer(&b1, 1));            // 1-byte header -> reject
+    CHECK_EQ(g_gfxObjectCount, 0);
+}
+
+TEST(GuiFormLoaderHarden, HeaderOnlyDeclaresRecordsButHasNone) {
+    FreshGui();
+    // 4-byte count of 5 but zero record bytes -> short-buffer guard rejects, no OOB read.
+    u8 hdr[4]; u32 n = 5; std::memcpy(hdr, &n, 4);
+    CHECK(!Form_LoadFromBuffer(hdr, sizeof(hdr)));
+    CHECK_EQ(g_gfxObjectCount, 0);
+}
+
+TEST(GuiFormLoaderHarden, CountAtExactCapBoundary) {
+    FreshGui();
+    // Declared count == kMaxGfxObjects is accepted (cap is `> kMaxGfxObjects`); declaring
+    // a body for that many records would be huge, so just prove the cap boundary rejects
+    // one past it and a zero-count buffer parses to an empty table without overreading.
+    u8 zero[4] = {0, 0, 0, 0};
+    CHECK(Form_LoadFromBuffer(zero, sizeof(zero)));
+    CHECK_EQ(g_gfxObjectCount, 0);
+
+    u8 over[4]; u32 n = static_cast<u32>(kMaxGfxObjects) + 1; std::memcpy(over, &n, 4);
+    CHECK(!Form_LoadFromBuffer(over, sizeof(over)));
 }

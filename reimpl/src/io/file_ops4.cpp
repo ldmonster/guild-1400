@@ -91,6 +91,12 @@ int& StreamOpenCount() { return g_streamOpenCount; }
 //   GetFileType(dword_64ADBC[fd]) == FILE_TYPE_CHAR, under the global lock.
 bool DetectDeviceType(LowioTable& t, int fd) {
     Ops4Hooks().lockEnter();                                  // off_64A910
+    // 0x6063db: if dword_64AA50 is installed and returns nonzero, the handle is a
+    // char device without consulting GetFileType.
+    if (Ops4Hooks().deviceTypeOverride && Ops4Hooks().deviceTypeOverride(fd)) {
+        Ops4Hooks().lockLeave();                             // off_64A914
+        return true;
+    }
     int osHandle = (fd >= 0 && fd < LowioTable::kMax) ? t.handles[fd] : -1;
     bool isChar = (Ops4Hooks().fileType(osHandle) == kFileTypeChar);
     Ops4Hooks().lockLeave();                                  // off_64A914
@@ -124,11 +130,20 @@ int ValidateHandleMode(LowioTable& t, unsigned int fd, guild::u8 want) {
         v4 = 6;
     if (((v2 & 2) == 0 || (v3 & 2) != 0) && v4 != 6)
         return 0;
-    Errno() = kEINVAL;                                        // VIBE_Runtime_SetErrnoEinval
+    // 0x5fea42: SetErrnoEinval is entered with eax==6 in both reaching paths
+    // (the writable-fail jmp keeps eax=6; the cmp path only falls through when
+    // eax==6). SetErrnoEinval writes errno = eax, so errno is set to 6, not 22.
+    Errno() = 6;                                              // VIBE_Runtime_SetErrnoEinval(6)
     return -1;
 }
 
 // gilde.exe 0x6063a8 — VIBE_File_SetDescriptorEntry
+// NOTE: the original does *((_DWORD*)off_64AE64 + a1) = ... with NO bounds check
+// and returns eax = 4*a1 (the byte offset; ignored by all callers). off_64AE64 is
+// the original's dynamically-grown table (capacity dword_64AE10); our LowioTable is
+// a fixed 256-entry model, so we keep a defensive guard for the fixed array (it
+// never triggers for the valid fds the original passes). Return is void since no
+// caller consumes the offset.
 void SetDescriptorEntry(LowioTable& t, int fd, guild::u32 value) {
     if (fd < 0 || fd >= LowioTable::kMax)
         return;
@@ -331,16 +346,17 @@ unsigned ReadTranslate(FdTable& t, int fd, char* dst, int a3) {
                             e->peekChar = static_cast<guild::u8>(v24);
                         }
                     } else {
-                        if (v7 == dst && v24 == 10) {
+                        if (v7 == dst && v24 == 10) {         // 0x1425ead: LF, empty out
                             *v7 = 10;
                             ++v7;
                         } else {
-                            SeekDescriptor(t, fd, -1, 1);
+                            SeekDescriptor(t, fd, -1, 1);     // 0x1425ebb: un-read v24
+                            // 0x1425ec3: cmp v24,0Ah; jz LABEL_39 — when v24==10 the
+                            // original writes NOTHING and does not advance v7 (the LF
+                            // was pushed back via the seek). Only a non-LF byte makes
+                            // it emit the lone CR.
                             if (v24 != 10) {
-                                *v7 = 13;
-                                ++v7;
-                            } else {
-                                *v7 = 10;
+                                *v7 = 13;                     // 0x1425ec9
                                 ++v7;
                             }
                         }
@@ -566,7 +582,10 @@ CrtFile* ParseModeAndOpen(FdTable& t, const char* path, const char* mode, int sh
         char v9 = *++v4;
         if (!v9 || !v8)
             break;
-        if (static_cast<guild::u8>(v9) > 84) {                // 'b','t','c','n','S','R','D' ...
+        // 0x1424373: movsx eax,al; cmp eax,54h; jg — SIGNED char comparison. A mode
+        // byte with the high bit set (>= 0x80) is negative and takes the <=84 path,
+        // not the >84 path. (Do not cast to unsigned here.)
+        if (v9 > 84) {                                        // 'b','t','c','n','S','R','D' ...
             int v13 = v9 - 98;                                // 'b'
             if (v13 == 0) {
                 if ((v6 & 0xC000) != 0) { v8 = 0; }
@@ -636,6 +655,10 @@ void* FindFirstEntry(const char* pattern, FindData* out) {
     guild::shim::DirEntry first;
     void* handle = Ops4Hooks().findFirst(pattern, &first);
     if (handle == nullptr) {                                  // FindFirstFileA == -1
+        // 0x5eb84d: the original calls VIBE_File_MapLastError, which sets errno =
+        // GetLastError() (an OS-dependent value) via SetErrnoReturnError. The
+        // findFirst hook does not surface the OS error, so we use EBADF as a
+        // deterministic stand-in (OS-error boundary).
         Errno() = kEBADF;                                     // VIBE_File_MapLastError leg
         return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
     }
@@ -645,7 +668,9 @@ void* FindFirstEntry(const char* pattern, FindData* out) {
     guild::u32 attrs = first.isDir ? 0x10u : 0x20u;
     if (!FindEntryMatches(0x37, &attrs)) {
         Ops4Hooks().findClose(handle);
-        Errno() = kEINVAL;                                    // SetErrnoReturnError
+        // 0x5eb86c: SetErrnoReturnError is entered with eax==2, so errno = 2
+        // (ENOENT), not 22. (SetErrnoReturnError -> SetErrnoEinval(eax).)
+        Errno() = 2;                                          // SetErrnoReturnError(2)
         return reinterpret_cast<void*>(static_cast<intptr_t>(-1));
     }
     CopyFindDataAttributes(first, out);

@@ -78,23 +78,61 @@ GUILD_PACKED_END
 // Raw byte base of a record (the original kept a `char*`/`int` base in eax).
 inline u8* HeBytes(HeRecord* h) { return reinterpret_cast<u8*>(h); }
 
+// ---------------------------------------------------------------------------
+// Alignment note (WAVE-17 verdict — UBSAN clean, behaviour byte-identical):
+//   The original gilde.exe touches this record with NATIVE UNALIGNED x86
+//   accesses.  e.g. VIBE_NpcAction_StampTimeAndRequestEntity @0x4c9458 does
+//       *(_QWORD*)(result + 82) = ...;   // appointment GameTime at ODD +82
+//       *(_DWORD*)(result + 90) = ...;
+//       *(_WORD*)(result + 94)  = ...;
+//   All offsets here are in-bounds (sizeof(HeRecord) == 514) — they are unaligned
+//   but valid x86 reads, NOT out-of-bounds.  To reproduce that exactly while
+//   staying clean under `-fsanitize=alignment`, the reference accessors below go
+//   through a 1-aligned (packed) pointer type: the emitted load/store is the same
+//   unaligned access the binary performs, the lvalue interface (`He_X(h)=v`,
+//   `++He_X(h)`, `&He_X(h)`) is unchanged, and every call-site value/offset is
+//   byte-identical.  Converting the ~900 call sites to memcpy get/set would churn
+//   dozens of lvalue write/compound sites across consumer files with no behaviour
+//   change, so it is intentionally NOT done — this in-place packed-ref change
+//   closes the UBSAN-alignment gap with zero consumer churn.
+// ---------------------------------------------------------------------------
+// Concrete 1-aligned typedefs (a template alias drops the attribute on GCC, so
+// each used type gets its own packed alias).  `__attribute__((aligned(1)))` makes
+// the load/store UBSAN-alignment clean while emitting the SAME unaligned access.
+#if defined(__GNUC__) || defined(__clang__)
+typedef i32      HeU_i32      __attribute__((aligned(1)));
+typedef u16      HeU_u16      __attribute__((aligned(1)));
+typedef GameTime HeU_GameTime __attribute__((aligned(1)));
+#else
+typedef i32      HeU_i32;
+typedef u16      HeU_u16;
+typedef GameTime HeU_GameTime;
+#endif
+template <class T> struct HeUnalignedSel;
+template <> struct HeUnalignedSel<i32>      { using type = HeU_i32; };
+template <> struct HeUnalignedSel<u16>      { using type = HeU_u16; };
+template <> struct HeUnalignedSel<GameTime> { using type = HeU_GameTime; };
+template <class T> using HeUnaligned = typename HeUnalignedSel<T>::type;
+
 // Field accessors at the exact original byte offsets. These are the canonical
 // way the translated functions touch the record (mirrors `*(T*)(base+off)`).
-inline i32&      He_Id(HeRecord* h)        { return *reinterpret_cast<i32*>(HeBytes(h) + 4); }
-inline u16&      He_CityIndex(HeRecord* h) { return *reinterpret_cast<u16*>(HeBytes(h) + 8); }
-inline i32&      He_CityId(HeRecord* h)    { return *reinterpret_cast<i32*>(HeBytes(h) + 12); }
-inline GameTime& He_SavedTime(HeRecord* h) { return *reinterpret_cast<GameTime*>(HeBytes(h) + 68); }
-inline GameTime& He_ApptTime(HeRecord* h)  { return *reinterpret_cast<GameTime*>(HeBytes(h) + 82); }
-inline i32&      He_State(HeRecord* h)      { return *reinterpret_cast<i32*>(HeBytes(h) + 112); }
+// The packed (aligned(1)) pointer type makes the read UBSAN-alignment clean while
+// emitting the SAME unaligned access the original binary performs.
+inline HeU_i32&      He_Id(HeRecord* h)        { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 4); }
+inline HeU_u16&      He_CityIndex(HeRecord* h) { return *reinterpret_cast<HeUnaligned<u16>*>(HeBytes(h) + 8); }
+inline HeU_i32&      He_CityId(HeRecord* h)    { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 12); }
+inline HeU_GameTime& He_SavedTime(HeRecord* h) { return *reinterpret_cast<HeUnaligned<GameTime>*>(HeBytes(h) + 68); }
+inline HeU_GameTime& He_ApptTime(HeRecord* h)  { return *reinterpret_cast<HeUnaligned<GameTime>*>(HeBytes(h) + 82); }
+inline HeU_i32&      He_State(HeRecord* h)      { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 112); }
 inline u8&       He_Flags(HeRecord* h)      { return *reinterpret_cast<u8*>(HeBytes(h) + 120); }
-inline i32&      He_ReqHandle(HeRecord* h)  { return *reinterpret_cast<i32*>(HeBytes(h) + 132); }
-inline u16&      He_Counter(HeRecord* h)    { return *reinterpret_cast<u16*>(HeBytes(h) + 172); }
-inline GameTime& He_Deadline(HeRecord* h)   { return *reinterpret_cast<GameTime*>(HeBytes(h) + 176); }
+inline HeU_i32&      He_ReqHandle(HeRecord* h)  { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 132); }
+inline HeU_u16&      He_Counter(HeRecord* h)    { return *reinterpret_cast<HeUnaligned<u16>*>(HeBytes(h) + 172); }
+inline HeU_GameTime& He_Deadline(HeRecord* h)   { return *reinterpret_cast<HeUnaligned<GameTime>*>(HeBytes(h) + 176); }
 // +180 is the hour field of the +176 GameTime; the engine reuses it as the
 // idle-wait counter (BeginIdleWaitState / RestorePoseSetRandom).
-inline u16&      He_WaitCounter(HeRecord* h){ return *reinterpret_cast<u16*>(HeBytes(h) + 180); }
-inline i32&      He_Scratch(HeRecord* h, int dwordIndex) {
-    return *reinterpret_cast<i32*>(HeBytes(h) + 96 + 4 * dwordIndex);
+inline HeU_u16&      He_WaitCounter(HeRecord* h){ return *reinterpret_cast<HeUnaligned<u16>*>(HeBytes(h) + 180); }
+inline HeU_i32&      He_Scratch(HeRecord* h, int dwordIndex) {
+    return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 96 + 4 * dwordIndex);
 }
 
 // Flag bits in He_Flags (+120).
@@ -123,16 +161,16 @@ enum HeFlag : u8 {
 //   +0x169 (+361): NPC sub-method/class byte (30/31/32/33 = combat/move kinds).
 // Accessors below address the record by explicit offset, byte-faithful to the
 // raw `*(T*)(base+off)` accesses in the originals.
-inline i32&      He_MemberId(HeRecord* h, int slot)  // +140 + 4*slot (slots 0..3)
-    { return *reinterpret_cast<i32*>(HeBytes(h) + 140 + 4 * slot); }
-inline i32&      He_Counter172(HeRecord* h) { return *reinterpret_cast<i32*>(HeBytes(h) + 172); }
-inline i32&      He_TargetObjId(HeRecord* h){ return *reinterpret_cast<i32*>(HeBytes(h) + 176); }
-inline i32&      He_ScanStep(HeRecord* h)   { return *reinterpret_cast<i32*>(HeBytes(h) + 180); }
-inline i32&      He_SeqId(HeRecord* h)      { return *reinterpret_cast<i32*>(HeBytes(h) + 184); }
-inline i32&      He_PacketId(HeRecord* h, int slot) // +188 + 4*slot (slots 0..3)
-    { return *reinterpret_cast<i32*>(HeBytes(h) + 188 + 4 * slot); }
-inline i32&      He_PlagueTarget(HeRecord* h){ return *reinterpret_cast<i32*>(HeBytes(h) + 204); }
-inline i32&      He_PlagueSource(HeRecord* h){ return *reinterpret_cast<i32*>(HeBytes(h) + 208); }
+inline HeU_i32&      He_MemberId(HeRecord* h, int slot)  // +140 + 4*slot (slots 0..3)
+    { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 140 + 4 * slot); }
+inline HeU_i32&      He_Counter172(HeRecord* h) { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 172); }
+inline HeU_i32&      He_TargetObjId(HeRecord* h){ return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 176); }
+inline HeU_i32&      He_ScanStep(HeRecord* h)   { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 180); }
+inline HeU_i32&      He_SeqId(HeRecord* h)      { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 184); }
+inline HeU_i32&      He_PacketId(HeRecord* h, int slot) // +188 + 4*slot (slots 0..3)
+    { return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 188 + 4 * slot); }
+inline HeU_i32&      He_PlagueTarget(HeRecord* h){ return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 204); }
+inline HeU_i32&      He_PlagueSource(HeRecord* h){ return *reinterpret_cast<HeUnaligned<i32>*>(HeBytes(h) + 208); }
 inline u8&       He_OfficeCatA(HeRecord* h)  { return *reinterpret_cast<u8*>(HeBytes(h) + 358); }
 inline u8&       He_OfficeCatB(HeRecord* h)  { return *reinterpret_cast<u8*>(HeBytes(h) + 359); }
 inline u8&       He_OfficeCatC(HeRecord* h)  { return *reinterpret_cast<u8*>(HeBytes(h) + 360); }

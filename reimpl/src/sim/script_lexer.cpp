@@ -1,5 +1,6 @@
 #include "sim/script_lexer.h"
 #include <cstdlib>
+#include <cstring>
 
 namespace guild::sim {
 
@@ -34,53 +35,91 @@ bool IsDigitClass(u8 c) {
 }
 
 // ===========================================================================
-// Reconstructed operator table (byte_767958, stride 5). Row index (1-based) ==
-// the sub-code NextToken returns in result[4]. Sub-codes recovered from the
-// expression evaluator (ScriptOp) and the statement/declaration parsers:
-//   1  ==     4  +      6  -      7  !=     8  {      9  }
-//  11  :(label)        12  end   13  ;      14  "(string opener)
-//  16  <=    17  <     18  >=    19  >      20  /     21  *
-//  22  |     23  &     24  ||    25  &&     27  [ / ( 28  ] / )
-// (Single-table entries are listed once; bracket/paren share a sub-code class.)
+// gilde.exe operator table byte_767958 (stride 5). Row index (1-based) == the
+// sub-code NextToken returns in result[4] (the v56 counter). The table is
+// runtime-populated in ConsoleParseLine @0x4453a4: each operator spelling
+// (asc_6184C0.. / asc_618014.. / asc_6183D4) is copied to a FIXED destination
+// address unk_7679XX, and the destination's offset from base 0x767958 divided by
+// the stride (5) yields the row index == sub-code.  Recovered destination map
+// (addr -> (addr-0x767958)/5 == sub-code):
+//   ==  0x76795D=1   =   0x767962=2   ++  0x767967=3   +   0x76796C=4
+//   --  0x767971=5   -   0x767976=6   !=  0x76797B=7   {   0x767980=8
+//   }   0x767985=9   ;   0x76798A=10  ,   0x76798F=11  (   0x767994=12
+//   )   0x767999=13  "   0x76799E=14  //  0x7679A3=15  <=  0x7679A8=16
+//   <   0x7679AD=17  >=  0x7679B2=18  >   0x7679B7=19  /   0x7679BC=20
+//   *   0x7679C1=21  ||  0x7679C6=22  &&  0x7679CB=23  |   0x7679D0=24
+//   &   0x7679D5=25  (space) 0x7679DA=26  [ 0x7679DF=27  ] 0x7679E4=28
+//   .   0x7679E9=29
+// The expression-evaluator's binary-op semantics (VIBE_Script_EvaluateExpression
+// @0x443ff0) confirm 22 returns a|b, 23 returns a&b, 24 does acc|=b, 25 acc&=b.
+// (script_vm.h's kOp* names are mislabeled vs these spellings but their numeric
+// VALUES match the row indices below; we use the binary's row indices verbatim.)
 // ===========================================================================
 const std::vector<OperatorEntry> kOperatorTable = {
-    {"==", kOpEq},      // 1
-    {"=",  2},          // 2  assignment ('=' ; AssignVariable v18==2 path)
-    {"+",  kOpAdd},     // 4
-    {"-",  kOpSub},     // 6
-    {"!=", kOpNe},      // 7
-    {"{",  8},          // 8  block-open
-    {"}",  9},          // 9  block-close
-    {":",  kOpLabelRef},// 11 label
-    {";",  13},         // 13 statement separator
-    {"\"", 14},         // 14 string-literal opener
-    {"<=", kOpLe},      // 16
-    {"<",  kOpLt},      // 17
-    {">=", kOpGe},      // 18
-    {">",  kOpGt},      // 19
-    {"/",  kOpDiv},     // 20
-    {"*",  kOpMul},     // 21
-    {"|",  kOpBitOr},   // 22
-    {"&",  kOpBitAnd},  // 23
-    {"||", kOpOr},      // 24
-    {"&&", kOpAnd},     // 25
-    {"(",  27},         // 27 open paren / array-index open
-    {")",  28},         // 28 close paren / array-index close
-    {",",  29},         // arg separator (own sub-code; terminates an expression)
+    {"==", 1},          // 1   asc_6184DC -> unk_76795D
+    {"=",  2},          // 2   asc_6184D8 -> unk_767962 (assignment)
+    {"++", 3},          // 3   asc_6184D4 -> unk_767967 (post-increment)
+    {"+",  4},          // 4   asc_6184CC -> unk_76796C  (== kOpAdd)
+    {"--", 5},          // 5   asc_6184D0 -> unk_767971 (post-decrement)
+    {"-",  6},          // 6   asc_6184C8 -> unk_767976  (== kOpSub)
+    {"!=", 7},          // 7   asc_6184E0 -> unk_76797B  (== kOpNe)
+    {"{",  8},          // 8   asc_618014 -> unk_767980
+    {"}",  9},          // 9   asc_618018 -> unk_767985
+    {";",  10},         // 10  asc_6184F8 -> unk_76798A (statement separator)
+    {",",  11},         // 11  asc_6184FC -> unk_76798F (arg separator)
+    {"(",  12},         // 12  asc_6184EC -> unk_767994
+    {")",  13},         // 13  asc_6184F0 -> unk_767999
+    {"\"", 14},         // 14  asc_6184F4 -> unk_76799E (string-literal opener)
+    {"//", 15},         // 15  asc_618500 -> unk_7679A3 (line-comment marker)
+    {"<=", 16},         // 16  asc_618514 -> unk_7679A8  (== kOpLe)
+    {"<",  17},         // 17  asc_618504 -> unk_7679AD  (== kOpLt)
+    {">=", 18},         // 18  asc_61851C -> unk_7679B2  (== kOpGe)
+    {">",  19},         // 19  asc_618518 -> unk_7679B7  (== kOpGt)
+    {"/",  20},         // 20  asc_618520 -> unk_7679BC  (== kOpDiv)
+    {"*",  21},         // 21  asc_618524 -> unk_7679C1  (== kOpMul)
+    {"||", 22},         // 22  asc_618510 -> unk_7679C6  (eval: returns a|b)
+    {"&&", 23},         // 23  asc_6183D4 -> unk_7679CB  (eval: returns a&b)
+    {"|",  24},         // 24  asc_618508 -> unk_7679D0  (eval: acc |= b)
+    {"&",  25},         // 25  asc_61850C -> unk_7679D5  (eval: acc &= b)
+    // 26 == " " (space); never reached here — leading spaces are skipped before
+    // operator matching, exactly as NextToken's `*v3 == 32` loop does.
+    {"[",  27},         // 27  asc_6184E4 -> unk_7679DF (array-index open)
+    {"]",  28},         // 28  asc_6184E8 -> unk_7679E4 (array-index close)
+    {".",  29},         // 29  asc_6184C4 -> unk_7679E9 (decimal point / member)
 };
 
 // ===========================================================================
-// Reconstructed keyword table (byte_767450, stride 16). Sub-codes recovered from
-// ExecuteStatement's class-10 switch: 1 while, 2 for, 3 return, 4 if, 5 include,
-// 6/7/8 mode keywords. (byte_767460 / byte_767470 hold "while"/"for" spellings,
-// strlen'd by the loop parsers.)
+// gilde.exe keyword table byte_767450 (stride 16). NextToken scans rows starting
+// at offset 16 (v8=16, v56=1, while v8<144 -> 8 rows), so sub-code == (offset/16).
+// Populated in ConsoleParseLine @0x4453a4 at FIXED destinations; recovered map
+// (dest -> offset from 0x767450 / 16 == sub-code):
+//   while      byte_767460=0x767460  off 16  -> 1
+//   if         byte_767470=0x767470  off 32  -> 2
+//   return     unk_767480 =0x767480  off 48  -> 3
+//   else       unk_767490 =0x767490  off 64  -> 4
+//   #include   unk_7674A0 =0x7674A0  off 80  -> 5
+//   #singlestep unk_7674B0=0x7674B0  off 96  -> 6
+//   #normalstep unk_7674C0=0x7674C0  off 112 -> 7
+//   #multistep  unk_7674D0=0x7674D0  off 128 -> 8
+// (`do` is copied to byte_767450 at offset 0 but NEVER matched, since the scan
+// starts at offset 16.)  The executor's class-10 switch (ExecuteStatement
+// @0x444bd0) dispatches these exact codes: 1->ParseWhileLoop, 2->the if-stmt
+// handler (0x4427b4, IDA-misnamed "ParseForLoop"; it reads byte_767470=="if",
+// expects '(' then '{'), 3->return-expr, 4->DispatchTokenBranch (if/else branch),
+// 5->ParseInclude, 6/7/8-> single/normal/multi step modes (ctx+2564).
+// NOTE: script_vm.h's kKw* names are mislabeled (kKwFor=2 is actually `if`;
+// kKwIf=4 is the branch/`else` code; there is no `for` keyword and `include`
+// is spelled `#include`). We encode the BINARY's spellings + row indices here.
 // ===========================================================================
 const std::vector<KeywordEntry> kKeywordTable = {
-    {"while",   kKwWhile},    // 1
-    {"for",     kKwFor},      // 2
-    {"return",  kKwReturn},   // 3
-    {"if",      kKwIf},       // 4
-    {"include", kKwInclude},  // 5
+    {"while",       1},    // 1
+    {"if",          2},    // 2  (if-statement handler @0x4427b4)
+    {"return",      3},    // 3
+    {"else",        4},    // 4  (branch dispatch @0x442ac8)
+    {"#include",    5},    // 5
+    {"#singlestep", 6},    // 6  ctx+2564 = 1
+    {"#normalstep", 7},    // 7  ctx+2564 = 0
+    {"#multistep",  8},    // 8  ctx+2564 = 2
 };
 
 // gilde.exe 0x441788 — VIBE_Script_ParseTypeKeyword (declaration type words).
@@ -117,6 +156,22 @@ const OperatorEntry* MatchOperatorPublic(const std::string& s, int pos, int& len
     return MatchOperator(s, pos, len);
 }
 
+// gilde.exe NextToken token-terminator test (the v7=5 walk at 0x441a72). An
+// operator string at s[pos] terminates the current token UNLESS it is the '.'
+// row (sub-code 29, table offset 145) AND the preceding char is a digit-class
+// char — exactly the `v7 == 145 && (byte_64A208[(u8)(*(v6-1)+1)] & 0x20)`
+// exception at 0x441a9e, which keeps `3.14` a single numeric lexeme while still
+// splitting `a.b`. Returns the terminating operator (or nullptr) and its length.
+static const OperatorEntry* MatchSeparator(const std::string& s, int pos, int& len) {
+    const OperatorEntry* op = MatchOperator(s, pos, len);
+    if (op && op->subcode == 29 && pos > 0 &&
+        IsDigitClass(static_cast<u8>(s[pos - 1]))) {
+        len = 0;
+        return nullptr;   // '.' after a digit is part of the number, not a break
+    }
+    return op;
+}
+
 // ===========================================================================
 // gilde.exe 0x441974 — VIBE_Script_NextToken
 // ===========================================================================
@@ -138,7 +193,7 @@ ScriptToken_t ScriptLexer::Next() {
     // (NextToken emits operators as their own tokens). String opener -> scan to
     // the closing quote and emit a string literal (class 7).
     int oplen = 0;
-    if (const OperatorEntry* op = MatchOperator(src_, cursor_, oplen)) {
+    if (const OperatorEntry* op = MatchSeparator(src_, cursor_, oplen)) {
         if (op->subcode == 14) {                 // string-literal opener '"'
             int start = cursor_ + 1;
             int end = start;
@@ -163,7 +218,7 @@ ScriptToken_t ScriptLexer::Next() {
         char c = src_[cursor_];
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') break;
         int probe = 0;
-        if (MatchOperator(src_, cursor_, probe)) break;
+        if (MatchSeparator(src_, cursor_, probe)) break;
         ++cursor_;
     }
     std::string lexeme = src_.substr(start, cursor_ - start);
@@ -181,12 +236,20 @@ ScriptToken_t ScriptLexer::Next() {
         }
     }
 
-    // 3. numeric literal (digit-class first char).
+    // 3. numeric literal (digit-class first char).  gilde.exe NextToken (0x441b88):
+    //    the lexeme is a number iff byte_64A208[(u8)(lexeme[0]+1)] & 0x20; it is a
+    //    FLOAT (class 6) iff it contains '.', else an INT (class 5).
     if (IsDigitClass((u8)lexeme[0])) {
         if (lexeme.find('.') != std::string::npos) {
-            tok.cls = kTokRawSym;            // class 6 (float operand)
-            tok.value = (i32)std::strtod(lexeme.c_str(), nullptr);
+            // class 6 (float operand). Original: *((float*)out+1) =
+            // (float)StrToDouble(lexeme) — store the 32-bit float BIT PATTERN in
+            // the value word so float-typed consumers read it back as a float
+            // (0x441bbb/0x441bc0/0x441bcc), not a truncated int.
+            tok.cls = kTokRawSym;            // class 6
+            float f = static_cast<float>(std::strtod(lexeme.c_str(), nullptr));
+            std::memcpy(&tok.value, &f, sizeof(f));
         } else {
+            // class 5: *(out+4) = ParseInt(lexeme) (base-10, 0x441e53/0x441e58).
             tok.cls = kTokIntLit;            // class 5
             tok.value = (i32)std::strtol(lexeme.c_str(), nullptr, 10);
         }
@@ -236,6 +299,14 @@ ScriptToken_t ScriptLexer::Next() {
             }
         }
     }
+
+    // 8. include-ref -> class 11 (kTokLabel).  gilde.exe NextToken @0x441ee5 calls
+    //    VIBE_Script_LookupInclude(ctx, lexeme) here, before falling through to
+    //    class 0.  BOUNDARY: that lookup walks the live context's include-slot
+    //    table (ctx+2492, see LookupInclude @0x4415bc in script_console.cpp); this
+    //    standalone ScriptLexer carries no runtime context, so the class-11 step is
+    //    not reachable here.  It is exercised end-to-end through the executor path
+    //    (script_console.cpp LookupInclude), not the standalone tokenizer.
 
     // 9. unknown symbol — copy the lexeme text out (class 0).
     tok.cls = kTokUnknown;

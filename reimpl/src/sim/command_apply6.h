@@ -32,8 +32,11 @@
 // The -2/-3/-4 "last-created object/scene/trade id" remap tokens
 // (dword_631288/63128C/631290) are the SAME globals batch 1 exposes
 // (g_lastObjectId / g_lastSceneId / g_lastTradeId in command_apply.h); we reuse
-// them. ExSellObjekt also writes g_lastTradeId (dword_631290) on a successful
-// destination materialise, mirroring the original (LABEL_58).
+// them. ExSellObjekt's only g_lastTradeId (dword_631290) store is the original's
+// LABEL_58 latch `dword_631290 = *(v55+2)` (the dest stock NODE id), which lives
+// 1:1 inside the dest storage phase (buildingtype_callers'
+// Sell_EnsureDestStorageNode, installed by WireBuildingCallers); the handler
+// itself never writes it.
 //
 // 0x11/0x12 reuse the deterministic sell/produce cores already ported in
 // trade_sell.{h,cpp} (TradeSellObjektResolve / TradeComputeSellableAmount, which
@@ -127,24 +130,39 @@ void SetSellableResolveHook(SellableResolveFn fn);
 // ---------------------------------------------------------------------------
 // 0x1B relation-matrix state.
 //
-// Two 768x768 signed-byte relation grids (row-major, stride 768):
-//   matrixA == dword_123D6CD : primary attitude grid (rel byte at cell+3,
-//              read as (dword)>>24, signed).
-//   matrixB == byte_1333110  : secondary/mood grid (same geometry).
-// Plus the Person id column (dword_12CE914[134*i]), the alive marker column
-// (word_12CE910[268*i] == -1 free), the cutscene/slot id column
-// (dword_12CEB1C[134*i]) and a per-person scalar reused by case 3
-// (byte_1333110 column walk). These are the game's file globals; the cold IDB
-// shows them zero, so the host/tests seed a RelationState.
+// Two 768x768 signed-byte relation grids (row-major, stride 768 BYTES — the
+// original reads cell (i,j) as the signed high byte of the dword whose low
+// byte sits at base-3 + 768*i + j, i.e. the byte at base + 768*i + j):
+//   matrixA == byte @0x123D6D0 (addressed as dword_123D6CD>>24) : primary
+//              attitude grid. ONE global in the binary — matrixA ALIASES
+//              world::g_relationMatrix (world/relation.h), the same grid the
+//              VIBE_Relation_LookupMatrixEntry reader (0x5942fc) and its setter
+//              address with the identical (768*i + j) arithmetic.
+//   matrixB == byte_1333110 : secondary/mood grid (same geometry; read via
+//              the unk_133310D>>24 alias and a movsx in case 3).
+//
+// The person columns the handler consults are NOT modeled here: in the binary
+// they are the live Person array itself —
+//   id           dword_12CE914[134*i] == g_persons[i].id        (record +4)
+//   alive marker word_12CE910[268*i]  == g_persons[i].marker    (record +0;
+//                                        -1 == free slot)
+//   slot id      dword_12CEB1C[134*i] == dword at record +0x20C (the case-3
+//                                        exclusion key)
+// so ExComputeObjectCoords reads sim::g_persons (sim/entity.h) directly. The
+// create-person apply handlers (batch 5) populate the very same records, which
+// is what lets the new-game opcode-27 packets resolve their targets.
 // ---------------------------------------------------------------------------
 constexpr int kRelPersons   = 768;             // 0x300
 constexpr int kRelCells     = kRelPersons * kRelPersons; // 589824
+// Byte offset of the case-3 exclusion key inside the 536-byte Person record
+// (dword_12CEB1C == word_12CE910 + 0x20C).
+constexpr int kRelPersonSlotIdOff = 0x20C;
 struct RelationState {
-    std::vector<i8>  matrixA; // 768*768 — dword_123D6CD relation byte
+    // 768*768 byte grid @0x123D6D0 (dword_123D6CD>>24) — ALIASES the single
+    // world::g_relationMatrix backing store (bound in the .cpp), exactly as the
+    // binary has one grid shared by the 0x1B handler and the 0x5942fc reader.
+    i8*              matrixA;
     std::vector<i8>  matrixB; // 768*768 — byte_1333110 relation byte
-    std::vector<i32> personId;     // dword_12CE914[134*i]  (768)
-    std::vector<i16> aliveMarker;  // word_12CE910[268*i]   (768; -1 free)
-    std::vector<i32> slotId;       // dword_12CEB1C[134*i]  (768)
     RelationState();
     void Reset();
     i8&  A(int i, int j) { return matrixA[i * kRelPersons + j]; }
@@ -261,11 +279,21 @@ int ExSellObjekt(CommandPacket& pkt, AckEntry* ack);
 int ExComputeSellableAmount(CommandPacket& pkt, AckEntry* ack);
 
 // gilde.exe 0x49818C — opcode 0x1B. Relation-matrix mutation. Decode the two
-// person ids (+16/+20, remap), the mode dword (+28), the delta dword (+24), the
-// float (+32) and the band index (+36); mutate the 768x768 relation grids per
-// the original's mode switch (0/1/2 = pair set/spread, 3 = column scale,
-// 4 = global decay band). ack[0]=1. Returns 0 on apply, 1 if a person id is
-// unknown / dead.
+// person ids (+16/+20, remap, written back), the mode dword (+28), the delta
+// dword (+24), the float (+32) and the band index (+36); resolve the persons in
+// the LIVE g_persons table (first id match wins, then the marker word gates);
+// mutate the 768x768 relation grids per the original's mode switch (0 = pair
+// delta on A, 1 = pair delta on A spread into B, 2 = pair delta on A + B
+// zeroed, 3 = column scale of B by the float with trunc-to-zero rounding
+// (VIBE_Coord_ConvertX, RC=chop), 4 = global decay band over A). Any other
+// mode resolves both persons and acks WITHOUT mutating (the 0x498640
+// `test ebp,ebp; jnz` fall-through). ack[0]=1. Returns 0 on apply, 1 if a
+// referenced person id is unknown / its slot is free.
+//
+// This is the apply side of VIBE_Command_QueueRequestCoord27 @0x494878 — in
+// particular the six mode-0 delta-127 packets the new-game commit
+// (VIBE_Command_EnqueueInheritanceTransfer @0x5336f0, 0x533930..0x5339ae)
+// enqueues between player/father/mother.
 int ExComputeObjectCoords(CommandPacket& pkt, AckEntry* ack);
 
 // gilde.exe 0x498678 — opcode 0x1C. Build the He message-box record from the

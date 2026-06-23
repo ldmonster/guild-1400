@@ -50,11 +50,14 @@ TEST(GuiCreditsRun, ScrollBuildConstants) {
     Menu_RunCreditsScroll(st, &rec, 8);
     Credits_SetRunHooks(prev);
 
-    // Window_Create(100, 0, screenW, 600, 16).
+    // Window_Create(100, 0, screenH, 600, 16).
+    // Disasm 0x56e594/0x56e59f: a3@cx = dword_69FFB8>>16 (screenH), NOT screenW.
+    // (Hex-Rays mislabels the 3rd arg as dword_69FFBC; the asm loads it from
+    //  dword_69FFB8+2.)  a4@bx = 0x258 = 600.
     CHECK_EQ(h.wcX, 100);
     CHECK_EQ(h.wcY, 0);
-    CHECK_EQ(h.wcW, 800);          // screenW
-    CHECK_EQ(h.wcH, 600);          // fixed h arg (kCreditsScrollW)
+    CHECK_EQ(h.wcW, 600);          // screenH (a3@cx)
+    CHECK_EQ(h.wcH, 600);          // fixed h arg (kCreditsScrollW, a4@bx)
     CHECK_EQ(h.wcKind, 16);
     CHECK_EQ(rec.windowId, 7);
     // PositionAtCoord(win, 1).

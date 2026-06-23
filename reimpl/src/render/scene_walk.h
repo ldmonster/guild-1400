@@ -67,6 +67,9 @@ struct SceneNode {
     SceneNode* parent = nullptr;         // +0x1F8 (504)
     SceneNode* firstChild = nullptr;     // +0x1FC (508)  node[127]
     u8   flags528 = 0;                   // +0x210 (528)
+    u8   flags529 = 0;                   // +0x211 (529) bit2(0x4) = active shadow-caster /
+                                         //   light (CreateMesh @0x4029c4 sets it; the shadow
+                                         //   light-list collector PushToDrawList @0x5f43f4 reads it)
     u8   flagNoPivot = 0;                // +0x212 (530) bit7 source byte
     u8   flags531 = 0;                   // +0x213 (531)
     u8   nodeType = 0;                   // +0x215 (533)

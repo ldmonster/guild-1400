@@ -40,6 +40,9 @@ struct MockHost : MessageBoxHost {
     bool        destroyed = false;
     i32         seenPalette = 0;
     unsigned    seenTtl = 0;
+    int         sliderSetCount = 0;
+    int         lastSliderElapsed = -1;
+    int         lastSliderRange = -1;
 
     int  formId = 7;
     int  sliderRet = 99;
@@ -57,7 +60,9 @@ struct MockHost : MessageBoxHost {
     void CenterWindows(int) override { centered = true; }
     void RaiseWindows(int) override { ++raiseCount; }
     int  AddSlider(int, int inset) override { sliderInset = inset; return sliderRet; }
-    void SetSliderValue(int, int, int) override {}
+    void SetSliderValue(int, int elapsed, int range) override {
+        ++sliderSetCount; lastSliderElapsed = elapsed; lastSliderRange = range;
+    }
     void DestroyForm(int) override { destroyed = true; }
 
     bool RunFrame(int, i32 palette, unsigned ttl, FrameInput& in) override {
@@ -116,12 +121,19 @@ TEST(GuiMessageBox, FormSelectionPriority) {
 }
 
 // ---------------------------------------------------------------------------
-// Palette: (snapshot & 0xC7), overridden to 464838 by flag 0x08.
+// Palette: only the LOW BYTE is masked with 0xC7 (and byte ptr [v],0C7h @0x4ad72b);
+// the upper 3 bytes of dword_11BC2D0 are preserved -> effective mask 0xFFFFFFC7.
+// Overridden to 464838 by flag 0x08.
 // ---------------------------------------------------------------------------
 TEST(GuiMessageBox, PaletteClampAndOverride) {
     BuildButtonWindow(1);
-    g_msgPalette = 0xFF;            // 0xFF & 0xC7 == 0xC7
+    g_msgPalette = 0xFF;            // low byte 0xFF & 0xC7 == 0xC7, no high bytes
     { MockHost h; MessageBox_Show(h, 0, 0, 1); CHECK_EQ(h.seenPalette, (guild::i32)0xC7); }
+    // High bytes are PRESERVED: 0x12A3FF -> low byte 0xFF&0xC7=0xC7, keep 0x12A300.
+    BuildButtonWindow(1);
+    g_msgPalette = 0x12A3FF;
+    { MockHost h; MessageBox_Show(h, 0, 0, 1);
+      CHECK_EQ(h.seenPalette, (guild::i32)0x12A3C7); }
     BuildButtonWindow(1);
     g_msgPalette = 0xFF;
     { MockHost h; MessageBox_Show(h, kMsgFlagPalette8, 0, 1);
@@ -214,6 +226,23 @@ TEST(GuiMessageBox, SliderInsetByVariant) {
     BuildButtonWindow(1);
     { MockHost h; MessageBox_ShowModeless(h, (char)0x80, 0, 1); // signed char < 0
       CHECK_EQ(h.sliderInset, kMsgSliderInsetYModeless); }      // 32
+}
+
+// ---------------------------------------------------------------------------
+// 1:1 close semantics: the original sets dword_631614 inside the frame body but does
+// NOT break — it runs the rest of the body (incl. the slider update) and only ends when
+// RunFrameLoop re-reads the flag at the next iteration's top.  So with the slider flag
+// (0x80) active, SetSliderValue must still fire on the OK/close frame.
+// ---------------------------------------------------------------------------
+TEST(GuiMessageBox, SliderUpdatesOnClosingFrame) {
+    int slot = BuildButtonWindow(2);
+    MockHost h;
+    MessageBoxHost::FrameInput f{};
+    f.clickedId = kIdOk; f.clickedWindow = slot; f.tick = 123;
+    h.frames.push_back(f);                       // single frame: OK + slider update
+    MessageBox_Show(h, (guild::i16)0x8000, 0, 1); // sign bit -> slider active
+    CHECK_EQ(h.sliderSetCount, 1);               // slider updated on the closing frame
+    CHECK_EQ(h.lastSliderRange, kMsgSliderRange); // 500
 }
 
 // ---------------------------------------------------------------------------

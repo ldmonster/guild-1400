@@ -259,7 +259,10 @@ inline constexpr u8  kTortureCostTable[kTortureCostCount] =
 inline constexpr int kTortureCase2Header = 4352;       // folterwahl header
 inline constexpr int kTortureCase2Button = 4353;       // per-instrument button text
 inline constexpr int kTortureCase2Divisor= 2000;       // (wealthA+wealthB)/2000 tier
-inline constexpr int kTortureCase2RandTop= 3;          // RandInt(3) preselect among first 3
+inline constexpr int kTortureCase2RandTop= 3;          // RandInt(3) preselect among the 3
+// gilde.exe 0x4a410a: the case-2 button-build loop runs 3 times (ecx 0,4,8; cmp 0Ch),
+// so only 3 of the 7 shuffled instruments get buttons (stored at v74[0..2]).
+inline constexpr int kTortureCase2Buttons = 3;
 inline constexpr int kTortureCase5Prompt = 4439;       // tier-choice prompt
 inline constexpr int kTortureCase5Button = 4440;       // tier button text base
 inline constexpr int kTortureCase5TierBase = 4441;     // v82 text base for tiers

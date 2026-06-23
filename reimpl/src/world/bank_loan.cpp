@@ -23,13 +23,20 @@ float LoanRelationFactor(LoanRelationTier tier) {
     }
 }
 
-// gilde.exe 0x591990: cap = wealth*0.2; if (cap >= 64000.0f) cap = 64000.0f.
+// gilde.exe 0x591990 (asm @591ad8..591b8d): the debt-coverage credit-payout clamp.
+//   v47 = (float)((double)wealth * 0.2);   // fstp [var_34] -- stored as 32-bit float
+//   if (v47 >= 64000.0f) v46 = 64000.0f;   // fcomp flt_626A24 (float compare)
+//   else                 v46 = v47;        // var_38 = float bits of var_34
+//   ... v43 = (i64)v46;                    // ConvertX -> fistp [var_54], trunc(v46)
+// var_34/var_38 are 4-byte (var_34 typed `float` in the stack frame), so the
+// wealth*0.2 product and the 64000 clamp are evaluated in SINGLE precision before
+// the truncation -- not double. Reproduce the float intermediate exactly.
 i32 LoanGrantCapacity(i32 lenderWealth) {
-    double cap = static_cast<double>(lenderWealth) * loan::kWealthCapFactor;
-    if (cap >= static_cast<double>(loan::kWealthCapCeil))
-        cap = static_cast<double>(loan::kWealthCapCeil);
-    // The original truncates via VIBE_Coord_ConvertX before use.
-    return Trunc(cap);
+    float cap = static_cast<float>(static_cast<double>(lenderWealth) * loan::kWealthCapFactor);
+    if (cap >= loan::kWealthCapCeil)  // flt_626A24 == 64000.0f (single-precision compare)
+        cap = loan::kWealthCapCeil;
+    // The original truncates v46 via VIBE_Coord_ConvertX (round-toward-zero) before use.
+    return Trunc(static_cast<double>(cap));
 }
 
 // gilde.exe 0x591990: v41 = wealth*v48; v40 = prevBase*0.5;

@@ -96,15 +96,20 @@ TEST(GuiDialogs4E2E, HoverUpdateTracksAndScrolls) {
     ResetGuiDialogs4();
     SetGuiDialogs4Hooks(nullptr); // inert defaults
 
-    // No hover candidate, no hit-test slot -> returns -1 and leaves hoverSlot reset.
+    // GOLDEN CORRECTED to the binary (0x41fd48): HoverUpdate does NOT return the
+    // hit-test slot.  Its return is State_Finalize(dword_62D248) when that deferred
+    // id is set, otherwise the wheel-scroll result pointer (null -> 0).  With no
+    // deferred finalize, no hover-scroll window and no wheel window, the result is 0
+    // regardless of g_hitTestSlot4.  (The prior golden encoded the under-modeled
+    // "return g_hitTestSlot4" behavior the harden sweep flagged as DIVERGENT.)
     g_hitTestSlot4 = -1;
     int r = Widget_HoverUpdate();
-    CHECK_EQ(r, -1);
+    CHECK_EQ(r, 0);
     CHECK_EQ(g_hoverSlot, -1);
 
-    // With a hit-test slot present, HoverUpdate forwards it as the result.
+    // hit-test slot is irrelevant to the return value.
     ResetGuiDialogs4();
     g_hitTestSlot4 = 21;
     int r2 = Widget_HoverUpdate();
-    CHECK_EQ(r2, 21);
+    CHECK_EQ(r2, 0);
 }

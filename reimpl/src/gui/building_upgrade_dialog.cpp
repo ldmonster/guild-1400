@@ -117,9 +117,12 @@ ExpandRoomLayout BuildingUpgradeDialog_BuildExpandRoom(const RoomSlotInput* room
         slot.inProgress = r.inProgress;
         slot.occupied = r.occupied;
         if (r.inProgress && r.totalMinutes != 0) {
-            // widget+480 = elapsed / total (bar pixel draw deferred to the renderer).
-            slot.progress = static_cast<float>(r.elapsedMinutes) /
-                            static_cast<float>(r.totalMinutes);
+            // widget+480 = (double)elapsed / (float)total  (gilde.exe 0x54b3c1:
+            //   v71 = (float)DiffMinutes(start,end); v70 = (double)DiffMinutes(start,now) / v71).
+            // The bar pixel draw is deferred to the renderer.
+            const float total = static_cast<float>(r.totalMinutes);
+            slot.progress = static_cast<float>(
+                static_cast<double>(r.elapsedMinutes) / static_cast<double>(total));
         } else {
             slot.progress = 0.0f;
         }

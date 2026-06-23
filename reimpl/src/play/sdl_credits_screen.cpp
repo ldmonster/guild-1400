@@ -58,6 +58,23 @@ void DrawLabel(render::Surface& s, int x, int y, const char* text,
                      GlyphMap(), pg, s.fmt);
 }
 
+// Draw a crawl line, truncated so the unclipped 5x7 glyph raster
+// (render::DrawGlyph advances 6px/char, writes 5 cols/glyph) never writes outside
+// [0,W). The original surface lock clipped per-pixel at the credits window edge;
+// glyphs that fall off the surface were never correctly visible, so dropping them
+// preserves observable output while keeping every write in-bounds. Width safety
+// only — y is bounded by the caller's full-glyph-band guard.
+void DrawCrawlLine(render::Surface& s, int x, int y, const std::string& text, int W,
+                   std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+    if (text.empty() || x < 0 || y < 0) return;
+    // Max glyphs whose last column stays in [0,W): x + 6*(n-1) + 5 <= W.
+    std::size_t maxGlyphs = 0;
+    if (W - x >= 5) maxGlyphs = (std::size_t)((W - x - 5) / 6) + 1;
+    if (maxGlyphs == 0) return;
+    std::string shown = text.size() > maxGlyphs ? text.substr(0, maxGlyphs) : text;
+    DrawLabel(s, x, y, shown.c_str(), r, g, b);
+}
+
 // Draw the decoded background into the 32bpp scratch (nearest-neighbour scale);
 // copied from sdl_menu.cpp's DrawBackground.
 void DrawBackground(std::uint32_t* dst, int W, int H,
@@ -201,10 +218,18 @@ CreditsScreenResult RunCreditsScreen(shim::IGraphicsDevice& device,
         // window) and increasing toward 0; the content is drawn at (top - offset), so
         // the first line begins at +screenH (bottom) and rises as offset grows.
         const int baseX = kCreditsScrollX < W ? kCreditsScrollX : 0;
+        // The 5x7 glyph raster (render::DrawGlyph) writes 7 rows starting at `ly`
+        // WITHOUT clipping (faithful to VIBE_Render_DrawGlyph, which relied on the
+        // window/surface to bound it). The crawl offset makes `ly` sweep through
+        // negative values (text rising from below) and toward the top; only draw a
+        // line when its full 7-row glyph band lies inside [0,H) so the unclipped
+        // raster never writes outside the W*H scratch (the original surface lock
+        // would have rejected those pixels — they were never correctly visible).
+        constexpr int kGlyphH = 7;   // render::DrawGlyph row span
         for (int i = 0; i < (int)lines.size(); ++i) {
             const int ly = kCreditsScrollY - offset + i * lineH;
-            if (ly < -lineH || ly >= H) continue;     // off-window: skip
-            DrawLabel(tgt.surf, baseX + 8, ly, lines[i].c_str(), 255, 235, 200);
+            if (ly < 0 || ly + kGlyphH > H) continue; // off-window / would clip: skip
+            DrawCrawlLine(tgt.surf, baseX + 8, ly, lines[i], W, 255, 235, 200);
         }
 
         BlitToDevice(scratch.data(), W, H, device);

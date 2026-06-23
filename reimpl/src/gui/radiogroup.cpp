@@ -17,8 +17,14 @@ char Object_SetButtonValue(int widgetIdx, int on) {
     if (widgetIdx == -1 || widgetIdx > 512)
         return static_cast<char>(on);
     Widget& w = g_widgets[widgetIdx]; // 740*a1 + dword_69FFB4
-    // The full original first handles type 'A' (anim) and 'E' (edit); for a button
-    // (neither anim-sub-flag nor edit) it falls to the btnFlag branch below.
+    // The full original (0x41dfec) first handles type 'A' (anim, +24==0x41) and type 'E'
+    // (edit, +24==0x45) — both DEFERRED to the object module's Object_SetObjectValueOrText.
+    // The btnFlag branch below (loc_41E19E) is reached only when the type is NEITHER 'A'
+    // (the anim test/jnz at 0x41e02f) NOR 'E' (the edit test/jnz at 0x41e04a). Radio-group
+    // buttons are always type 'F' so this guard is a no-op for the group paths, but it keeps
+    // this helper 1:1 with the original's button-branch entry condition for any widget input.
+    if (w.type() == kTypeAnim || w.type() == kTypeEdit)
+        return static_cast<char>(on); // 'A'/'E' handled elsewhere; button branch not taken
     if (w.btnFlagA() || w.btnFlagB()) {
         unsigned char v = static_cast<unsigned char>(on);
         w.value()       = v; // +36

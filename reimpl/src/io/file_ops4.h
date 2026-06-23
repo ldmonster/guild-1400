@@ -121,6 +121,11 @@ struct FileOps4Hooks {
     unsigned (*lastError)() = nullptr;
     // GetFileType(osHandle) -> FILE_TYPE_* (dword_14676F0 in OpenWithMode). Def 0.
     int (*fileType)(int osHandle) = nullptr;
+    // dword_64AA50 — optional device-type override probe consulted by
+    // VIBE_File_DetectDeviceType BEFORE GetFileType: if installed and it returns
+    // nonzero for `fd`, the handle is treated as a char device without calling
+    // GetFileType. Null in a clean runtime (the global default). Default: null.
+    int (*deviceTypeOverride)(int fd) = nullptr;
 
     // VIBE_File_FindFirstEntry: open a find for `pattern`, returning an opaque
     // handle (nullptr => not found) and the first matching entry. Default: none.

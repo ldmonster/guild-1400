@@ -11,7 +11,13 @@
 #include "world/office.h"
 #include "world/privilege.h"
 #include "world/relation.h"
+#include "world/gesetz_flow.h"   // GesetzLoadState/SaveState hardening tests
+#include "world/law_text.h"      // 51-entry law-type table boundary tests
+#include "sim/command_recon4_senders.h" // kLawActionTable cross-check (0x4C1810)
 #include "crt/rand.h"
+
+#include <cstring>
+#include <vector>
 
 using namespace guild;
 using namespace guild::world;
@@ -80,10 +86,12 @@ TEST(WorldLaw, ViolationOperatorMatch) {
     CHECK_EQ(pc.extra, 7);
     CHECK_EQ(GesetzEvaluateViolation(0, 3, 11, 22, 0, &pc), (int)kViolationNoMatch);
 
-    // Law 13: op==Greater, threshold 16. value 20 (>16) -> satisfied (no match);
-    // value 10 (<=16) -> violation.
-    CHECK_EQ(GesetzEvaluateViolation(13, 20, 0, 0, 0, &pc), (int)kViolationNoMatch);
-    CHECK_EQ(GesetzEvaluateViolation(13, 10, 0, 0, 0, &pc), (int)kViolationQueued);
+    // Law 13: op==5 (Greater), threshold 16. gilde.exe 0x4c2d24: case 5 is
+    // `cmp value,threshold; jle def` -> value > threshold takes the roll
+    // (violation), value <= threshold is no-match. So value 20 (>16) -> violation
+    // (queued); value 10 (<=16) -> no match.
+    CHECK_EQ(GesetzEvaluateViolation(13, 20, 0, 0, 0, &pc), (int)kViolationQueued);
+    CHECK_EQ(GesetzEvaluateViolation(13, 10, 0, 0, 0, &pc), (int)kViolationNoMatch);
 
     // Law 2: op==Special (7): caught unless value==threshold(0) || threshold==2.
     // threshold is 0 here, so value 0 -> satisfied, value 5 -> violation.
@@ -203,6 +211,38 @@ TEST(WorldCrime, ResolveAndClear) {
 
     // Unknown id -> 3.
     CHECK_EQ(StraftatResolveAndClear(424242, 0), 3);
+}
+
+// WAVE-16: the cleared path calls VIBE_City_RemoveCrimeFromGrid(target@+33,
+// location@+28) once, unconditionally, before removing evidence (0x4c3628).
+namespace {
+struct RemoveGridCapture { int calls = 0; guild::i32 target = 0; guild::u8 loc = 0; };
+RemoveGridCapture g_grid;
+void GridCb(guild::i32 t, guild::u8 l) { ++g_grid.calls; g_grid.target = t; g_grid.loc = l; }
+} // namespace
+TEST(WorldCrime, ResolveAndClearFiresRemoveGridOnce) {
+    CrimeAndEvidenceReset();
+    g_grid = RemoveGridCapture{};
+    StraftatSetResolveRemoveGridFn(&GridCb);
+
+    g_crimeTable[0].id = 2002;
+    g_crimeTable[0].perpetrator = 50;
+    g_crimeTable[0].wanted = 0;
+    g_crimeTable[0].provenState = 1;   // proven -> cleared
+    g_crimeTable[0].target = 0x1234;   // +33
+    g_crimeTable[0].location = 9;       // +28
+
+    CHECK_EQ(StraftatResolveAndClear(2002, 0), 0);  // cleared
+    CHECK_EQ(g_grid.calls, 1);
+    CHECK_EQ(g_grid.target, 0x1234);
+    CHECK_EQ((int)g_grid.loc, 9);
+
+    // Non-cleared path (id not found) must NOT fire the grid hook.
+    g_grid = RemoveGridCapture{};
+    CHECK_EQ(StraftatResolveAndClear(999999, 0), 3);
+    CHECK_EQ(g_grid.calls, 0);
+
+    StraftatSetResolveRemoveGridFn(nullptr);  // restore default no-op
 }
 
 // ---------------------------------------------------------------------------
@@ -363,4 +403,375 @@ TEST(WorldRelation, GetSetSelfAsymmetric) {
     CHECK_EQ(RelationGet(5, 6), 127);
     RelationSet(5, 7, -128);
     CHECK_EQ(RelationGet(5, 7), -128);
+}
+
+// ===========================================================================
+// HARDENING (wave-12): boundary + malformed-input tests for the law/crime
+// cluster. These pin the OOB/UB fixes and the existing in-range guards. They
+// run clean under -fsanitize=address,undefined.
+// ===========================================================================
+
+// --- law table (26-entry) index boundary -----------------------------------
+TEST(LawHarden, GesetzGetRecordOutOfRange) {
+    LawTableResetDefaults();
+    LawRecord r;
+    CHECK_EQ(GesetzGetRecord(25, &r), 1);   // last valid id
+    CHECK_EQ(GesetzGetRecord(26, &r), 0);   // first past kLawCount
+    CHECK_EQ(GesetzGetRecord(255, &r), 0);  // u8 max
+}
+
+TEST(LawHarden, EvaluateViolationBadId) {
+    LawTableResetDefaults();
+    PendingCrime out{};
+    CHECK_EQ(GesetzEvaluateViolation(26, 0, 0, 0, 0, &out), kViolationBadId);
+    CHECK_EQ(GesetzEvaluateViolation(255, 0, 0, 0, 0, nullptr), kViolationBadId);
+}
+
+// --- 51-entry law-TYPE descriptor table (dword_4C1810) boundary ------------
+TEST(LawHarden, LawTypeTableIndexBoundary) {
+    // kLawTypeCount == 51 (0x33). Every accessor gates on `< 0x33u`.
+    CHECK_EQ(LawGetRecordIndex(50), 50);     // last valid law-type
+    CHECK_EQ(LawGetRecordIndex(51), -1);     // first out of range
+    CHECK_EQ(LawGetRecordIndex(0xFFFF), -1);
+
+    CHECK_EQ(LawGetTextIdForType(51), 6662);     // fallback id
+    CHECK_EQ(LawGetTextIdForType(0xFFFF), 6662);
+
+    // Variant text id: out-of-range type returns the fallback unchanged.
+    CHECK_EQ(LawGetVariantTextId(51, 3, -7), -7);
+    CHECK_EQ(LawGetVariantTextId(0xFFFF, 0, 123), 123);
+    // In-range, variant clamps to [0,9]; flag drives +6662 / +6672 base. type 0
+    // has variant flag 1 (kLawTypeVariantFlag[0]==1) -> +6672 base.
+    CHECK_EQ(LawGetVariantTextId(0, 100, 0), 9 + 6672); // variant clamped to 9
+    CHECK_EQ(LawGetVariantTextId(0, 0, 0), 0 + 6672);
+    // type 1 has flag 0 -> +6662 base.
+    CHECK_EQ(LawGetVariantTextId(1, 2, 0), 2 + 6662);
+}
+
+TEST(LawHarden, PenaltyTextBadId) {
+    LawTableResetDefaults();
+    char buf[64] = {0};
+    PenaltyText p = GesetzBuildPenaltyText(buf, 26, 0);  // lawId >= 26
+    CHECK_EQ(p.valid, false);
+    p = GesetzBuildPenaltyText(buf, 255, 0);
+    CHECK_EQ(p.valid, false);
+}
+
+// --- crime / straftat record boundaries ------------------------------------
+TEST(LawHarden, StraftatSetRecordStateIndexBound) {
+    CrimeAndEvidenceReset();
+    CHECK_EQ(StraftatSetRecordState(2, kCrimeCount), -2);       // index == 512
+    CHECK_EQ(StraftatSetRecordState(2, 0xFFFFFFFFu), -2);       // huge index
+    CHECK_EQ(StraftatSetRecordState(1, 0), -3);                 // state < 2
+    CHECK_EQ(StraftatSetRecordState(2, kCrimeCount - 1), kCrimeCount - 1); // last
+}
+
+// BeweisCollectByOwner with a degenerate (zero / too-small) output buffer must
+// not overrun — the do/while previously wrote out[0] before the bound check.
+TEST(LawHarden, BeweisCollectZeroCapNoOverflow) {
+    CrimeAndEvidenceReset();
+    g_crimeTable[0].provenState = 7;
+    g_crimeTable[1].provenState = 7;
+    i32 dummy = -1;
+    // outCapacity 0: nothing may be written, count stays 0.
+    CHECK_EQ(BeweisCollectByOwner(7, &dummy, 0), 0);
+    CHECK_EQ(dummy, -1);                         // untouched
+    // outCapacity 1: at most one entry written.
+    i32 one[1] = {-1};
+    CHECK_EQ(BeweisCollectByOwner(7, one, 1), 1);
+    CHECK_EQ(one[0], 0);
+    // Valid (large) capacity collects both matches as before.
+    i32 big[32];
+    CHECK_EQ(BeweisCollectByOwner(7, big, 32), 2);
+    CHECK_EQ(big[0], 0);
+    CHECK_EQ(big[1], 1);
+}
+
+// --- Gesetz save/load malformed-blob hardening -----------------------------
+namespace {
+// Build a load header: lawCount, 26 thresholds, marker, crimeCount, evidenceCount.
+std::vector<guild::u8> GesetzLoadHeader(i32 lawCount, i32 crimeCount,
+                                        i32 evidenceCount) {
+    std::vector<guild::u8> b;
+    auto put = [&](const void* s, std::size_t n) {
+        const guild::u8* p = static_cast<const guild::u8*>(s);
+        for (std::size_t i = 0; i < n; ++i) b.push_back(p[i]);
+    };
+    put(&lawCount, 4);
+    for (int i = 0; i < 26; ++i) { i32 t = 0; put(&t, 4); }
+    i32 marker = 0; put(&marker, 4);
+    put(&crimeCount, 4);
+    put(&evidenceCount, 4);
+    return b;
+}
+} // namespace
+
+TEST(LawHarden, GesetzLoadRejectsOversizeCrimeCount) {
+    LawTableResetDefaults();
+    CrimeAndEvidenceReset();
+    auto b = GesetzLoadHeader(26, /*crimeCount*/ kCrimeCount + 88, /*ev*/ 0);
+    for (int i = 0; i < kCrimeCount + 88; ++i) { guild::u8 r[45] = {0}; b.insert(b.end(), r, r + 45); }
+    GesetzStream s{b.data(), b.size(), 0};
+    // Previously a global-buffer-overflow into g_crimeTable[512]; now rejected.
+    CHECK_EQ(GesetzLoadState(s, 0x10041u), 0);
+}
+
+TEST(LawHarden, GesetzLoadRejectsNegativeCounts) {
+    LawTableResetDefaults();
+    CrimeAndEvidenceReset();
+    {
+        auto b = GesetzLoadHeader(26, -1, 0);
+        GesetzStream s{b.data(), b.size(), 0};
+        CHECK_EQ(GesetzLoadState(s, 0x10041u), 0);
+    }
+    {
+        auto b = GesetzLoadHeader(26, 0, -7);
+        GesetzStream s{b.data(), b.size(), 0};
+        CHECK_EQ(GesetzLoadState(s, 0x10041u), 0);
+    }
+}
+
+TEST(LawHarden, GesetzLoadRejectsOversizeEvidenceCount) {
+    LawTableResetDefaults();
+    CrimeAndEvidenceReset();
+    auto b = GesetzLoadHeader(26, 0, /*evidence*/ kEvidenceCapacity + 100);
+    for (int i = 0; i < kEvidenceCapacity + 100; ++i) {
+        i32 pair[2] = {0, 0};
+        b.insert(b.end(), reinterpret_cast<guild::u8*>(pair),
+                 reinterpret_cast<guild::u8*>(pair) + 8);
+    }
+    GesetzStream s{b.data(), b.size(), 0};
+    // Previously a global-buffer-overflow into g_evidence*[4096]; now rejected.
+    CHECK_EQ(GesetzLoadState(s, 0x10041u), 0);
+}
+
+TEST(LawHarden, GesetzLoadRejectsTruncatedAndBadHeader) {
+    LawTableResetDefaults();
+    CrimeAndEvidenceReset();
+    // Truncated header (only 3 bytes).
+    {
+        guild::u8 b[3] = {26, 0, 0};
+        GesetzStream s{b, sizeof(b), 0};
+        CHECK_EQ(GesetzLoadState(s, 0x10041u), 0);
+    }
+    // Wrong lawCount.
+    {
+        auto b = GesetzLoadHeader(99, 0, 0);
+        GesetzStream s{b.data(), b.size(), 0};
+        CHECK_EQ(GesetzLoadState(s, 0x10041u), 0);
+    }
+    // Null stream.
+    {
+        GesetzStream s{nullptr, 0, 0};
+        CHECK_EQ(GesetzLoadState(s, 0x10041u), 0);
+    }
+}
+
+// At-capacity counts (the boundary) still load successfully — the fix only
+// rejects counts strictly PAST capacity, preserving the valid envelope. We build
+// the at-capacity blob with SaveState (so the on-disk record stride matches the
+// reader exactly) by marking every crime / evidence slot active, then load it
+// back into a scrubbed table.
+TEST(LawHarden, GesetzLoadAcceptsExactCapacityCounts) {
+    LawTableResetDefaults();
+    CrimeAndEvidenceReset();
+    // Fill every crime slot (active == id != -1) and every evidence pair so the
+    // save emits exactly kCrimeCount crimes + kEvidenceCapacity pairs.
+    for (int i = 0; i < kCrimeCount; ++i) {
+        g_crimeTable[i].id          = i + 1;
+        g_crimeTable[i].perpetrator = i;
+        g_crimeTable[i].provenState = 1;
+    }
+    for (int i = 0; i < kEvidenceCapacity; ++i) {
+        g_evidenceOwner[2 * i]   = i + 1;
+        g_evidenceCrimeId[2 * i] = i + 1;
+    }
+
+    std::vector<guild::u8> buf(1u << 20, 0);  // 1 MiB scratch
+    GesetzStream ws{buf.data(), buf.size(), 0};
+    CHECK_EQ(GesetzSaveState(ws), 1);
+    const std::size_t written = ws.pos;
+
+    // Scrub the tables, then load the at-capacity blob back.
+    CrimeAndEvidenceReset();
+    GesetzStream rs{buf.data(), written, 0};
+    CHECK_EQ(GesetzLoadState(rs, 0x10041u), 1);   // exact capacity accepted
+    CHECK_EQ(g_crimeTable[kCrimeCount - 1].id, kCrimeCount);
+    CHECK_EQ(g_evidenceOwner[2 * (kEvidenceCapacity - 1)], kEvidenceCapacity);
+}
+
+// WAVE-16: the LoadState clear loop (0x4c2af4) sets, per uncleared record:
+//   id(+0)=-1, +18 dword=-1, perpetrator(+22)=-1, provenState(+37)=0,
+//   wanted(+26 u16)=0  — NOTE it clears +18, NOT target(+33). This pins the
+//   corrected field set against the binary.
+TEST(LawHarden, GesetzLoadClearLoopMatchesBinaryFields) {
+    LawTableResetDefaults();
+    CrimeAndEvidenceReset();
+    // Poison record 5 so we can see exactly which fields the clear loop touches.
+    {
+        guild::u8* p = reinterpret_cast<guild::u8*>(&g_crimeTable[5]);
+        for (int i = 0; i < kCrimeStride; ++i) p[i] = 0x7E;
+    }
+    // Load a header declaring just 1 crime + 0 evidence; records 1..511 are cleared.
+    auto b = GesetzLoadHeader(26, /*crimeCount*/ 1, /*evidence*/ 0);
+    // Append exactly one crime record (all zero) for the single declared crime.
+    for (int i = 0; i < kCrimeStride; ++i) b.push_back(0);
+    GesetzStream s{b.data(), b.size(), 0};
+    CHECK_EQ(GesetzLoadState(s, 0x10041u), 1);
+
+    const guild::u8* p = reinterpret_cast<const guild::u8*>(&g_crimeTable[5]);
+    i32 id, f18, perp, st; guild::u16 wanted, f33lo;
+    std::memcpy(&id, p + 0, 4);
+    std::memcpy(&f18, p + 18, 4);
+    std::memcpy(&perp, p + 22, 4);
+    std::memcpy(&wanted, p + 26, 2);
+    std::memcpy(&st, p + 37, 4);
+    std::memcpy(&f33lo, p + 33, 2);
+    CHECK_EQ(id, -1);          // +0
+    CHECK_EQ(f18, -1);         // +18 (binary clears this, not +33)
+    CHECK_EQ(perp, -1);        // +22
+    CHECK_EQ((int)wanted, 0);  // +26
+    CHECK_EQ(st, 0);           // +37
+    // +33 (target) is NOT cleared by the loop: the poison 0x7E bytes remain.
+    CHECK_EQ((int)f33lo, 0x7E7E);
+}
+
+// ===========================================================================
+// Wave-14 1:1 value pins (W14-LAW). These lock the recovered table BYTES and
+// the field decode for the WHOLE 26-entry law table, not just the spot-checks
+// above. Every byte traces to kLawTableDefault in src/world/law.cpp (recovered
+// via get_bytes from unk_631E98 @0x631E98); no value is invented.
+// ===========================================================================
+
+// The exact in-memory contents of g_lawTable after LawTableResetDefaults().
+// This is the 26 x 36-byte image as the engine sees it: the C aggregate
+// initializer in law.cpp zero-fills any short record to the 36-byte stride
+// (see the record-1 drift pin below). Generated from law.cpp, byte-for-byte.
+static const guild::u8 kLawTableGolden[kLawCount][kLawStride] = {
+    {0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x18,0x01,0x00,0x00,0x60,0x46,0x46,0x00},
+    {0x01,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x02,0x00,0x00,0xf8,0x47,0x46,0x00},
+    {0x02,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1a,0x01,0x00,0x00,0x30,0x4a,0x46,0x00},
+    {0x03,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x12,0x01,0x00,0x00,0xd4,0x4a,0x46,0x00},
+    {0x04,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x16,0x01,0x00,0x00,0x00,0x4c,0x46,0x00},
+    {0x05,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x0e,0x01,0x00,0x00,0x0c,0x4d,0x46,0x00},
+    {0x06,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x0a,0x01,0x00,0x00,0x84,0x4d,0x46,0x00},
+    {0x07,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x0b,0x01,0x00,0x00,0xdc,0x4d,0x46,0x00},
+    {0x08,0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x0f,0x01,0x00,0x00,0x4c,0x4e,0x46,0x00},
+    {0x09,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x0f,0x02,0x00,0x00,0x5c,0x50,0x46,0x00},
+    {0x0a,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x15,0x01,0x00,0x00,0xa8,0x52,0x46,0x00},
+    {0x0b,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x0b,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x0c,0x01,0x00,0x00,0xc0,0x53,0x46,0x00},
+    {0x0c,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x19,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x0e,0x02,0x00,0x00,0xa4,0x54,0x46,0x00},
+    {0x0d,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x19,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x10,0x01,0x00,0x00,0x88,0x55,0x46,0x00},
+    {0x0e,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x19,0x01,0x00,0x00,0x6c,0x56,0x46,0x00},
+    {0x0f,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0d,0x01,0x00,0x00,0xb0,0x57,0x46,0x00},
+    {0x10,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x19,0x02,0x00,0x00,0xf8,0x58,0x46,0x00},
+    {0x11,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x12,0x01,0x00,0x00,0xe0,0x59,0x46,0x00},
+    {0x12,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x13,0x01,0x00,0x00,0xc8,0x5a,0x46,0x00},
+    {0x13,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x13,0x02,0x00,0x00,0xc0,0x5b,0x46,0x00},
+    {0x14,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x11,0x01,0x00,0x00,0xcc,0x5c,0x46,0x00},
+    {0x15,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x14,0x01,0x00,0x00,0xd8,0x5d,0x46,0x00},
+    {0x16,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x17,0x01,0x00,0x00,0xfc,0x5e,0x46,0x00},
+    {0x17,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x16,0x02,0x00,0x00,0x20,0x60,0x46,0x00},
+    {0x18,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x17,0x02,0x00,0x00,0x38,0x61,0x46,0x00},
+    {0x19,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x14,0x02,0x00,0x00,0x5c,0x62,0x46,0x00},
+};
+
+// Pin every byte of every record via the public accessor GesetzGetRecord.
+TEST(WorldLawW14, FullLawTableByteExact) {
+    LawTableResetDefaults();
+    for (int id = 0; id < kLawCount; ++id) {
+        LawRecord r;
+        std::memset(&r, 0xAB, sizeof(r));
+        CHECK_EQ(GesetzGetRecord(static_cast<guild::u8>(id), &r), 1);
+        const guild::u8* got = reinterpret_cast<const guild::u8*>(&r);
+        for (int b = 0; b < kLawStride; ++b)
+            CHECK_EQ((int)got[b], (int)kLawTableGolden[id][b]);
+    }
+}
+
+// Pin the decoded (id, penalty, op, threshold) for ALL 26 records — these are
+// the only fields the evaluator/penalty maths touch. Values decoded from
+// kLawTableGolden (penalty=i16@+16, op=u8@+20, threshold=i32@+24).
+TEST(WorldLawW14, AllRecordFieldDecode) {
+    LawTableResetDefaults();
+    // {id, penalty, op, threshold} from the recovered bytes.
+    struct Exp { int penalty; int op; int threshold; };
+    static const Exp exp[kLawCount] = {
+        {  0, 1,    2}, // id 0
+        {  0, 0,    0}, // id 1  (WAVE-16: corrected to the binary's 36-byte record)
+        {  6, 7,    0}, // id 2
+        {  6, 1,    0}, // id 3
+        { 10, 1,    0}, // id 4
+        {  0, 0,    2}, // id 5
+        {  0, 0,    2}, // id 6
+        {  0, 0,    2}, // id 7
+        {  0, 0,   10}, // id 8
+        {  0, 0,   10}, // id 9
+        {  0, 0,    8}, // id 10
+        {  0, 0,    8}, // id 11
+        {  0, 0,   16}, // id 12
+        { 10, 5,   16}, // id 13
+        {  0, 0,    2}, // id 14
+        { 12, 1,    0}, // id 15
+        { 12, 1,    0}, // id 16
+        { 12, 1,    0}, // id 17
+        { 12, 1,    0}, // id 18
+        { 12, 1,    0}, // id 19
+        { 12, 1,    1}, // id 20
+        { 12, 1,    1}, // id 21
+        { 12, 1,    1}, // id 22
+        { 12, 1,    1}, // id 23
+        { 12, 1,    1}, // id 24
+        { 12, 1,    1}, // id 25
+    };
+    for (int id = 0; id < kLawCount; ++id) {
+        LawRecord r;
+        CHECK_EQ(GesetzGetRecord(static_cast<guild::u8>(id), &r), 1);
+        CHECK_EQ((int)r.id, id);
+        CHECK_EQ((int)r.penalty, exp[id].penalty);
+        CHECK_EQ((int)r.op, exp[id].op);
+        CHECK_EQ((int)r.threshold, exp[id].threshold);
+    }
+}
+
+// WAVE-16 FIX (was Record1IsShortAndZeroPaddedDrift): the wave-14 pass flagged
+// law record id=1 as initialized with only 32 bytes in src/world/law.cpp, so the
+// aggregate zero-fill shifted its trailing string pointer to +28 and corrupted
+// the op/threshold decode. With live MCP we read get_bytes(0x631E98, 936) and
+// confirmed record 1 IS a full 36-byte record:
+//   01 02 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+//   00 00 00 00 18 02 00 00 f8 47 46 00
+// The 4 missing zero bytes (at +24..27) were restored in law.cpp. This test now
+// pins that record 1 carries its 0x004647f8 string pointer at +32..35 like every
+// other record (no drift), and that the load-bearing fields decode to 0.
+TEST(WorldLawW14, Record1Is36ByteCorrect) {
+    LawTableResetDefaults();
+    LawRecord r0, r1;
+    CHECK_EQ(GesetzGetRecord(0, &r0), 1);
+    CHECK_EQ(GesetzGetRecord(1, &r1), 1);
+    const guild::u8* p0 = reinterpret_cast<const guild::u8*>(&r0);
+    CHECK_EQ((int)p0[34], 0x46);   // record 0 ptr high bytes intact at +32..35
+    CHECK_EQ((int)p0[35], 0x00);
+    // Record 1 now has its string pointer 0x004647f8 at +32..35 (NO drift).
+    const guild::u8* p1 = reinterpret_cast<const guild::u8*>(&r1);
+    CHECK_EQ((int)p1[32], 0xf8);
+    CHECK_EQ((int)p1[33], 0x47);
+    CHECK_EQ((int)p1[34], 0x46);
+    CHECK_EQ((int)p1[35], 0x00);
+    // The +24..27 dword (the 4 restored zero bytes) is 0; op/threshold decode 0.
+    CHECK_EQ((int)p1[24], 0x00);
+    CHECK_EQ((int)r1.op, 0);
+    CHECK_EQ((int)r1.threshold, 0);
+}
+
+// The 51-entry law-TYPE +4 variant-flag column is recovered independently in two
+// places: world/law_text.cpp (kLawTypeVariantFlag) and sim/command_recon4_senders
+// .cpp (kLawActionTable[].flag, the full 0x4C1810 dump). Pin that they agree
+// byte-for-byte (the brief's explicit cross-check), so a future edit to either
+// recovery cannot drift silently.
+TEST(WorldLawW14, VariantFlagMatchesSimLawActionTable) {
+    CHECK_EQ((int)guild::sim::kLawActionCount, kLawTypeCount);
+    for (int i = 0; i < kLawTypeCount; ++i)
+        CHECK_EQ((int)kLawTypeVariantFlag[i],
+                 (int)guild::sim::kLawActionTable[i].flag);
 }

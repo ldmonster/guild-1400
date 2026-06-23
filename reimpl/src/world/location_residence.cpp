@@ -18,7 +18,10 @@ MistressDecision ResidenceComputeMistress(bool ownerExists, bool handlerPresent,
     MistressDecision d{};
     d.ownerExists     = ownerExists;
     d.handlerPresent  = handlerPresent;
-    d.cooldownElapsed = lastAffairTime < nowTime;
+    // 0x5152df..0x5152f2: mov ebx, dword ptr qword_13CE852 (LOW 32 bits only);
+    //   mov eax, [a3+188] (32-bit); cmp eax, ebx; jge.  So the cooldown compare is a
+    //   32-bit SIGNED compare of the low dwords, not a full 64-bit compare.
+    d.cooldownElapsed = (i32)lastAffairTime < (i32)nowTime;
     d.affairEnabled   = ownerExists && handlerPresent && d.cooldownElapsed;
     d.promoteAllowed  = skillOk;
     if (d.affairEnabled && confirmAffair) {

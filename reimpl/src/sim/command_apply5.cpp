@@ -3,7 +3,9 @@
 #include "sim/command_apply.h"   // shared g_last* remap tokens
 #include "sim/building_create.h" // Building_CreateGebaeude leaf
 #include "sim/person_create.h"   // Person_CreateAndSpawn leaf
+#include "sim/family_record.h"   // Person_GetFamilyRecord (word_13C3110)
 #include "sim/entity.h"          // g_persons / g_objects / PersonFindRecordById
+#include "crt/rand.h"            // crt::RandNext (0x5cb8bc LCG) — HandleCreatePersonA draw
 
 #include <cstring>
 #include <cstdint>
@@ -129,6 +131,17 @@ inline u8  RdU8 (const CommandPacket& p, u32 off) { return p.bytes[off]; }
 inline u8  HiByte(const CommandPacket& p, u32 dwordOff) { return static_cast<u8>(p.get32(dwordOff) >> 24); }
 inline i16 HiWord(const CommandPacket& p, u32 dwordOff) { return static_cast<i16>(p.get32(dwordOff) >> 16); }
 
+// VIBE_Util_StrNCopyPad @0x5d9360 — copy up to n source chars, stopping early at
+// the first NUL (which is NOT emitted), then zero-pad the remainder of the n-byte
+// field. A full-width (n-char, no NUL) source fills all n bytes WITHOUT a
+// terminator. (A raw memcpy would copy trailing bytes past an early NUL and a
+// hardcoded rec[n-1]=0 would clobber a full-width name — both are wrong.)
+inline void StrNCopyPad(u8* dst, const u8* src, u32 n) {
+    u32 i = 0;
+    for (; i < n && src[i] != 0; ++i) dst[i] = src[i];
+    for (; i < n; ++i) dst[i] = 0;
+}
+
 } // namespace
 
 OfficeSlot* Apply5_OfficeSlot(int i) {
@@ -245,7 +258,9 @@ int ExCreateBuildingDirect(CommandPacket& pkt, AckEntry* ack) {
     if (RdI32(pkt, 28) != 0)
         std::memcpy(geb + 101, pkt.bytes + 32, 0x30);
 
-    if (ack) { ack->status = 1; ack->slot = 2; }
+    // 0x496588 — *(a2+6) = Gebaeude (the new building record token).
+    if (ack) { ack->status = 1; ack->slot = 2;
+               ack->seq = static_cast<i32>(reinterpret_cast<std::intptr_t>(geb) & 0xFFFFFFFF); }
     return 0;
 }
 
@@ -254,19 +269,36 @@ int ExCreateBuildingDirect(CommandPacket& pkt, AckEntry* ack) {
 // ===========================================================================
 // gilde.exe 0x496614 — VIBE_Command_HandleCreatePersonA.
 int ExCreatePersonA(CommandPacket& pkt, AckEntry* ack) {
-    if (!g_standalone5)
-        g_personNextId = RdI32(pkt, 16); // dword_649890 = *(a1+16)
-    // (standalone re-seeds an RNG field; deterministic-neutral for the record.)
+    // 0x49661c — branch on dword_764CE0 (standalone == -1).
+    if (g_standalone5) {
+        // 0x4966bc — standalone path: *(a1+38) = VIBE_Util_RandNext(); the LCG
+        // advance leaves edx == the new state, which the unconditional RandSeed
+        // thunk below writes straight back (a no-op), so the NET effect is exactly
+        // ONE RandNext draw — kept so the RNG stream Person_CreateAndSpawn consumes
+        // stays in sync with the binary.
+        i32 r = crt::RandNext();
+        pkt.put32(38, static_cast<u32>(r));
+    } else {
+        g_personNextId = RdI32(pkt, 16); // 0x49662c — dword_649890 = *(a1+16)
+        // 0x496634 — VIBE_Math_RandomSeed_Thunk(): RandSeed(edx) where edx == the
+        // ack pointer (an indeterminate address). BOUNDARY: the original seeds the
+        // RNG with a non-reproducible host pointer here; we leave the RNG state
+        // untouched in the non-standalone path (cannot faithfully reproduce edx).
+    }
 
-    // v3 == packet base. Optionally resolve a parent building index by id(+31).
-    i32 parentRecToken = 0;
+    // v3 == packet base. Optionally resolve the parent BUILDING record by
+    // id(+31): the original's Person_QueryBegin(1,1,id) @0x4966e5 iterates the
+    // 169-stride OBJECT/BUILDING array dword_13CE298 (cursor seed @0x586cb9),
+    // i.e. BuildingFindById semantics — NOT the person array. (Verified
+    // 2026-06-11; the earlier person-array resolve was a misread.) Miss => 1.
+    const void* parentRecToken = nullptr;
     i32 v4 = RdI32(pkt, 31);
     if (v4 != -1) {
         i32 resolved = Remap(v4);
         pkt.put32(31, static_cast<u32>(resolved));
-        u16 idx = FindOwnerIndexById(resolved);
-        if (idx == 0xFFFF) return 1;
-        parentRecToken = reinterpret_cast<std::intptr_t>(PersonRecAt(idx));
+        ObjectRec* parentBld = BuildingFindById(resolved);
+        if (!parentBld) return 1;
+        parentRecToken = parentBld;
     }
 
     PersonSpawnArgs args{};
@@ -295,8 +327,17 @@ int ExCreatePersonA(CommandPacket& pkt, AckEntry* ack) {
 // ===========================================================================
 // gilde.exe 0x496714 — VIBE_Command_HandleCreatePersonB.
 int ExCreatePersonB(CommandPacket& pkt, AckEntry* ack) {
-    if (!g_standalone5)
-        g_personNextId = RdI32(pkt, 16); // dword_649890 = *(a1+16)
+    // 0x496727 — standalone path mirrors HandleCreatePersonA: *(a1+69) =
+    // RandNext() then the (no-op) RandSeed thunk => exactly ONE RandNext draw,
+    // kept so the RNG stream Person_CreateAndSpawn consumes stays in sync.
+    if (g_standalone5) {
+        i32 r = crt::RandNext();
+        pkt.put32(69, static_cast<u32>(r));
+    } else {
+        g_personNextId = RdI32(pkt, 16); // 0x496730 — dword_649890 = *(a1+16)
+        // 0x496738 — RandSeed(edx == ack ptr): BOUNDARY (indeterminate host
+        // pointer; not reproducible) — RNG state left untouched here.
+    }
 
     PersonSpawnArgs args{};
     args.kind      = static_cast<u8>((ack == nullptr ? 1 : 0) + 6); // (a2==0)+6
@@ -316,9 +357,39 @@ int ExCreatePersonB(CommandPacket& pkt, AckEntry* ack) {
     g_log.lastPersonId = g_lastObjectId;
 
     u8* rec = PersonRecAt(idx);
-    // StrNCopyPad(record+48, a1+37, 16): copy the 16-byte name into record+48.
-    std::memcpy(rec + 48, pkt.bytes + 37, 16);
-    rec[48 + 15] = 0; // pad terminator (StrNCopyPad NUL-pads to width).
+    // 0x4967b6 — StrNCopyPad(record+48, a1+37, 16): copy up to 16 chars (stop at
+    // NUL, zero-pad the rest; a 16-char name leaves no terminator).
+    StrNCopyPad(rec + 48, pkt.bytes + 37, 16);
+
+    // 0x4967bf..0x49681c — Person_GetFamilyRecord(rec) block. RECONSTRUCTED
+    // (wave-18, sim/family_record): the CreateAndSpawn leaf's family allocation
+    // (kind 6/7/5) stamps +0x50 = dword_647720|0x8000, so the sign byte +81 < 0
+    // and the accessor now returns the real family record over word_13C3110.
+    //   word[0]  = rec word +0x50 (word_12CE960[v5/2]);
+    //   StrNCopyPad(familyRec+2, packet+53, 16) — the dynasty name;
+    //   StrNCopyPad(rec+64, packet+53, 16)       — person's own family-name field;
+    //   the +0x60-linked spouse's +64 gets the same name (FindRecordById);
+    //   familyRec[+128] = -1.0f.
+    if (u8* fam = Person_GetFamilyRecord(rec)) {
+        i16 famWord; std::memcpy(&famWord, rec + 0x50, 2);   // rec +0x50 word
+        const char* name = reinterpret_cast<const char*>(pkt.bytes + 53);
+        FamilyRecord_StampName(fam, famWord, name);          // +0/+2/+128
+        // 0x4967f6 — StrNCopyPad(record+64, a1+53, 16): person's own family-name.
+        StrNCopyPad(rec + 64, pkt.bytes + 53, 16);
+        // 0x496801 — spouse (record +0x60 dword id): StrNCopyPad its +64 field too,
+        // when the spouse record resolves.
+        i32 spouseId; std::memcpy(&spouseId, rec + 0x60, 4);
+        if (Person* sp = PersonFindRecordById(spouseId)) {
+            StrNCopyPad(reinterpret_cast<u8*>(sp) + 64, pkt.bytes + 53, 16);
+        }
+    }
+
+    // 0x49683c — dword_12CE964[134*idx] = *(a1+31): the wappen id (1342+i)
+    // into record dword +0x54.
+    std::memcpy(rec + 0x54, pkt.bytes + 31, 4);
+    // 0x496845 — HIBYTE(dword_12CE919[...]) = *(a1+36): the faith byte into
+    // record byte +12 (dword at +9, high byte).
+    rec[12] = pkt.bytes[36];
 
     AckSet(ack, 1, 1, reinterpret_cast<std::intptr_t>(rec) & 0xFFFFFFFF);
     return 0;
@@ -340,7 +411,9 @@ u8* ResolveListHead(i32 id) {
     int r = GameObjectResolveEntityById(&obj, &scn, id, &per);
     if (r == 0) return nullptr;
     if (obj) return reinterpret_cast<u8*>(obj) + 93;
-    if (scn) return reinterpret_cast<u8*>(scn) + offsetof(SceneNode, childPtr);
+    // 0x497951 — scene head slot is node+20 (entityPtr), NOT childPtr(+63);
+    // the per-node next links are at +63 but the list HEAD lives at +20.
+    if (scn) return reinterpret_cast<u8*>(scn) + offsetof(SceneNode, entityPtr);
     if (per) return reinterpret_cast<u8*>(per) + 188;
     return nullptr;
 }
@@ -376,7 +449,10 @@ int ExMoveObjectBetweenLists(CommandPacket& pkt, AckEntry* ack) {
     if (prev != -1) g_sceneNodes[prev].childPtr = moved->childPtr;
     else            StoreHead(srcHead, moved->childPtr);
 
-    moved->ownerId = static_cast<i16>(dstId);  // *(v11+6) = dst (owner id word)
+    // 0x4979d8 — *(_DWORD*)(v11+6) = a1[4]: the dst owner id is written as a full
+    // DWORD into the node's byte offset +6 (the pad6 region), NOT the i16 ownerId
+    // field at +0x0A.
+    std::memcpy(reinterpret_cast<u8*>(moved) + 6, &dstId, 4);
     moved->childPtr = LoadHead(dstHead);        // *(v11+63) = *dstHead
     StoreHead(dstHead, cur);                     // *dstHead = v11
 
@@ -444,6 +520,11 @@ int ExSysMessage(CommandPacket& pkt, AckEntry* ack) {
             g_sysGameTime.hour = hour;
             g_sysGameTime.minute = minute;
             g_sysGameTime.second = second;
+            // DEFERRED: the original also mirrors the clock into the secondary copy
+            // qword_122F840 (0x498be2..) and toggles the Clock_ComputeGameTimeOfDay
+            // timer proc (TimeBase_IsProcActive/SetProcInterval @0x498bad/0x498bf6).
+            // The 122F840 mirror is a global not owned by this chunk; the timer proc
+            // is a TimeBase leaf — both out of scope here.
             break;
         }
         case 4: // enter building interior (scene leaf)
@@ -517,11 +598,32 @@ int ExSysMessage(CommandPacket& pkt, AckEntry* ack) {
             (void)v15;
             break;
         }
-        case 0x11: // conditional counter bump (uses current player)
-            if (g_currentPlayer != -1)
-                ++g_sysDword63127C;
+        case 0x11: { // conditional counter bump (uses current player)
+            // 0x498e30 — ++dword_63127C only if word_63CC5C != -1 AND
+            //   (*(v20+17) != dword_12CEB18[134*word_63CC5C] || *(v20+17) == -1).
+            // dword_12CEB18[134*idx] is the player's record +0x208 slot-id column.
+            if (g_currentPlayer != -1) {
+                i32 arg = RdI32(pkt, 17);
+                i32 slotId = 0;
+                int pi = static_cast<int>(static_cast<u16>(g_currentPlayer));
+                if (pi >= 0 && pi < kPersonCapacity)
+                    std::memcpy(&slotId, reinterpret_cast<const u8*>(&g_persons[pi]) + 0x208, 4);
+                if (arg != slotId || arg == -1)
+                    ++g_sysDword63127C;
+            }
             break;
-        case 0x12: // HUD banner select (UI leaf)
+        }
+        case 0x12: // game-speed / HUD banner select.
+            // 0x498e47 — the FULL original:
+            //   v16 = min(*(int*)(a1+17), 4);
+            //   dword_631284 = v16;                     // == g_gameSpeed (apply7)
+            //   dword_631280 = dword_492EB0[v16];       // camera-rate table (not in tree)
+            //   Hud_SetStatusBannerText(dword_8C98EC[v16]);  // UI leaf
+            //   Config_ApplyCameraAndScrollSettings();       // config/UI leaf
+            // HANDOFF/DEFERRED: dword_631284 is owned by command_apply7 (g_gameSpeed)
+            // and dword_631280 / the dword_492EB0 (camera rate) + dword_8C98EC (banner
+            // string) tables are not in this chunk; the HUD/Config calls are UI leaves
+            // (rule 3-5 boundary). Routed through the leaf hook pending those owners.
             g_sysLeafHook(0x12);
             break;
         case 0x13: // dword_631294 = *(v20+17)
@@ -568,6 +670,9 @@ int ExAssignPersonToOffice(CommandPacket& pkt, AckEntry* ack) {
 // ===========================================================================
 // gilde.exe 0x49AFF0 — VIBE_Command_ExGebUpgrade.
 int ExGebUpgrade(CommandPacket& pkt, AckEntry* ack) {
+    // 0x49b00e — non-standalone: dword_649890 = *(a1+20) (the next-building seed).
+    if (!g_standalone5)
+        g_buildingNextId = RdI32(pkt, 20);
     // Begin = QueryBegin(filter id == *(a1+16)) over buildings.
     PersonFilter f[2] = {{1, RdI32(pkt, 16)}, {0, 0}}; // {id, alive}
     ObjectRec* begin = PersonQueryBegin(f, 1);
@@ -613,15 +718,20 @@ int ExRemoveBuilding(CommandPacket& pkt, AckEntry* ack) {
     // (Original: QueryFind(...,4,29) then DetachAndDestroyOccupant for matches.)
     SceneFilter sf[1] = {{0, 0}}; // flat scan
     for (SceneNode* n = GameObjectQueryFind(0, sf, 1); n; n = GameObjectIterNext()) {
-        i32 ent; std::memcpy(&ent, reinterpret_cast<u8*>(n) + 7, 4);
+        // 0x49b543 — mov edx,[eax+1Ch]; cmp edx,[ecx+1]: the occupant's entity-id
+        // field is at +0x1C (+28), matched against the building id (Begin+1).
+        i32 ent; std::memcpy(&ent, reinterpret_cast<u8*>(n) + 0x1C, 4);
         if (ent == bId) g_detachHook(n);
     }
 
-    // Clear person rows pointing at this building (dword_12CEA7C column == id).
+    // 0x49b55a — for(j=0; j!=102912; j+=134) if (Begin == dword_12CEA7C[j]) clr.
+    // dword_12CEA7C[134*i] is the person record's home-building column at +0x16C
+    // (+364), which holds the building id in the id-model (person_create stores
+    // b->id there). Clear every row linked to this building.
     for (int i = 0; i < kPersonCapacity; ++i) {
         u8* p = reinterpret_cast<u8*>(&g_persons[i]);
-        i32 link; std::memcpy(&link, p + 0x178, 4); // container id column (+376)
-        if (link == bId) { i32 z = 0; std::memcpy(p + 0x178, &z, 4); }
+        i32 link; std::memcpy(&link, p + 0x16C, 4); // home-building column (+364)
+        if (link == bId) { i32 z = 0; std::memcpy(p + 0x16C, &z, 4); }
     }
 
     g_freeHook(rec);                          // VIBE_Building_FreeAndUnlink

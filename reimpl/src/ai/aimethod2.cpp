@@ -37,9 +37,17 @@ constexpr float flt_61A2B8 = 1.0f / 3.0f; // distance-penalty scale (0.33333334f
 // the result is consumed as (int)v, i.e. truncation toward zero).
 inline double TruncToZero(double v) { return std::trunc(v); }
 
-// floor — VIBE_Math_NormalizeAngle returns trunc(x) for x>=0 and trunc(x)-1 for
-// x<0 (it adds -1.0 when the input is negative), i.e. std::floor.
-inline double FloorVal(double v) { return std::floor(v); }
+// VIBE_Math_NormalizeAngle @0x5eef4c: StoreAndZero stores trunc(x) (ConvertX rounds
+// toward zero per the 0x1F control word), then if x<0 it adds dbl_62BFFC (== -1.0).
+// So the result is trunc(x) for x>=0 and trunc(x)-1.0 for x<0. This is NOT std::floor:
+// for a negative *integer* x (e.g. -2.0) it returns x-1 (-3.0), whereas floor(-2.0)==-2.0.
+// Model the binary exactly.
+inline double NormalizeAngle(double v) {
+    double t = std::trunc(v);
+    if (v < 0.0)
+        t += -1.0;
+    return t;
+}
 
 // log10(x) — the binary computes __FYL2X__(x, log10(2)) == log2(x)*log10(2) ==
 // log10(x). Use the identity directly.
@@ -178,7 +186,7 @@ char ClassifyWealthTier(float gaugeValue) {
     double v1 = static_cast<double>(gaugeValue) + flt_61A250;
     int v5 = static_cast<int>(TruncToZero(v1));
     double v4 = static_cast<double>(gaugeValue);
-    if (v4 - FloorVal(v4) >= flt_61A254)
+    if (v4 - NormalizeAngle(v4) >= flt_61A254)
         ++v5;
     if (v5 < 0)
         return 0;

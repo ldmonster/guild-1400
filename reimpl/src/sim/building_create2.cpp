@@ -27,8 +27,9 @@ void ResetCreateHooks() { g_createHooks = &g_defaultCreateHooks; }
 static inline void wr32(u8* r, int off, i32 v) { std::memcpy(r + off, &v, 4); }
 static inline void wr16(u8* r, int off, u16 v) { std::memcpy(r + off, &v, 2); }
 
-// The float-bit constant 1061997773 (== 0.65f) the original stores at +73 for
-// several types (the quality default).
+// The float-bit constant 1061997773 (== 0.800000011920929f, i.e. 0.8f) the
+// original stores at +73 for several types (the quality default).
+// Verified via get_bytes: 1061997773 -> 0.8f.
 static constexpr i32 kQualityFloatBits = 1061997773;   // == 0.800000011920929f
 
 // LABEL_92: +101=10, +105=3, +109=5.

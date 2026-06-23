@@ -134,6 +134,11 @@ int           DirFileCount(VfsNode* dir);
 VfsFileEntry* DirFileAt(VfsNode* dir, int index);
 VfsFileEntry* ArrayOf(guild::u32 arrayId);   // raw +0x104 array-id resolver
 
+// Free the registry-backed +0x104 file-array block owned by `dir` (if any) and
+// null the slot. The block is allocated in BuildFinishedFileList; this lets a
+// mutation that empties a directory release it without exposing the id registry.
+void FreeNodeArray(VfsNode* dir);
+
 // VIBE_Vfs_GetFileName_Thunk @0x44f698 — comparator used to bsearch a file array:
 // compares the search key `key` against entry `e`'s name (e->name == *e). Returns
 // strcmp-style sign.

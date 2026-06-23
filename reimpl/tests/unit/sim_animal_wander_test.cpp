@@ -267,6 +267,56 @@ TEST(SimAnimalWander, UpdateCatSoundBranch) {
     SetAnimalSceneOps(nullptr);
 }
 
+// Sheep's sound branch spends an UNCONDITIONAL extra d100 (gilde.exe 0x484015),
+// whereas the cat's sound branch only spends it when kind==0 (0x483e7b). With a
+// dog-kind (kind==1) cat call the cat draws gate(d100)+d3; the sheep draws
+// gate(d100)+d100(burn)+d3. This test pins that extra draw via an inline oracle.
+TEST(SimAnimalWander, SheepSoundBranchBurnsExtraD100) {
+    // Inline CRT LCG oracle (state*1103515245+12345, return (state>>16)&0x7FFF).
+    auto next = [](guild::u32& s) {
+        s = s * 1103515245u + 12345u;
+        return static_cast<int>((s >> 16) & 0x7FFF);
+    };
+    // Find a seed whose first d100 (gate) is > 20 so BOTH cat(>30 also) and sheep
+    // take the sound branch.
+    guild::u32 seed = 1;
+    int gate = 0;
+    for (; seed < 100000; ++seed) {
+        guild::u32 s = seed;
+        gate = next(s) % 100;
+        if (gate > 30) break;   // >30 => sound branch for both cat and sheep
+    }
+    CHECK(gate > 30);
+
+    // Oracle for SHEEP: gate(d100), burn(d100), d3 -> sound = (d3)+1.
+    guild::u32 so = seed;
+    (void)(next(so) % 100);      // gate
+    (void)(next(so) % 100);      // unconditional burn
+    int sheepSound = (next(so) % 3) + 1;
+
+    // Oracle for CAT (kind=1, no burn): gate(d100), d3 -> sound = (d3)+1.
+    guild::u32 co = seed;
+    (void)(next(co) % 100);      // gate
+    int catSound = (next(co) % 3) + 1;
+
+    MockOps ops; SetAnimalSceneOps(&ops);
+
+    AnimalRec sheep{}; sheep.actor = 70; sheep.kind = guild::sim::kAnimalSheep;
+    guild::crt::Srand(seed);
+    Animal_UpdateSheep(&sheep, 0);
+    CHECK_EQ(ops.sounds.size(), (size_t)1);
+    CHECK_EQ(ops.sounds[0].sound, sheepSound);
+
+    ops.sounds.clear();
+    AnimalRec cat{}; cat.actor = 71; cat.kind = 1;   // dog -> no cat burn
+    guild::crt::Srand(seed);
+    Animal_UpdateCat(&cat, 0);
+    CHECK_EQ(ops.sounds.size(), (size_t)1);
+    CHECK_EQ(ops.sounds[0].sound, catSound);
+
+    SetAnimalSceneOps(nullptr);
+}
+
 // --- LoadModels / ResetModelHandles ---------------------------------------
 TEST(SimAnimalWander, LoadAndResetModels) {
     ResetAnimalWander();

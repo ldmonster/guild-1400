@@ -160,26 +160,38 @@ TEST(CharRenderAttach, ApplyBoneTransformReadsBoneVectors) {
 }
 
 // === ApplyHeadVariant: id modulo head-count ==================================
+// NB (gilde.exe 0x57c59d/0x57c5a5): when the active-mesh gate FAILS the binary
+// falls through returning (char)dword_62D080 — modeled here as (u8)activeMeshId —
+// NOT the computed variant. The variant is only observable on the gate-success path
+// (via SelectTextureSet's recorded lastVariant). These tests assert both.
 TEST(CharRenderHead, ModuloSmallCount) {
     Install();
     RenderActor root{}; root.universe = (void*)1;       // not the wild universe
     RenderActor a{}; a.attached = &root; a.id = 7;
-    // headCount 3 (<=4) -> id % 3 == 1; activeMeshId != id -> returns variant
-    u8 v = ApplyHeadVariant(&a, 3, /*activeMeshId*/ 999);
-    CHECK_EQ((int)v, 1);
+    // headCount 3 (<=4) -> variant = id % 3 == 1; gate fires (activeMeshId == id)
+    // so SelectTextureSet sees variant 1.
+    u8 v = ApplyHeadVariant(&a, 3, /*activeMeshId*/ 7);
+    CHECK_EQ(g_rec.selectTexCalls, 1);
+    CHECK_EQ(g_rec.lastVariant, 1);
+    CHECK_EQ((int)v, 0x99);   // hook return on gate-success
+    // gate-fail path returns (u8)activeMeshId, not the variant.
+    Install();
+    v = ApplyHeadVariant(&a, 3, /*activeMeshId*/ 999);
     CHECK_EQ(g_rec.selectTexCalls, 0);
+    CHECK_EQ((int)v, (int)(guild::u8)999);   // 231
 }
 
 TEST(CharRenderHead, MaskLargeCount) {
     Install();
     RenderActor root{}; root.universe = (void*)1;
     RenderActor a{}; a.attached = &root; a.id = 13;
-    // headCount 6 (>4) -> id & 3 == 1
-    u8 v = ApplyHeadVariant(&a, 6, 999);
-    CHECK_EQ((int)v, 1);
+    // headCount 6 (>4) -> variant = id & 3 == 1 (observed via the gate-success path)
+    ApplyHeadVariant(&a, 6, /*activeMeshId*/ 13);
+    CHECK_EQ(g_rec.lastVariant, 1);
+    Install();
     a.id = 20;
-    v = ApplyHeadVariant(&a, 6, 999);
-    CHECK_EQ((int)v, 0);  // 20 & 3 == 0
+    ApplyHeadVariant(&a, 6, /*activeMeshId*/ 20);
+    CHECK_EQ(g_rec.lastVariant, 0);   // 20 & 3 == 0
 }
 
 TEST(CharRenderHead, ActiveMeshAppliesTexture) {
@@ -282,17 +294,23 @@ TEST(CharRenderWrap, AttachItemToBone2) {
 // === anim / queue control ====================================================
 TEST(CharRenderAnim, ToggleAniPlayback) {
     Install();
-    RenderActor a{}; a.action = (void*)1; a.mesh = (void*)1; a.flagsA = 0;
+    // gate is +296 (action) && +112 (handle112); +52 mesh is body-only.
+    RenderActor a{}; a.action = (void*)1; a.handle112 = (void*)1; a.mesh = (void*)1; a.flagsA = 0;
     ToggleAniPlayback(&a, true);   // pause
     CHECK_EQ(g_rec.clearLoopCalls, 1);
     CHECK((a.flagsA & kRaAnimPaused) != 0);
     ToggleAniPlayback(&a, false);  // resume
     CHECK_EQ(g_rec.setLoopCalls, 1);
     CHECK((a.flagsA & kRaAnimPaused) == 0);
-    // missing handles -> no-op
+    // missing action handle -> no-op
     Install();
-    RenderActor b{}; b.action = nullptr; b.mesh = (void*)1;
+    RenderActor b{}; b.action = nullptr; b.handle112 = (void*)1; b.mesh = (void*)1;
     ToggleAniPlayback(&b, true);
+    CHECK_EQ(g_rec.clearLoopCalls, 0);
+    // missing +112 handle -> no-op (even with action + mesh present)
+    Install();
+    RenderActor d{}; d.action = (void*)1; d.handle112 = nullptr; d.mesh = (void*)1;
+    ToggleAniPlayback(&d, true);
     CHECK_EQ(g_rec.clearLoopCalls, 0);
 }
 

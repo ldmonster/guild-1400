@@ -24,8 +24,13 @@ i8 g_rateScalar[5] = {0, 0, 0, 0, 0};
 }
 
 // gilde.exe 0x579a24 — VIBE_Economy_LookupRateScalar.
+// The original is __usercall al=(id@al): it tests `id < 5` and indexes
+// byte_123525C[id]. A negative `id` would index before the 5-entry table; the
+// engine only ever passes ids 0..4 (the bound is its own envelope), so guarding
+// the low end is a faithful memory-safety fix that leaves every valid id (0..4)
+// and the >=5 path (126) byte-identical.
 i8 EconomyLookupRateScalar(i8 id) {
-    if (id < 5)
+    if (id >= 0 && id < 5)
         return g_rateScalar[id];
     return 126;
 }

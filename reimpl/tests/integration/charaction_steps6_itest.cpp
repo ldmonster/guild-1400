@@ -48,7 +48,9 @@ i32 RecQueue29(int arg, HeRecord*) { g_lastQueueArg = arg; return 0xABCD; }
 int RealRandomModulo(int n) { return util::RandomModulo(static_cast<u16>(n)); }
 
 // The stride table InitSpionage indexes (mirrors the module's private kSpyStrideTable).
-const i32 kStride[16] = { 1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31 };
+// gilde.exe dword_478450 (0x478450, 16 dwords, indexed at 0x4e2ed8): exact bytes
+// 1,3,5,7,0xb,0xd,0x11,0x13,0xed,0xef,0xf3,0xf5,0xf9,0xfb,0xfd,0xff.
+const i32 kStride[16] = { 1,3,5,7,11,13,17,19,237,239,243,245,249,251,253,255 };
 
 } // namespace
 
@@ -100,8 +102,10 @@ TEST(CharactionSteps6Itest, InitSpionageSeedsFromRealRng) {
     SetNpcLeafHooks(nullptr);
 }
 
-// The "already spawned" guard (flags +121 bit 2 set) returns the existing request
-// handle WITHOUT drawing from the RNG at all — confirm the generator is untouched.
+// The "already spawned" guard returns the existing request handle WITHOUT drawing
+// from the RNG at all — confirm the generator is untouched.  gilde.exe 0x4e2e68:
+// `mov ah,[eax+78h]; test ah,4` reads the flag byte at +0x78 == +120 (He_Flags),
+// bit 0x04 — NOT byte +121.
 TEST(CharactionSteps6Itest, InitSpionageAlreadySpawnedSkipsRng) {
     crt::Srand(0x99);
     u32 stateBefore = *crt::RandStatePtr();
@@ -113,7 +117,7 @@ TEST(CharactionSteps6Itest, InitSpionageAlreadySpawnedSkipsRng) {
     SetCharActionStep6Hooks(&h);
 
     HeBuf he;
-    he.bytes[121] = 0x04;              // (flags & 0x400) set -> already spawned
+    he.bytes[120] = 0x04;             // He_Flags & 0x04 set -> already spawned
     He_ReqHandle(he.rec()) = 0x5151;  // +132 existing handle
 
     i32 ret = InitSpionage(he.rec());

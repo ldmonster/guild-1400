@@ -113,20 +113,26 @@ TEST(GuiTextRich, CountCode) {
 }
 
 TEST(GuiTextRich, MoneyCode) {
-    auto r = RenderRichString("Cost: %m.", {Arg::MakeMoney(1234, 1)});
+    // gilde.exe 0x59d6e8 line 374: money is %S/%T (al 0x53/0x54), not %m.
+    auto r = RenderRichString("Cost: %T.", {Arg::MakeMoney(1234, 1)});
     CHECK(r == std::string("Cost: 1.234\x11.", 13));
+    auto r2 = RenderRichString("Cost: %S.", {Arg::MakeMoney(1234, 1)});
+    CHECK(r2 == std::string("Cost: 1.234\x11.", 13));
 }
 
 TEST(GuiTextRich, DateCode) {
+    // gilde.exe 0x59d6e8 line 549: date is %D (al 0x44); season = year%4.
     GameTimeSource src{};
-    src.yearQuarter = 1;  // summer 1401
-    auto r = RenderRichString("Date: %T", {Arg::MakeDate(src)}, nullptr, kSeasons);
+    src.yearQuarter = 1;  // year 1401, season (1401%4)=1 -> Summer
+    auto r = RenderRichString("Date: %D", {Arg::MakeDate(src)}, nullptr, kSeasons);
     CHECK(r == "Date: Summer 1401");
 }
 
-TEST(GuiTextRich, StringSubstitution) {
-    auto r = RenderRichString("Hello, %s!", {Arg::MakeStr("World")});
-    CHECK(r == "Hello, World!");
+TEST(GuiTextRich, UnknownCodePassThrough) {
+    // %m and %s are not value codes in the binary; an unhandled letter copies the
+    // '%' through verbatim (default arm) -- nothing is silently dropped.
+    auto r = RenderRichString("Hello, %s!", {});
+    CHECK(r == "Hello, %s!");
 }
 
 TEST(GuiTextRich, DollarMarkupPassThrough) {

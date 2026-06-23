@@ -138,7 +138,9 @@ TEST(SimCmdApply4, SetObjectTransform_CreatesAndCopies) {
     AckEntry ack{};
     CHECK_EQ(ApplyPacket4(p, &ack), 0);
     CHECK_EQ((int)ack.status, 1);
-    CHECK_EQ((int)ack.slot, 3);
+    // 0x497bdf: `mov byte ptr [ebp+0], 1` writes ONLY the status byte (+0).
+    // The slot (+1) and seq (+6) ack fields are left untouched (stay 0).
+    CHECK_EQ((int)ack.slot, 0);
 
     u8* obj = Apply4_FindAddedObject(7777, 1234);
     CHECK(obj != nullptr);

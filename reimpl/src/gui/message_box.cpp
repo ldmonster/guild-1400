@@ -47,9 +47,10 @@ const char* SelectMessageForm(int flags, bool& selectWindow1) {
     return "misc\\Messagebox";
 }
 
-// The clamped palette: (dword_11BC2D0 & 0xC7), overridden to 464838 when flag 0x08.
+// The clamped palette: low byte of dword_11BC2D0 masked with 0xC7, high 3 bytes kept
+// (effective mask 0xFFFFFFC7), overridden to 464838 when flag 0x08.
 i32 ResolvePalette(int flags) {
-    i32 palette = g_msgPalette & kMsgPaletteMask; // LOBYTE(v20) = dword_11BC2D0 & 0xC7
+    i32 palette = g_msgPalette & kMsgPaletteMask; // and byte ptr [v],0C7h (LOBYTE only)
     if (flags & kMsgFlagPalette8)                 // (a1 & 8) -> v20 = 464838
         palette = kMsgPaletteOverride;
     return palette;
@@ -98,12 +99,16 @@ int RunModalCore(MessageBoxHost& host, u8& guard, i16 kindFlags, char buttonGrou
     unsigned startTick = 0;
     bool haveStart = false;
 
+    // dword_631614 — the close-request flag.  The original sets it inside the frame
+    // body but does NOT break: it runs the rest of the body (slider update, autoclose)
+    // and only terminates when VIBE_GameLogic_RunFrameLoop re-reads it at the top of the
+    // next iteration.  We mirror that by breaking at the BOTTOM of the body.
+    bool closeReq = false;
+
     MessageBoxHost::FrameInput in{};
     while (host.RunFrame(formId, palette, kMsgTtlSpan, in)) {
         if (!haveStart) { startTick = in.tick; haveStart = true; }
         const unsigned ttl = startTick + kMsgTtlSpan;
-
-        bool close = false;
 
         if (flags & kMsgFlagRaise)        // flag 0x40: keep the box raised each frame
             host.RaiseWindows(formId);
@@ -112,27 +117,27 @@ int RunModalCore(MessageBoxHost& host, u8& guard, i16 kindFlags, char buttonGrou
         if (in.clickedId == kIdOk && in.clickedWindow == g_currentWindowId) {
             if (trackResult)
                 result = g_radioGroups[group].selected + 1; // dword_676588[group] + 1
-            close = true;
+            closeReq = true;              // dword_631614 = 1
         }
         // Cancel on this window (1155), or Esc (byte_67225C == 1): result 0.
         else if ((in.clickedId == kIdCancel && in.clickedWindow == g_currentWindowId) ||
                  in.escKey) {
             if (trackResult)
                 result = 0;
-            close = true;
+            closeReq = true;
         }
 
         if (in.rightClick)                // dword_672230: right-click also closes
-            close = true;
+            closeReq = true;
 
         if (kindFlags < 0 && sliderIdx != -1) // progress slider: feed elapsed of 500
             host.SetSliderValue(sliderIdx, static_cast<int>(in.tick - startTick),
                                 kMsgSliderRange);
 
         if ((flags & kMsgFlagAutoClose) && ttl < in.tick) // flag 0x04: auto-close on timeout
-            close = true;
+            closeReq = true;
 
-        if (close)
+        if (closeReq)                     // RunFrameLoop returns 0 next iteration
             break;
     }
 
@@ -189,25 +194,25 @@ int MessageBox_Run(MessageBoxHost& host, i16 kindFlags, char buttonGroupArg, int
     unsigned startTick = 0;
     bool haveStart = false;
 
+    bool closeReq = false; // dword_631614
+
     MessageBoxHost::FrameInput in{};
     while (host.RunFrame(formId, palette, kMsgTtlSpan, in)) {
         if (!haveStart) { startTick = in.tick; haveStart = true; }
         const unsigned ttl = startTick + kMsgTtlSpan;
-
-        bool close = false;
 
         if (flags & kMsgFlagRaise)
             host.RaiseWindows(formId);
 
         // No window-id gate here, and no result write (v3 == 0 throughout).
         if (in.clickedId == kIdOk || in.clickedId == kIdCancel)
-            close = true;
+            closeReq = true;
         if (in.rightClick)
-            close = true;
+            closeReq = true;
         if ((flags & kMsgFlagAutoClose) && ttl < in.tick)
-            close = true;
+            closeReq = true;
 
-        if (close)
+        if (closeReq)
             break;
     }
 
@@ -255,28 +260,34 @@ int MessageBox_ShowModeless(MessageBoxHost& host, char kindFlags, char buttonGro
     unsigned startTick = 0;
     bool haveStart = false;
 
+    bool closeReq = false; // dword_631614
+
     MessageBoxHost::FrameInput in{};
-    // ttl fixed at 1 in the original; auto-close compares the start-tick window.
+    // ttl fixed at 1 in the original (RunFrameLoop(palette, 1, form, group)).
     while (host.RunFrame(formId, palette, /*ttl=*/1, in)) {
         if (!haveStart) { startTick = in.tick; haveStart = true; }
-
-        bool close = false;
 
         if (flags & kMsgFlagRaise)
             host.RaiseWindows(formId);
 
         if (in.clickedId == kIdOk || in.clickedId == kIdCancel)
-            close = true;
+            closeReq = true;
         if (in.rightClick)
-            close = true;
+            closeReq = true;
         if (wideFlags < 0 && sliderIdx != -1)
             host.SetSliderValue(sliderIdx, static_cast<int>(in.tick - startTick),
                                 kMsgSliderRange);
-        // flag 0x04: auto-close once the live tick passes the ttl (start + 500 here).
+        // flag 0x04 auto-close: in the ORIGINAL (0x4ade0a) the threshold register
+        // `ecx` (v11) is NEVER initialized — unlike its siblings, Modeless computes no
+        // `v16 + 500`.  So the comparison `cmp ecx, dword_62EB38` reads an undefined
+        // register value; the auto-close trigger point is non-deterministic in the
+        // binary.  We model the only defensible deterministic interpretation (the same
+        // start+500 window its siblings use).  This single instruction is BOUNDARY:
+        // the true value is an uninitialized-register read and cannot be reproduced 1:1.
         if ((flags & kMsgFlagAutoClose) && (startTick + kMsgTtlSpan) < in.tick)
-            close = true;
+            closeReq = true;
 
-        if (close)
+        if (closeReq)
             break;
     }
 
@@ -287,9 +298,11 @@ int MessageBox_ShowModeless(MessageBoxHost& host, char kindFlags, char buttonGro
 
 // ===========================================================================
 // gilde.exe 0x4ad9dc — VIBE_Dialog_ShowMessageBoxGreen (own guard byte_631DA9).
-// Fixed "misc\MessageBoxGreen" form.  Renders an optional header (window 0) then the
-// body into window slot 2, recolors via Hud_SyncWindowColors, and (unlike Run/Modeless)
-// DOES track the result like ShowMessage — but its OK branch is NOT window-id gated.
+// Fixed "misc\MessageBoxGreen" form.  Order (0x4ada4e..0x4ada7a): SelectWindow(form,0);
+// Hud_SyncWindowColors(currentWindow); SelectWindow(form,1); if(header) RenderRichString
+// (header into window 1); SelectWindow(form,2); RenderRichString(body into window 2).
+// Recolors via Hud_SyncWindowColors, and (unlike Run/Modeless) DOES track the result like
+// ShowMessage — but its OK branch is NOT window-id gated.
 // ===========================================================================
 int MessageBox_ShowGreen(MessageBoxHost& host, int bodyText, char kindFlags,
                          char buttonGroupArg, int headerText) {
@@ -303,17 +316,18 @@ int MessageBox_ShowGreen(MessageBoxHost& host, int bodyText, char kindFlags,
     if (g_msgGuardGreen)
         return 0;
 
-    i32 palette = g_msgPalette & kMsgPaletteMask;
+    i32 palette = g_msgPalette & kMsgPaletteMask; // and byte ptr [v20],0C7h (low byte only)
     if (flags & kMsgFlagPalette8)
         palette = kMsgPaletteOverride;
 
     const int formId = host.LoadForm("misc\\MessageBoxGreen", /*selectWindow1=*/false);
 
-    // Form_SelectWindow(form, 0); SyncWindowColors(currentWindow); then header into the
-    // default window if present, body into window slot 2.
+    // SelectWindow(form,0); SyncWindowColors(currentWindow); SelectWindow(form,1);
+    // header (if present) -> window 1; body -> window 2.  The window selection is folded
+    // into the RenderText/RenderBodyText host calls (the SelectWindow boundary).
     host.SyncWindowColors(formId);
-    if (headerText)                       // if (v9) RenderRichString(v9)
-        host.RenderText(formId, headerText);
+    if (headerText)                       // test ecx,ecx (header arg); if !=0 RenderRichString
+        host.RenderText(formId, headerText); // into window 1
     host.RenderBodyText(formId, bodyText); // SelectWindow(form,2); RenderRichString(body)
     host.CenterWindows(formId);
 
@@ -328,12 +342,12 @@ int MessageBox_ShowGreen(MessageBoxHost& host, int bodyText, char kindFlags,
     unsigned startTick = 0;
     bool haveStart = false;
 
+    bool closeReq = false; // dword_631614
+
     MessageBoxHost::FrameInput in{};
     while (host.RunFrame(formId, palette, kMsgTtlSpan, in)) {
         if (!haveStart) { startTick = in.tick; haveStart = true; }
         const unsigned ttl = startTick + kMsgTtlSpan;
-
-        bool close = false;
 
         if (flags & kMsgFlagRaise)
             host.RaiseWindows(formId);
@@ -341,21 +355,21 @@ int MessageBox_ShowGreen(MessageBoxHost& host, int bodyText, char kindFlags,
         // Green's OK/Cancel branches do NOT compare the window id (no v19 gate).
         if (in.clickedId == kIdOk) {
             result = g_radioGroups[group].selected + 1; // dword_676588[group] + 1
-            close = true;
+            closeReq = true;
         } else if (in.clickedId == kIdCancel || in.escKey) {
             result = 0;
-            close = true;
+            closeReq = true;
         }
 
         if (in.rightClick)
-            close = true;
+            closeReq = true;
         if (wideFlags < 0 && sliderIdx != -1)
             host.SetSliderValue(sliderIdx, static_cast<int>(in.tick - startTick),
                                 kMsgSliderRange);
         if ((flags & kMsgFlagAutoClose) && ttl < in.tick)
-            close = true;
+            closeReq = true;
 
-        if (close)
+        if (closeReq)
             break;
     }
 

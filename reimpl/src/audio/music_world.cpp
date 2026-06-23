@@ -90,13 +90,16 @@ int SelectOutdoorSeasonTrack(MusicDirector& d, int season) {
 
     // Selection path: roll a variant until the chosen name differs from the
     // last-played one (avoid an immediate repeat). lastTrackName empty == no
-    // constraint (matches `strlen(byte_645E16)` guard).
+    // constraint. Original loop tail @0x581208:
+    //   while ( strlen(byte_645E16) && !VIBE_Util_StrCmp(v11, byte_645E16) );
+    // VIBE_Util_StrCmp @0x5d3f10 is plain strcmp (0 == equal), so the reroll
+    // repeats WHILE the choice equals the last track (until it differs).
     std::string chosen;
     do {
         int variant = guild::util::RandomModulo(0x75) % 3;
         chosen = PickName(season, variant);
         e.name = chosen;
-    } while (!d.lastTrackName.empty() && d.lastTrackName != chosen);
+    } while (!d.lastTrackName.empty() && d.lastTrackName == chosen);
 
     d.lastTrackName.clear();
     e.active = true;
@@ -136,6 +139,10 @@ PlaybackAction UpdateOutdoorTrackPlayback(MusicDirector& d, const PlaybackTick& 
                         d.sink->stopTrack(d.currentTrackHandle, 1);
                     d.currentTrackHandle = 0;
                 }
+                // byte_645F28[276*slot] = 0 — the season-change stop clears the
+                // outdoor entry's NAME, so the next select rerolls a fresh
+                // season variant instead of resuming the old season's track.
+                d.table[outdoor].name.clear();
                 return PlaybackAction::kSeasonStop;
             }
         } else {
@@ -161,6 +168,13 @@ PlaybackAction UpdateOutdoorTrackPlayback(MusicDirector& d, const PlaybackTick& 
         if (slot >= 0) {
             d.table[slot].active = false;
             d.lastTrackName = d.table[slot].name;
+            // Original: if (lengthMs(+264) - positionMs(+268) < 20000) clear the
+            // entry name (byte_645F28[..] = 0) -> the next select rerolls a new
+            // variant. tick.atStreamEnd models the cursor AT the end (diff ~ 0),
+            // so the name is cleared; the keep-name branch (a stop >20s before
+            // the end, later resumed by the resume path) needs the stream ms
+            // cursor, which the modelled tick does not carry (named gap).
+            d.table[slot].name.clear();
         }
         d.currentTrackHandle = 0;
         return PlaybackAction::kTrackEnded;

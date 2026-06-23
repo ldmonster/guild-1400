@@ -82,23 +82,27 @@ ShadowVec3 ProjectVertexDirectional(const ShadowVec3& v, const ShadowVec3& dir,
 }
 
 // ---------------------------------------------------------------------------
-// gilde.exe 0x5f3ce3 — POINT vertex projection (RenderMeshShadow).
+// gilde.exe 0x5f3ce3 — POINT vertex projection (RenderMeshShadow). Verified
+// against the x87 disasm at 0x5f3cdf..0x5f3d39 (ecx = light L, edx = vertex v):
 //   v86 = L.x - v.x;  v87 = L.y - v.y;  v88 = L.z - v.z;   // 0x5f3ce3..0x5f3cf7
-//   t   = (v.y - groundY) / -v87;                          // 0x5f3d08
-//   v'.x = t*v86 + v.x;                                     // 0x5f3d18
-//   v'.y = t*v87 + v.y;                                     // 0x5f3d27
-//   v'.z = t*v88 + v.z;                                     // 0x5f3d39
+//   t   = (L.y - groundY) / -v87;                          // 0x5f3cfb..0x5f3d08
+//   v'.x = t*v86 + L.x;                                     // 0x5f3d0e..0x5f3d1a
+//   v'.y = t*v87 + L.y;                                     // 0x5f3d1c..0x5f3d29
+//   v'.z = t*v88 + L.z;                                     // 0x5f3d2c..0x5f3d39
+// NOTE: the numerator uses the LIGHT'S y (L.y), and the projected point is built
+// off the LIGHT position L (not the vertex). This differs from the directional
+// branch (which builds off the vertex). Verified 1:1 from the binary.
 // ---------------------------------------------------------------------------
 ShadowVec3 ProjectVertexPoint(const ShadowVec3& v, const ShadowVec3& lightPos,
                               float groundY) {
-    float dx = lightPos.x - v.x;
-    float dy = lightPos.y - v.y;
-    float dz = lightPos.z - v.z;
-    float t = (v.y - groundY) / -dy;
+    float dx = lightPos.x - v.x;   // v86
+    float dy = lightPos.y - v.y;   // v87
+    float dz = lightPos.z - v.z;   // v88
+    float t = (lightPos.y - groundY) / -dy;   // 0x5f3d08
     ShadowVec3 r;
-    r.x = t * dx + v.x;
-    r.y = t * dy + v.y;
-    r.z = t * dz + v.z;
+    r.x = t * dx + lightPos.x;     // 0x5f3d18
+    r.y = t * dy + lightPos.y;     // 0x5f3d27
+    r.z = t * dz + lightPos.z;     // 0x5f3d39
     return r;
 }
 

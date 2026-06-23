@@ -17,12 +17,19 @@ namespace guild::app {
 //   VIBE_Util_IntToStringRadix((unsigned)value, out, radix);  // == ultoa
 char* AnimationState_Update(int value, char* out, unsigned radix) {
     char* p = out;
+    // Compute the unsigned magnitude to feed the ultoa core. The original does
+    // `value = -value` (x86 `neg`) in the signed register and then uses it as
+    // unsigned; for value == INT_MIN that signed negation is UB in C++ but the
+    // x86 `neg` wraps to 0x80000000, which reinterpreted as unsigned is exactly
+    // (u32)value. We negate in the UNSIGNED domain to reproduce the same bit
+    // pattern with no signed-overflow UB — observably identical for every input.
+    u32 mag = static_cast<u32>(value);
     if (radix == 10 && value < 0) {
-        value = -value;          // formats |value| (the original negates in place)
+        mag = 0u - mag;          // unsigned two's-complement negate (== x86 neg)
         *p++ = '-';
     }
-    // VIBE_Util_IntToStringRadix(value, p, radix) — the unsigned radix core.
-    crt::StringUIntToString(static_cast<u32>(value), p, radix);
+    // VIBE_Util_IntToStringRadix(mag, p, radix) — the unsigned radix core.
+    crt::StringUIntToString(mag, p, radix);
     return out;
 }
 

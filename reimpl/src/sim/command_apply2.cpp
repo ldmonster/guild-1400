@@ -208,17 +208,18 @@ int ExBindObjectProto(CommandPacket& pkt, AckEntry* ack) {
 
 // gilde.exe 0x4968D4 — VIBE_Command_ExRemapAndValidateObject (opcode 0x0E).
 int ExRemapAndValidateObject(CommandPacket& pkt, AckEntry* ack) {
-    // The original reads/writes a WORD id at +0x10 (uses (unsigned __int16)).
+    // gilde.exe 0x4968e0: `xor eax,eax; mov ax,[ecx+10h]` => eax is the ZERO-
+    // extended u16 id (0..0xFFFF). The remap compares the FULL 32-bit eax:
+    //   cmp eax,0xFFFFFFFE  -> only matches when raw == 0xFFFE (a valid u16)
+    //   cmp eax,0xFFFFFFFD / 0xFFFFFFFC  -> never match (eax <= 0xFFFF) => DEAD
+    // So ONLY the -2 (0xFFFE) case remaps; -3/-4 are dead code in the binary.
+    // The remap takes LOWORD(dword_631288) and stores `ax` back at +0x10.
     u16 raw = pkt.get16(0x10);
-    i32 id = static_cast<i16>(raw);
-    switch (id) {
-        case -2: id = static_cast<i16>(g_lastObjectId); break;
-        case -3: id = static_cast<i16>(g_lastSceneId);  break;
-        case -4: id = static_cast<i16>(g_lastTradeId);  break;
-        default: id = static_cast<i32>(raw); break; // unsigned 16-bit otherwise
-    }
-    pkt.put16(0x10, static_cast<u16>(id));
-    i32 lookup = static_cast<i32>(static_cast<u16>(id)); // resolve uses (u16)v5
+    u16 id = raw;
+    if (raw == 0xFFFE)
+        id = static_cast<u16>(g_lastObjectId); // mov ax, dword_631288 (low word)
+    pkt.put16(0x10, id);                         // mov [ecx+10h], ax
+    i32 lookup = static_cast<i32>(id);           // and ecx,0FFFFh (zero-extended)
 
     ObjectRec* obj = nullptr;
     SceneNode* scene = nullptr;
@@ -376,7 +377,7 @@ int ExSetObjectState(CommandPacket& pkt, AckEntry* ack) {
     if (!slot)
         return 1;
     std::memcpy(slot->bytes, pkt.bytes + 0x11, 0x80);     // qmemcpy(slot, a1+17, 0x80)
-    AckOk(ack);
+    if (ack) { ack->status = 1; ack->slot = 0; ack->seq = 0; } // +0=1,+1=0,+6=0
     return 0;
 }
 
@@ -413,7 +414,9 @@ int ExReleaseOffice(CommandPacket& /*pkt*/, AckEntry* ack) {
 int ExSwapOfficeHolders(CommandPacket& pkt, AckEntry* ack) {
     if (ack) { ack->status = 2; ack->slot = 0; ack->seq = 0; }
     i32 ret = g_officeSwap(reinterpret_cast<const i32*>(pkt.bytes + 0x10));
-    if (ack && ret == 0) ack->status = 1; // *v3 = 1 only when ret==0 (and ack set)
+    // gilde.exe 0x49d1dd: `test eax,eax; jnz loc_49D1ED` -> `mov [edx],1` runs ONLY
+    // when ret != 0 (SwapHolders returned nonzero). Return value is (ret==0).
+    if (ack && ret != 0) ack->status = 1; // *v3 = 1 only when ret != 0 (and ack set)
     return (ret == 0);
 }
 

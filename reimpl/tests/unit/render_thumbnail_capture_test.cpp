@@ -95,6 +95,42 @@ TEST(RenderThumbCapture, NullSourceGate) {
     CHECK(!CaptureScreenThumbnail(src));
 }
 
+// wave-12 boundary: a 1x1 source surface. With screenWidth==1 the sample step is
+// tiny (1*0.003125), so every one of the 320x240 nearest-neighbour taps truncates
+// to src index 0 — the resample must stay within the single-pixel source (ASAN
+// clean) and the whole thumbnail becomes that one colour.
+TEST(RenderThumbCapture, OnePixelSourceNoOOB) {
+    ColorFormat fmt = Format565();
+    u16 only = (u16)PackColor(fmt, 0x10, 0x20, 0x30);
+    u16 px[1] = {only};
+    CaptureSource src;
+    src.pixels = px;
+    src.stridePx = 1;
+    src.screenWidth = 1;     // step = 1 * 0.003125 -> all taps land on index 0
+    src.screenHeight = 1;
+    src.fmt = fmt;
+    CHECK(CaptureScreenThumbnail(src));
+    const u16* thumb = ThumbnailBuffer();
+    CHECK_EQ((int)thumb[0], (int)only);
+    CHECK_EQ((int)thumb[kThumbWidth * kThumbHeight - 1], (int)only);
+}
+
+// wave-12 boundary: a screenshot of a 0-size target. The (w<=0||h<=0) guard must
+// short-circuit BEFORE any allocation / present lock — ok==false, empty buffers.
+TEST(RenderThumbCapture, ScreenshotZeroSizeGuarded) {
+    PresentGlobals g;
+    g.mode = PresentBackend::DDrawLockBlt;
+    g.ppvBits = 0;
+    int serial = 7;
+    ScreenshotResult r0 = CaptureScreenshot(g, Format565(), 0, 10, &serial);
+    CHECK(!r0.ok);
+    CHECK_EQ((int)r0.rgb.size(), 0);
+    ScreenshotResult r1 = CaptureScreenshot(g, Format565(), 10, 0, &serial);
+    CHECK(!r1.ok);
+    // serial still advances each call (post-increment happens before the guard).
+    CHECK_EQ(serial, 9);
+}
+
 // CaptureScreenshot through the REAL present path: lock a memory surface, draw a
 // gradient, grab it as 24-bit RGB, encode a BMP, and check the serial increments.
 TEST(RenderThumbCapture, ScreenshotPresentPath) {

@@ -58,11 +58,17 @@ struct GfxObject {
     GfxObject();
     template <typename T> T&       at(int off)       { return *reinterpret_cast<T*>(raw + off); }
     template <typename T> const T& at(int off) const { return *reinterpret_cast<const T*>(raw + off); }
+    // Unaligned by-value load — byte-identical to the original's unaligned x86 read.
+    template <typename T> T ld(int off) const {
+        T v; std::memcpy(&v, raw + off, sizeof(T)); return v;
+    }
 
     i32& sceneHandle() { return at<i32>(56); } // +56
     u8&  flags()       { return at<u8>(68); }  // +68  (bit 0x1)
-    i32& width()       { return at<i32>(78); } // +78  (16.16; >>16 = pixels)
-    i32& height()      { return at<i32>(82); } // +82  (16.16; >>16 = pixels)
+    // +78/+82 are unaligned 16.16 dwords (offset % 4 == 2). Read by value through an
+    // unaligned load (the original does an unaligned `mov`); >>16 gives the pixels.
+    i32  width()  const { return ld<i32>(78); } // +78  (16.16; >>16 = pixels)
+    i32  height() const { return ld<i32>(82); } // +82  (16.16; >>16 = pixels)
 };
 static_assert(sizeof(GfxObject) == kGfxObjStrideBytes, "GfxObject must be 84 bytes");
 

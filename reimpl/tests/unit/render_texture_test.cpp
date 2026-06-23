@@ -42,6 +42,54 @@ TEST(RenderTexture, TexelFetchMatchesRaster) {
 }
 
 // ===========================================================================
+// Colour-key flag — record +104 bit 2 (gilde.exe 0x5da714 writer @0x5dad52 /
+// 0x5db234 consumer @0x5db319). A >8bpp/24-bit source is colour-keyed; an
+// 8-bit indexed source and a name-flag ("_NM", bit 3) source are NOT. Golden
+// bit-by-bit predicate.
+// ===========================================================================
+TEST(RenderTexture, ColourKeyFlagBit2) {
+    Texture t;
+    TextureSetSize(t, 8);
+
+    // Fresh record: no flags -> not keyed (a decoded 8-bit source's default).
+    t.flags = 0;
+    CHECK(!TextureIsColourKeyed(t));
+
+    // The 24-bit / transparency load (0x5dad52: *v59 = (4*1)|... sets bit 2).
+    t.flags = kTexFlagColourKey;             // 0x04
+    CHECK(TextureIsColourKeyed(t));
+
+    // An 8-bit indexed source carries bit 5 (0x20) but NOT bit 2 -> not keyed.
+    t.flags = kTexFlagIndexed8;              // 0x20
+    CHECK(!TextureIsColourKeyed(t));
+
+    // A "_NM" source carries bit 3 (0x08, the mip-bias select) but NOT bit 2.
+    // This is the bit the wave-3/4 code wrongly treated as the colour key.
+    t.flags = kTexFlagNameNM;                // 0x08
+    CHECK(!TextureIsColourKeyed(t));
+
+    // Bit 3 alone never implies the colour key; both bits set is keyed by bit 2.
+    t.flags = (u8)(kTexFlagNameNM | kTexFlagColourKey);
+    CHECK(TextureIsColourKeyed(t));
+
+    // The fresh-load companion bits (alias bit1, no-downscale bit6) don't key.
+    t.flags = (u8)(kTexFlagAlias | kTexFlagNoDownscale | kTexFlagArg0Low);
+    CHECK(!TextureIsColourKeyed(t));
+
+    // A real 24-bit load record: alias(2)|colourkey(4)|indexed cleared. Keyed.
+    t.flags = (u8)(kTexFlagAlias | kTexFlagColourKey);   // 0x06
+    CHECK(TextureIsColourKeyed(t));
+
+    // Constant values are the exact +104 bits.
+    CHECK_EQ((int)kTexFlagArg0Low, 0x01);
+    CHECK_EQ((int)kTexFlagAlias, 0x02);
+    CHECK_EQ((int)kTexFlagColourKey, 0x04);
+    CHECK_EQ((int)kTexFlagNameNM, 0x08);
+    CHECK_EQ((int)kTexFlagIndexed8, 0x20);
+    CHECK_EQ((int)kTexFlagNoDownscale, 0x40);
+}
+
+// ===========================================================================
 // Texture slot manager — load into a slot, lookup, ref-count, recycle.
 // ===========================================================================
 TEST(RenderTexture, SlotLoadLookupRecycle) {

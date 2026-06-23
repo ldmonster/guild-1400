@@ -14,10 +14,13 @@ constexpr float  kTwo          = 2.0f;        // flt_628D00 = 0x40000000
 constexpr double kQuatWLo      = -1.0;        // dbl_628D08 = 0xBFF0000000000000
 constexpr float  kTwoPiF       = 6.2831855f;  // flt_628D10 = 0x40C90FDB (+2pi, float)
 constexpr float  kNegTwoPiF    = -6.2831855f; // flt_628D14 = 0xC0C90FDB (-2pi, float)
-constexpr double kTwoPi        = 6.283185307179586;  // dbl_628D18 = 0x401921FB54442EEA
-constexpr double kNegTwoPi     = -6.283185307179586; // dbl_628D20
-constexpr double kDetEpsilon   = 1.0102230246251565e-07; // dbl_628D38 ~ 1e-7 (det floor)
-constexpr double kGimbalEps    = 1.9073486328363354e-06; // dbl_628D40 ~ 2^-19 (toEuler)
+// NOTE: the binary's 2pi double is the slightly-imprecise 0x401921FB54442EEA
+// (mantissa ...EEA, NOT the correctly-rounded ...D18). The decimal below is the
+// shortest literal that round-trips to those exact bytes.
+constexpr double kTwoPi        = 6.28318530718;       // dbl_628D18 = 0x401921FB54442EEA (+2pi)
+constexpr double kNegTwoPi     = -6.28318530718;      // dbl_628D20 = 0xC01921FB54442EEA (-2pi)
+constexpr double kDetEpsilon   = 1e-07;               // dbl_628D38 = 0x3E7AD7F29ABCAF48 (det floor)
+constexpr double kGimbalEps    = 1.9073486336e-06;    // dbl_628D40 = 0x3EC00000001C5F68 (toEuler)
 constexpr float  kQuarter      = 0.125f;      // flt_628D48 = 0x3E000000
 constexpr float  kBasisEps     = 1.0000000116860974e-07f; // flt_628CFC = 0x33D6BF95 ~1e-7
 // Reference up axis used by BuildBasisFromAngle: {flt_5CA2D0,D4,D8} = {0,1,0}.
@@ -203,13 +206,15 @@ void MatrixToEuler(float* m) {
 //   the four 4-float rows of `a1` (rows at indices 0,4,8 plus the translation row
 //   at 12, and the pivot/extra blocks at 16..30), normalizing each and feeding the
 //   first through MatrixToEuler (writes Euler into a1[0..2]); the translation is
-//   0.125 * componentwise sum of the four row origins, stored to out[0..2].
-//   Returns the past-the-end source pointer (a1+16). 80-bit temps -> double.
+//   0.125 * componentwise sum of EIGHT row origins (float offsets 0,4,..,28),
+//   stored to out[0..2]. Returns the past-the-end source pointer (a1+32). 80-bit
+//   temps -> double.
 //
-//   This routine indexes a1 well past the 16-float matrix (up to a1[30]); in the
-//   original these are adjacent engine fields. We reproduce the exact index
-//   arithmetic; callers must pass a buffer large enough (>=31 floats). It has 0
-//   callers in gilde.exe, so this is a best-effort faithful translation.
+//   This routine indexes a1 well past the 16-float matrix (up to a1[30] for the
+//   basis vectors, and reads rows 16..28 in the translation sum); in the original
+//   these are adjacent engine fields. We reproduce the exact index arithmetic;
+//   callers must pass a buffer large enough (>=32 floats). It has 0 callers in
+//   gilde.exe, so this is a best-effort faithful translation.
 float* MatrixDecompose(float* a1, float* a2) {
     float v95[16];
     std::memset(v95, 0, sizeof(v95));
@@ -244,10 +249,16 @@ float* MatrixDecompose(float* a1, float* a2) {
 
     MatrixToEuler(v95);  // writes Euler angles into v95[0..2] (rotation result)
 
-    // Translation = 0.125 * componentwise sum of the four 4-float rows of a1.
+    // Translation = 0.125 * componentwise sum of the EIGHT 4-float rows of a1.
+    // Disasm @0x5cb7b6: `add esi, 80h` -> the loop end is a1 + 0x80 bytes = a1 + 32
+    // floats, and `add eax, 10h` advances one 4-float row per iteration, so it sums
+    // rows at float offsets 0,4,8,12,16,20,24,28 (8 rows, NOT 4). The 0.125 scale
+    // (flt_628D48) therefore averages 8 row origins. The function returns the
+    // past-the-end pointer eax == a1 + 32 (mov eax,esi before the loop holds a1;
+    // eax ends equal to esi = a1+0x80).
     float sx = 0.0f, sy = 0.0f, sz = 0.0f;
     float* p = a1;
-    float* end = a1 + 16;
+    float* end = a1 + 32;
     do {
         sx += p[0];
         sy += p[1];
@@ -257,33 +268,39 @@ float* MatrixDecompose(float* a1, float* a2) {
     a2[0] = sx * kQuarter;
     a2[1] = sy * kQuarter;
     a2[2] = sz * kQuarter;
-    return p;  // == a1 + 16
+    return p;  // == a1 + 32
 }
 
 // gilde.exe 0x5ca798 — VIBE_Math_QuatRotateVector
 //   Quaternion q = (q[0],q[1],q[2],q[3]) = (x,y,z,w). Builds the standard 3x3
 //   rotation matrix (scale 2.0 == flt_628D00) and applies it to v -> out.
 //
-//   FIDELITY NOTE / KNOWN ORIGINAL BUG: the binary computes all 9 matrix entries
-//   into a stack scratch, but its apply loop reads two slots (the +0x24/+0x28
-//   offsets) that ALIAS its uninitialized output temporaries, while two correctly
-//   computed off-diagonal entries (+0xC/+0x1C) are never read. The result for the
-//   third output row is therefore garbage (reads uninitialized stack). This
-//   routine has 0 callers in gilde.exe (dead code). We implement the INTENDED,
-//   correct rotation (all 9 computed entries placed in their natural 3x3 slots) so
-//   the function is usable and testable against the matrix path; the binary's
-//   uninitialized-read behavior is documented here rather than reproduced.
+//   FIDELITY NOTE / KNOWN ORIGINAL BUG (verified @0x5ca798 disasm): the binary
+//   lays out its scratch as +0x00 m00, +0x04 m01, +0x08 m02, +0x10 m11, +0x14 m12,
+//   +0x18 (a *buggy* "m10" = 2(x*y - w*y), not 2(wz+xy)), +0x20 m22; slots +0x0C
+//   and +0x1C are never written. The apply step then reads the +0x24/+0x28 slots
+//   (uninitialized stack, aliased to the output temporaries v14/v16) for two of the
+//   nine matrix*vector terms, and the diagonal-only first output row. So two
+//   off-diagonal entries are wrong/garbage and the result is unusable. The slot
+//   claims here are confirmed against the disasm. This routine has 0 callers in
+//   gilde.exe (dead code), so deviating from the binary bug is justified: we
+//   implement the INTENDED, correct rotation (all 9 standard quaternion->matrix
+//   entries in their natural 3x3 slots, full dot-product rows) so the function is
+//   usable and testable. Entries m00,m01,m02,m11,m12,m22 below match the binary's
+//   computed (pre-misread) values; m10 and m20 are the corrected intended values
+//   (the binary's v12/m10 is the 2(x*y - w*y) typo and its m20 slot is never even
+//   stored). The binary's uninitialized-read behavior is documented, not reproduced.
 void QuatRotateVector(const float* q, const float* v, float* out) {
     double x = q[0], y = q[1], z = q[2], w = q[3];
     // Matrix entries exactly as the original computes them (constant 2.0):
     double m00 = 1.0 - kTwo * (y * y + z * z);   // var_3C
     double m01 = (x * y - w * z) * kTwo;         // var_38 = 2(xy - wz)
     double m02 = (w * y + x * z) * kTwo;         // var_34 = 2(wy + xz)
-    double m10 = (w * z + x * y) * kTwo;         // var_30 = 2(wz + xy)
-    double m11 = 1.0 - kTwo * (z * z + x * x);   // var_2C
-    double m12 = (y * z - w * x) * kTwo;         // var_28 = 2(yz - wx)
-    double m20 = (x * z - w * y) * kTwo;         // var_24 region (corrected)
-    double m21 = (y * z + w * x) * kTwo;         // var_20 = 2(yz + wx)
+    double m10 = (w * z + x * y) * kTwo;         // CORRECTED: binary +0x18 is the typo 2(xy - wy)
+    double m11 = 1.0 - kTwo * (z * z + x * x);   // var_2C = +0x10
+    double m12 = (y * z - w * x) * kTwo;         // var_28 = +0x14 = 2(yz - wx)
+    double m20 = (x * z - w * y) * kTwo;         // CORRECTED: binary never stores this slot
+    double m21 = (y * z + w * x) * kTwo;         // 2(yz + wx)
     double m22 = 1.0 - kTwo * (y * y + x * x);   // var_1C
     out[0] = (float)(v[0] * m00 + v[1] * m01 + v[2] * m02);
     out[1] = (float)(v[0] * m10 + v[1] * m11 + v[2] * m12);

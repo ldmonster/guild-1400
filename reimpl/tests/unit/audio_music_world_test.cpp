@@ -104,6 +104,44 @@ TEST(AudioMusicWorld, SelectOutdoorNoEntry) {
     CHECK_EQ(audio::SelectOutdoorSeasonTrack(d, audio::kSpring), -1);
 }
 
+// --- WAVE-11 hardening: 0-track / many-track playlists ----------------------
+
+// An empty playlist (table.size() == 0): every lookup/scan must stay in bounds
+// and report "not found" without indexing an empty vector.
+TEST(AudioMusicWorld, EmptyPlaylistLookups) {
+    audio::MusicDirector d;            // no sink, empty table
+    CHECK_EQ(audio::FindTrackById(d, audio::kOutdoorTrackId), -1);
+    CHECK_EQ(audio::FindActiveTrackSlot(d), -1);
+    CHECK_EQ(audio::SelectOutdoorSeasonTrack(d, audio::kSpring), -1);
+    CHECK_EQ(audio::ResumeLocationTrack(d, 11), -1);
+    // A tick over an empty table must not deref any slot.
+    audio::PlaybackTick t{};
+    t.season = audio::kSpring;
+    d.lastSeason = audio::kSpring;     // no season change -> idle (re)start path
+    audio::PlaybackAction a = audio::UpdateOutdoorTrackPlayback(d, t);
+    CHECK(a == audio::PlaybackAction::kNone); // no outdoor entry -> nothing
+}
+
+// A many-track playlist with a track id appearing in a late entry and an entry
+// carrying an empty id list: scans must traverse every entry without OOB and
+// find the late match.
+TEST(AudioMusicWorld, ManyTrackPlaylistScans) {
+    audio::MusicDirector d;
+    for (int i = 0; i < 256; ++i) {
+        audio::TrackEntry e;
+        if (i == 200) e.ids = {audio::kOutdoorTrackId};
+        else if (i == 100) e.ids = {}; // empty id list (degenerate entry)
+        else e.ids = {1000 + i};
+        d.table.push_back(e);
+    }
+    CHECK_EQ(audio::FindTrackById(d, audio::kOutdoorTrackId), 200);
+    CHECK_EQ(audio::FindTrackById(d, 424242), -1);
+    // No slot active across all 256 entries.
+    CHECK_EQ(audio::FindActiveTrackSlot(d), -1);
+    d.table[255].active = true;
+    CHECK_EQ(audio::FindActiveTrackSlot(d), 255); // last entry, in bounds
+}
+
 // --- Track-update state transitions -----------------------------------------
 TEST(AudioMusicWorld, UpdateInitialSeasonLatch) {
     MockSink sink;

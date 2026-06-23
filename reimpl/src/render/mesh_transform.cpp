@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 // Faithful 1:1 reconstruction of the gilde.exe mesh-geometry cluster. The
 // originals read/write opaque object/mesh/vertex blocks by raw byte offset; we do
@@ -15,7 +16,14 @@ inline u8*  AtPtr(void* p, std::size_t off)  { return BytePtr(p) + off; }
 inline std::int32_t&  I32(void* p, std::size_t off) { return *reinterpret_cast<std::int32_t*>(AtPtr(p, off)); }
 inline u8&            U8(void* p, std::size_t off)  { return *AtPtr(p, off); }
 // Read a stored pointer (the original held 32-bit pointers; here native void*).
-inline void*  PtrAt(void* p, std::size_t off) { return *reinterpret_cast<void**>(AtPtr(p, off)); }
+// memcpy, not a `void**` deref: the slot sits at a 4-aligned (32-bit-era) record
+// offset, so reading a native 8-byte pointer via reinterpret_cast is misaligned-
+// access UB (UBSAN). The copy is byte-identical on x86 and well-defined.
+inline void*  PtrAt(void* p, std::size_t off) {
+    void* v;
+    std::memcpy(&v, AtPtr(p, off), sizeof(v));
+    return v;
+}
 
 // The matrix pivot the transforms feed ComputeBoneWorldMatrix: worldPivot when the
 // object's +528 sign byte is clear (>= 0), else null (== the original's

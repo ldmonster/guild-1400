@@ -19,8 +19,9 @@ guild::u32 DefaultGetCurrentDir(guild::u32 /*size*/, char* buf) {
     return 0;
 }
 void  DefaultMapLastError() {}
-void  DefaultSetErrnoEinval() {}
+void  DefaultSetErrnoEinval(int /*code*/) {}
 void* DefaultAllocMem(guild::u32 /*size*/) { return nullptr; }
+void  DefaultFreeMem(void* /*ptr*/) {}
 
 FileOps3Hooks g_hooks = {
     &DefaultGetProcessId,
@@ -28,6 +29,7 @@ FileOps3Hooks g_hooks = {
     &DefaultMapLastError,
     &DefaultSetErrnoEinval,
     &DefaultAllocMem,
+    &DefaultFreeMem,
 };
 
 // Module-static 256-byte line scratch buffer (mirrors byte_1407BB0).
@@ -44,13 +46,18 @@ FileOps3Hooks SetFileOps3Hooks(const FileOps3Hooks* hooks) {
         if (!g_hooks.mapLastError)   g_hooks.mapLastError    = &DefaultMapLastError;
         if (!g_hooks.setErrnoEinval) g_hooks.setErrnoEinval   = &DefaultSetErrnoEinval;
         if (!g_hooks.allocMem)       g_hooks.allocMem         = &DefaultAllocMem;
+        if (!g_hooks.freeMem)        g_hooks.freeMem          = &DefaultFreeMem;
     } else {
         g_hooks = FileOps3Hooks{
             &DefaultGetProcessId, &DefaultGetCurrentDir, &DefaultMapLastError,
-            &DefaultSetErrnoEinval, &DefaultAllocMem,
+            &DefaultSetErrnoEinval, &DefaultAllocMem, &DefaultFreeMem,
         };
     }
     return prev;
+}
+
+void VfsFreeMem(void* ptr) {
+    if (ptr) g_hooks.freeMem(ptr);
 }
 
 // ----------------------------------------------------------------------------
@@ -307,7 +314,7 @@ char* VfsGetWorkingDir(char* dst, guild::u32 size) {
     }
     if (dst) {
         if (len > size) {
-            g_hooks.setErrnoEinval();
+            g_hooks.setErrnoEinval(14);   // 0x5eef0d: mov eax, 0Eh (EINVAL)
             return nullptr;
         }
     } else {
@@ -316,7 +323,7 @@ char* VfsGetWorkingDir(char* dst, guild::u32 size) {
             need = size;
         dst = static_cast<char*>(g_hooks.allocMem(need));
         if (!dst) {
-            g_hooks.setErrnoEinval();
+            g_hooks.setErrnoEinval(5);    // 0x5eeef2: mov eax, 5 (EIO)
             return nullptr;
         }
     }

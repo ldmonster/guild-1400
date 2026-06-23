@@ -131,12 +131,18 @@ int PersonFindEmploymentRelation(Person* rec) {
             int v2 = 0, v3 = 0;
             for (int off = kPf2RelArray + 12; off != kPf2RelArray + 32; off += 4) {
                 i32 e = PersonGetDword(&p, off);
-                if (e == selfId)
+                // disasm 0x58da29: on match -> `or bl,1` then fall through to
+                // `mov edx,ecx` (++v3). Only the -1 terminator jumps PAST the
+                // ++v3 (loc_58DA39). So both a match and any non-(-1) value
+                // increment v3; only -1 skips it.
+                if (e == selfId) {
                     v2 |= 1;
-                else if (e == -1)
-                    ; /* terminator: fall through without ++v3 (LABEL_22) */
-                else
                     ++v3;
+                } else if (e == -1) {
+                    ; /* terminator: skip ++v3 (loc_58DA39) */
+                } else {
+                    ++v3;
+                }
             }
             if (v2 && v3 < 5)
                 return 0;  // structural relation found (xor end==0)
@@ -216,14 +222,23 @@ int PersonComputeAssetWorth(Person* rec, int includeBuildings) {
 // ===========================================================================
 bool PersonCheckDebtRatioCritical(Person* rec, int reserve) {
     int v2 = g_pp2Hooks->SumCurrencyHeld(rec);
+    // var_10 = (float)(reserve + v2): the int sum is narrowed to float (fild;fstp).
     float net = static_cast<float>(reserve + v2);
+    // fldz;fcomp var_10;jnb -> continue when net <= 0; return 0 when net > 0.
     if (net > 0.0f)
         return false;
-    double wealth = static_cast<double>(g_pp2Hooks->ComputeTotalWealth(rec))
-                  - static_cast<double>(net);
+    // var_C = (float)((double)wealth - net): wealth-net is computed in x87 then
+    // STORED BACK TO A 4-byte float (fsub;fstp var_C @0x59202b/0x592031). The
+    // denominator is therefore single precision before the divide.
+    float denom = static_cast<float>(
+        static_cast<double>(g_pp2Hooks->ComputeTotalWealth(rec))
+        - static_cast<double>(net));
     u8 k = PersonGetByte(rec, kPfKind);
+    // numerator: |trunc(net)| -> int (ConvertX truncates toward zero, fistp),
+    // abs via cdq/xor/sub, then fild back to fp.
     int absNet = std::abs(static_cast<int>(net));
-    double ratio = static_cast<double>(absNet) / wealth;
+    // fild var_8; fdiv var_C; fcomp dbl  -> ratio = |net| / denom > threshold.
+    double ratio = static_cast<double>(absNet) / static_cast<double>(denom);
     double threshold = (k == 6 || k == 7) ? 0.07 : 0.20;  // dbl_626A6C / dbl_626A64
     return ratio > threshold;
 }

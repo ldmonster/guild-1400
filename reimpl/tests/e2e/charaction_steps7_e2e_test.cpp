@@ -10,6 +10,8 @@
 #include "sim/gametime.h"
 #include "sim/npcaction.h"
 
+#include <cstring>
+
 using namespace guild;
 using namespace guild::sim;
 
@@ -29,10 +31,15 @@ struct Bridge {
 };
 Bridge g_b;
 
+// Person/object records carry their entity id at byte +1 in the binary (disasm
+// 0x4de0ae, 0x4df8a1), not the He_* +4. Model that for the golden vectors.
+i32  Pid(const HeRecord* r) { i32 v; std::memcpy(&v, HeBytes(const_cast<HeRecord*>(r)) + 1, sizeof(v)); return v; }
+void SetPid(HeRecord* r, i32 id) { std::memcpy(HeBytes(r) + 1, &id, sizeof(id)); }
+
 HeRecord* bPerson(i32, int, int, i32 key) {
     if (key == 68 || key == 69) return g_b.startp;
-    if (g_b.startp && key == He_Id(g_b.startp)) return g_b.startp;
-    if (g_b.goalp && key == He_Id(g_b.goalp)) return g_b.goalp;
+    if (g_b.startp && key == Pid(g_b.startp)) return g_b.startp;
+    if (g_b.goalp && key == Pid(g_b.goalp)) return g_b.goalp;
     return g_b.startp;
 }
 HeRecord* bFindObj(i32) { return g_b.cart; }
@@ -114,12 +121,15 @@ TEST(CharActionSteps7E2E, AllocThenDriveCoroutine) {
     Block sb{}, gb{}, cbk{}, vbk{}, hb{};
     HeRecord* sp = reinterpret_cast<HeRecord*>(&sb);
     HeRecord* gp = reinterpret_cast<HeRecord*>(&gb);
-    He_Id(sp) = 101; He_Id(gp) = 202;
+    SetPid(sp, 101); SetPid(gp, 202);   // person id @ +1 (binary layout)
     g_b.startp = sp; g_b.goalp = gp;
     HeRecord* cart = reinterpret_cast<HeRecord*>(&cbk);
     g_b.cart = cart;
     g_b.veh = reinterpret_cast<HeRecord*>(&vbk);
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 59) = g_b.veh;
+    {  // +59 is unaligned for a pointer; store via memcpy (byte-identical, no UB).
+        HeRecord* _p = g_b.veh;
+        std::memcpy(HeBytes(cart) + 59, &_p, sizeof(_p));
+    }
 
     HeRecord* hp = reinterpret_cast<HeRecord*>(&hb);
     Cas7_StartId(hp) = 101; Cas7_GoalId(hp) = 202; Cas7_CartId(hp) = 303;
@@ -176,7 +186,10 @@ TEST(CharActionSteps7E2E, AllocThenDriveCoroutine) {
     Cas7_OriginId(hp) = 202;                      // == goal id
     int free29D = g_b.free29;
     RunTransport(hp);
-    CHECK_EQ(He_CityId(hp), 3);                   // currentSceneCity stamped
+    // binary SetTargetCityRef @0x4c9484: *(h+8)=city(3), *(h+12)=cityRecipientId(3)
+    // (bCityRecip returns 0). Origin(202)==Pid(goalp) -> arm cmd29(1).
+    CHECK_EQ(He_CityIndex(hp), 3);
+    CHECK_EQ(He_CityId(hp), 0);
     CHECK_EQ(g_b.free29, free29D + 1);
     CHECK_EQ(g_b.lastFree29, 1);                  // arrival arms cmd29(1)
 
@@ -184,7 +197,10 @@ TEST(CharActionSteps7E2E, AllocThenDriveCoroutine) {
     He_State(hp) = -1;
     He_Flags(hp) = 0;
     *reinterpret_cast<u8*>(HeBytes(cart) + 19) = 0x40;       // in-transit flag set
-    *reinterpret_cast<HeRecord**>(HeBytes(cart) + 36) = hp;  // owner == hp
+    {  // +36 is unaligned for a 64-bit pointer; store via memcpy (no UB).
+        HeRecord* _p = hp;
+        std::memcpy(HeBytes(cart) + 36, &_p, sizeof(_p));     // owner == hp
+    }
     RunTransport(hp);
     CHECK_EQ(*reinterpret_cast<i32*>(HeBytes(cart) + 36), 0);          // owner cleared
     CHECK_EQ(*reinterpret_cast<u8*>(HeBytes(cart) + 19) & 0x40, 0);    // flag cleared

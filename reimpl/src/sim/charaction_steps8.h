@@ -36,6 +36,8 @@
 // NpcClock()/GameTimeAdvance/GameTimeCompare/GameTimeDiffMinutes are reused.
 //
 // Addresses are absolute, imagebase 0x400000.
+#include <cstring>
+
 #include "guild/common/types.h"
 #include "sim/he.h"
 
@@ -68,7 +70,12 @@ inline i32& Cas8_Misc216(HeRecord* h)    { return *reinterpret_cast<i32*>(HeByte
 // person record's per-object field byte. We expose the byte at +0xAC (which is the
 // high byte the >>24 lands on after the dword load at +0xA9). The translated code
 // uses the dedicated FieldSelector() helper to keep the read byte-faithful.
-inline i32  Cas8_FieldSelDword(HeRecord* h) { return *reinterpret_cast<i32*>(HeBytes(h) + 169); }
+// +169 is NOT 4-byte aligned (169 % 4 == 1); the original x86 binary reads it with an
+// unaligned `*(int*)(h+169)`. Binding an i32& to a misaligned address is UB (UBSAN
+// flags it), so load the four little-endian bytes via memcpy — value is identical.
+inline i32  Cas8_FieldSelDword(HeRecord* h) {
+    i32 v; std::memcpy(&v, HeBytes(h) + 169, sizeof(v)); return v;
+}
 
 // ===========================================================================
 // Recovered .rdata float constants (gilde.exe). Default values are the observed
@@ -82,16 +89,26 @@ inline i32  Cas8_FieldSelDword(HeRecord* h) { return *reinterpret_cast<i32*>(HeB
 //   flt_61F538 / flt_61F53C — RunPick field-fill divisor base + ceiling.
 //   dbl_61F4F8             — RunHerd workstation bonus factor.
 // ===========================================================================
-constexpr double kArrestWorthBias  = 1.0;   // flt_61F624
-constexpr double kArrestWorthScale = 0.5;   // flt_61F628
-constexpr double kEscortSpeedFac   = 0.5;   // dbl_61F630
-constexpr double kPickCeiling      = 100.0; // dbl_61F518
-constexpr double kPickMulA         = 0.1;   // dbl_61F520
-constexpr double kPickMulB         = 1.0;   // dbl_61F528
-constexpr double kPickWorkBonus    = 0.1;   // dbl_61F530
-constexpr double kPickFieldDiv     = 0.1;   // flt_61F538
-constexpr double kPickFieldCeil    = 100.0; // flt_61F53C
-constexpr double kHerdWorkBonus    = 0.1;   // dbl_61F4F8
+// Verified byte-for-byte against the gilde.exe .rdata image (get_bytes):
+//   flt_61F624 = 43800000 = 256.0 ; flt_61F628 = 42480000 = 50.0
+//   dbl_61F630 = 4024000000000000 = 10.0
+//   dbl_61F518 = 406F800000000000 = 252.0 ; dbl_61F520 = 3FA1111111111111 = 1/30
+//   dbl_61F528 = 4020000000000000 = 8.0   ; dbl_61F530 = 3F847AE147AE147B = 0.01
+//   flt_61F538 = 3B820821 = 0.0039682542 (1/252) ; flt_61F53C = 437C0000 = 252.0
+//   dbl_61F4F8 = 3F847AE147AE147B = 0.01
+// The earlier 1.0/0.5/0.1/100.0 placeholders were WRONG; corrected here.
+constexpr double kArrestWorthBias  = 256.0;                // flt_61F624
+constexpr double kArrestWorthScale = 50.0;                 // flt_61F628
+constexpr double kEscortSpeedFac   = 10.0;                 // dbl_61F630
+constexpr double kPickCeiling      = 252.0;               // dbl_61F518
+constexpr double kPickMulA         = 0.03333333333333333; // dbl_61F520 (1/30)
+constexpr double kPickMulB         = 8.0;                  // dbl_61F528
+constexpr double kPickWorkBonus    = 0.01;                 // dbl_61F530
+// flt_61F538 is a 32-bit float constant (loaded with `fld dword`); express it as the
+// exact float value so the double math reproduces the x87 promotion of the f32 load.
+constexpr double kPickFieldDiv     = static_cast<double>(0.0039682542f); // flt_61F538 (1/252)
+constexpr double kPickFieldCeil    = 252.0;              // flt_61F53C
+constexpr double kHerdWorkBonus    = 0.01;                // dbl_61F4F8
 
 // ===========================================================================
 // CharActionStep8 cross-cluster leaves. A null member installs an inert default.

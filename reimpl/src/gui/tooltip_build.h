@@ -46,12 +46,12 @@ extern const u32 kBuildingColors[kBuildingColorCount];
 // building record. All values are recovered directly from the decompile; the renderer
 // (VIBE_Text_RenderRichString) and form selection are the only deferred parts.
 struct BuildingTooltipLayout {
-    u32 titleColor;   // kBuildingColors[record[+583]]  (rendered with id 39)
-    int nameTextId;   // 14 * code + 1078               (id 39 subject / id 41 uses field)
-    int iconObjectId; // code + 1010                    (icon added with VIBE_Object_AddToWindow)
-    int descColor;    // kBuildingColors[record[+583]] again (id 42)
-    int salePrice;    // VIBE_Building_ComputeSalePrice(code) (id 40)  -- supplied by caller
-    int extraField;   // *(record + 579)                (id 41)
+    u32 titleColor;   // kBuildingColors[record[+583]]  (id 0x27 subject, 4f7944-4f794b)
+    int nameTextId;   // 14*(i8)code + 1078             (id 0x27, 4f794c-4f795f)
+    int descTextId;   // 14*(i8)code + 1079             (RichString @0x4f7995, no explicit id)
+    int descColor;    // kBuildingColors[record[+583]] again (id 0x2A, 4f79a9-4f79bd)
+    int salePrice;    // VIBE_Building_ComputeSalePrice(code) (id 0x28)  -- supplied by caller
+    int extraField;   // *(record + 579)                (id 0x29, 4f79f2)
 };
 
 // gilde.exe 0x4f78e4 — assemble the building tooltip's layout values from the record.

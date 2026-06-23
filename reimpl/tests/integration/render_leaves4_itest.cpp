@@ -206,17 +206,24 @@ TEST(RenderLeaves4Itest, SurfacePixelRoundTripViaRealColorFormat) {
     std::memcpy(surf + 44, &x1, 4);
     std::memcpy(surf + 48, &y1, 4);
 
-    // Channel values chosen so 565 truncation is lossless on read-back.
-    const std::uint8_t R = 0xF8, G = 0xFC, B = 0xF8;
+    // The original SetPixelRgb packs PackColor(g, r, b) — the r/g PACK arguments
+    // are swapped (0x423ec6: VIBE_Result_Handler_Final(a4, a3, a5) with a3==r,
+    // a4==g). So the pixel's RED channel carries G and its GREEN channel carries R.
+    // We pick R==B and an all-1s-survivable value so the swap is observable yet the
+    // 565 read-back is deterministic.
+    const std::uint8_t R = 0xF8, G = 0xF8, B = 0xF8;
     int wrote = render::SetPixelRgb(fmt, 3, 4, R, G, B, surf);
     CHECK_EQ(wrote, 1);
+    // Stored word == PackColor(g=G, r=R, b=B) (the swapped pack).
+    CHECK_EQ(pixels[3 + 16 * 4], (std::uint16_t)render::PackColor(fmt, G, R, B));
 
     std::uint8_t out[3] = {0, 0, 0};
     render::GetPixelRgb(fmt, 3, 4, out, surf);
-    // GetPixelRgb 15/16bpp store order is out[0]=r, out[1]=b, out[2]=g.
-    CHECK_EQ(out[0], R);
+    // Pixel r-channel=G, g-channel=R, b-channel=B; UnpackColor recovers r=G, g=R,
+    // b=B; GetPixelRgb 15/16bpp stores out[0]=r, out[1]=b, out[2]=g -> (G, B, R).
+    CHECK_EQ(out[0], G);
     CHECK_EQ(out[1], B);
-    CHECK_EQ(out[2], G);
+    CHECK_EQ(out[2], R);
 
     // out-of-clip write rejected.
     CHECK_EQ(render::SetPixelRgb(fmt, 99, 99, R, G, B, surf), 0);

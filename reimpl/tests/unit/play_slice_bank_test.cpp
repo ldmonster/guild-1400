@@ -47,6 +47,25 @@ i32 SeedBankWorld(i16 startCash) {
 
 } // namespace
 
+// --- golden: pin the EnqueueCmd15 (@0x494604) packet-staging byte offsets + the
+// borrower-Person folded field offsets. These recovered constants drive the on-wire
+// loan packet layout and the apply's cash/debt mutation. Values traced to
+// slice_bank.h's recovered-value comments. ---
+TEST(PlaySliceBankUnit, EnqueueCmd15PacketOffsetsGolden) {
+    CHECK_EQ((int)kLoanCmdOpcode, 15);     // VIBE_Command_EnqueueCmd15
+    CHECK_EQ((int)kLoanLenderOff, 0x10);   // v6 = a1 lender (dword)
+    CHECK_EQ((int)kLoanBorrowOff, 0x14);   // v7 = a2 borrower (dword)
+    CHECK_EQ((int)kLoanPlayerOff, 0x1C);   // v8 = a4 player (byte)
+    CHECK_EQ((int)kLoanAmountOff, 0x1D);   // v9 = a3 amount (dword)
+}
+
+TEST(PlaySliceBankUnit, BorrowerFieldOffsetsGolden) {
+    CHECK_EQ((int)kBankCashFieldOff, 0x0A);       // Person.cash (GetCashAmount)
+    CHECK_EQ((int)kBankDebtFieldOff, 0x2C);       // folded debt accumulator (Person pad)
+    CHECK_EQ((int)kFamilyWealthFieldOff, 18 * 4); // *((_DWORD*)family + 18) == +72
+    CHECK_EQ((int)kFamilyWealthFieldOff, 72);
+}
+
 // --- classifier golden: a TAKE loan -> opcode-15 command. -----------------------
 TEST(PlaySliceBankUnit, ClassifyTakeLoanGolden) {
     i32 id = SeedBankWorld(/*startCash=*/100);
@@ -148,4 +167,47 @@ TEST(PlaySliceBankUnit, SliceDeterministic) {
     CHECK_EQ(a.hashAfterDay, b.hashAfterDay);
     CHECK_EQ(a.cashAfter, b.cashAfter);
     CHECK_EQ(a.debtAfter, b.debtAfter);
+}
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-12): an out-of-range / unknown borrower account must not read
+// or write any Person record out of bounds. PersonFindRecordById returns nullptr
+// for an unknown id, so the cash/debt apply and readback are inert no-ops. Drive
+// far-out-of-range and negative account ids and assert no OOB (ASAN) + 0 results.
+// ---------------------------------------------------------------------------
+TEST(PlaySliceBankUnit, UnknownBorrowerAccountInertNoOOB) {
+    SeedBankWorld(/*startCash=*/100);   // only id 4242 exists
+    sim::CommandQueue q; q.Init(); q.set_standalone(true);
+
+    BankInteraction bi;
+    bi.side = LoanSide::kTake;
+    bi.lenderId = -1;
+    bi.borrowerId = 777777;             // no such Person -> nullptr
+    bi.amount = 500;
+    bi.player = 0;
+
+    BankSliceResult r = RunBankSlice(bi, 0x5A5A, q);
+    CHECK(r.command.issued);            // a positive take still classifies
+    // No record -> the folded cash/debt fields cannot move; readbacks are 0.
+    CHECK_EQ((long long)r.cashBefore, 0LL);
+    CHECK_EQ((long long)r.cashAfter, 0LL);
+    CHECK_EQ((long long)r.debtBefore, 0LL);
+    CHECK_EQ((long long)r.debtAfter, 0LL);
+}
+
+TEST(PlaySliceBankUnit, NegativeBorrowerAccountInertNoOOB) {
+    SeedBankWorld(/*startCash=*/100);
+    sim::CommandQueue q; q.Init(); q.set_standalone(true);
+
+    BankInteraction bi;
+    bi.side = LoanSide::kRepay;
+    bi.lenderId = -1;
+    bi.borrowerId = -12345;            // negative id -> nullptr
+    bi.amount = 50;
+    bi.player = 0;
+
+    BankSliceResult r = RunBankSlice(bi, 0x6B6B, q);
+    CHECK(r.command.issued);
+    CHECK_EQ((long long)r.cashAfter, 0LL);
+    CHECK_EQ((long long)r.debtAfter, 0LL);
 }

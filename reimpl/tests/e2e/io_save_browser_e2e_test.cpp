@@ -107,9 +107,10 @@ TEST(IoSaveBrowserE2E, EnumerateThenMapSlots) {
     std::memset(recs, 0, sizeof(recs));
     int n = SaveBrowserEnumerateSaveFiles("SAVE/", VfsRoot(), kSaveExt, recs);
     CHECK_EQ(n, 4);   // README.TXT excluded
-    // Enumerator records hold the FILE NAME (incl. extension) at +9.
-    CHECK(std::strcmp(recs[0].name, "AUTOSAVE.SAV") == 0);
-    CHECK(std::strcmp(recs[3].name, "QUICKSAVE.SAV") == 0);
+    // Enumerator records hold the FILE NAME TRUNCATED at its '.' at +9 (binary-exact
+    // @0x569530: it is the +9 NAME field, not +265, that StrChr-truncates the ext).
+    CHECK(std::strcmp(recs[0].name, "AUTOSAVE") == 0);
+    CHECK(std::strcmp(recs[3].name, "QUICKSAVE") == 0);
 
     // Stage 2 (the real flow): for each enumerated file the loader would read the
     // save HEADER, whose +9 field is the in-game SAVE NAME. We model that name here
@@ -257,6 +258,6 @@ TEST(IoSaveBrowserE2E, RealAssetCityScanGuarded) {
                                           "\x2e\x43\x54\x59" /* ".CTY" */, recs);
     CHECK(n >= 1);
     if (n >= 1)
-        CHECK(std::strcmp(recs[0].name, "AUGSBURG.CTY") == 0);
+        CHECK(std::strcmp(recs[0].name, "AUGSBURG") == 0);  // +9 NAME truncated at '.'
     VfsTreeShutdown();
 }

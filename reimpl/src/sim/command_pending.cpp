@@ -106,9 +106,17 @@ CommandPacket* FindFragment(CommandPacket* head, CommandPacket* (*next)(CommandP
 // reasm[0..123]; copy 2 bytes from frag+142 into reasm[124..125]. If reasm_len
 // <= 126 we are done; else for each following fragment (chained via its +12)
 // copy 128 bytes from frag+16 into reasm at +126, +254, ... until the cumulative
-// length (starting at 126) reaches reasm_len. Each consumed fragment's opcode
-// byte is set to 0 (so the skip-loop won't re-dispatch it). Returns fragment
-// count consumed.
+// length (starting at 126) reaches reasm_len.
+//
+// As each fragment is consumed the original clears it: opcode byte -> 0 (so the
+// dispatch skip-loop won't re-process it) AND its +12 link -> 0. The header's +12
+// is cleared the moment the first fragment is matched (before any copy).
+//
+// RETURN (binary): on full reassembly returns dword_11AA478 (the reasm_len); on
+// header.+12==0 or a missing fragment returns 0. (The original returns the `eax`
+// register, which is dword_11AA478 at the LABEL_19 completion point and 0/NULL on
+// the not-found paths — NOT a fragment count.) The sole live caller
+// (ExecReceivedCommands) discards this value.
 int ReassembleReceived(PendingState& state, CommandPacket& header,
                        CommandPacket* head, CommandPacket* (*next)(CommandPacket*)) {
     u32 link = header.get32(12);                 // *(_DWORD *)(a1 + 12)
@@ -118,36 +126,50 @@ int ReassembleReceived(PendingState& state, CommandPacket& header,
     const u8 flagByte = header.bytes[3];         // *(a1 + 3)
     CommandPacket* frag = FindFragment(head, next, flagByte, link);
     if (!frag)
-        return 0;                                // first fragment not arrived
+        return 0;                                // first fragment not arrived (result==0)
     header.put32(12, 0);                         // *(v1 + 12) = 0  (clear header link)
 
-    int consumed = 0;
     int total = 126;                             // v3 = 126
     state.reasm_len = frag->get16(16);           // dword_11AA478 = *(u16*)(v1+16)
     std::memcpy(state.reasm + 0, frag->bytes + 18, kReassembleHeadCap); // 124 bytes
     std::memcpy(state.reasm + 124, frag->bytes + 142, 2);               // unk_1077BDC
     frag->bytes[0] = 0;                          // *(BYTE*)v1 = 0
-    ++consumed;
 
     int reasmLen = static_cast<int>(state.reasm_len);
-    if (reasmLen > 126) {                         // need more fragments
-        u8* dst = state.reasm + 126;             // &unk_1077BDE
-        while (true) {
-            link = frag->get32(12);              // this fragment's +12 -> next Count
-            CommandPacket* nf = FindFragment(head, next, flagByte, link);
-            if (!nf)
-                break;                            // chain broken / fragment missing
-            frag = nf;
-            std::memcpy(dst, frag->bytes + 16, kFragChunkBytes); // 128 bytes
-            total += 128;                         // v3 += 128
-            dst += 128;
-            frag->bytes[0] = 0;                   // *(BYTE*)v1 = 0
-            ++consumed;
-            if (total >= reasmLen)                // v3 >= dword_11AA478
-                break;
+    if (reasmLen <= 126) {                        // single-fragment payload: LABEL_19
+        frag->put32(12, 0);                       // *(v1 + 12) = 0
+        return reasmLen;                          // result = dword_11AA478
+    }
+
+    // need more fragments
+    u8* dst = state.reasm + 126;                 // &unk_1077BDE
+    // HARDENING (wave-11, rule-8 safety): reasm_len comes straight off the wire
+    // (frag+16, a u16 up to 65535). The original chunk loop has NO destination
+    // bound — it copies 128 bytes per fragment until total >= reasm_len, so a
+    // malformed fragment with a huge reasm_len overruns the fixed reasm buffer.
+    // A valid block built by GeneratePendingPackets is capped at kPendingMaxBlock
+    // (1022) so its reassembly never exceeds kReassembleBufBytes; this end-of-
+    // buffer bound is byte-identical on every valid chain and only stops the copy
+    // when a chunk would overrun.
+    const u8* reasm_end = state.reasm + kReassembleBufBytes;
+    while (true) {
+        link = frag->get32(12);                  // this fragment's +12 -> next Count
+        CommandPacket* nf = FindFragment(head, next, flagByte, link);
+        if (!nf)
+            return 0;                            // chain broken / fragment missing (result==0)
+        frag->put32(12, 0);                      // *(v1 + 12) = 0  (clear consumed link)
+        if (dst + kFragChunkBytes > reasm_end)
+            return reasmLen;                     // safety stop (valid chains never hit)
+        frag = nf;
+        std::memcpy(dst, frag->bytes + 16, kFragChunkBytes); // 128 bytes
+        total += 128;                            // v3 += 128
+        dst += 128;
+        frag->bytes[0] = 0;                      // *(BYTE*)v1 = 0
+        if (total >= reasmLen) {                 // v3 >= dword_11AA478 -> LABEL_19
+            frag->put32(12, 0);                  // *(v1 + 12) = 0
+            return reasmLen;                     // result = dword_11AA478
         }
     }
-    return consumed;
 }
 
 // ===========================================================================

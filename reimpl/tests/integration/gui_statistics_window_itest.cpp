@@ -28,13 +28,15 @@ TEST(GuiStatisticsItest, TaxRowRoundsMatchWorldCore) {
 }
 
 TEST(GuiStatisticsItest, GeneralColumnsTrackWorldColumnCount) {
-    // The general window walks 28 floats per column (do/while v6 != 448, stride 16).
+    // The general window walks 27 floats per column starting at byte offset 16
+    // (do/while v6 = 16..448, stride 16) — stride-element 0 is skipped, so the n-th
+    // emitted entry reads col[n+1].
     StatGeneralSummary s{};
     std::vector<float> col(28);
     for (int i = 0; i < 28; ++i) col[i] = (float)i;
     StatGeneralPlan plan = Statistics_BuildGeneralPlan(s, col, col);
-    CHECK_EQ((int)plan.colLeft.size(), kStatGenColCount);
+    CHECK_EQ((int)plan.colLeft.size(), kStatGenColCount);  // 27
     CHECK_EQ((int)plan.colRight.size(), kStatGenColCount);
-    CHECK(plan.colLeft[5] == "5.000");
-    CHECK(plan.colRight[27] == "27.000");
+    CHECK(plan.colLeft[5] == "6.000");    // == col[6]
+    CHECK(plan.colRight[26] == "27.000"); // == col[27], the last entry
 }

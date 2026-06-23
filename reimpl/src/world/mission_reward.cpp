@@ -11,6 +11,14 @@
 namespace guild::world {
 
 // gilde.exe 0x539e48 — scan 128 slots (stride 9 dwords == 36 bytes), fail owned.
+//   do { if (byte_122FEC0[v2*4] && owner == dword_122FEC4[v2])
+//          result = RunFailureDialog(type, v3); v2 += 9; } while (v2 != 1152);
+//   return result;
+// The binary RETURNS the last RunFailureDialog result (or the owner unchanged when
+// nothing matched). RunFailureDialog is a GUI frame-loop boundary, routed here
+// through failHook. We instead return the MATCHED COUNT — a faithful observable of
+// the scan itself (loop bound + occupancy + owner compare are reproduced exactly);
+// the binary's edx/eax return is the dialog boundary value, not recoverable here.
 int MissionFinishByOwner(i32 owner, MissionFailHook failHook, void* ctx) {
     int matched = 0;
     for (int slot = 0; slot < kMissionSlotCount; ++slot) {

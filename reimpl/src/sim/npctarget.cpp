@@ -61,6 +61,11 @@ PersonHandle NpcTarget_FindNearestEnemy(PersonHandle person) {
         PersonHandle cand[5] = {};
         int n = g_thooks->collectSuccessors
                     ? g_thooks->collectSuccessors(catC, 5, cand) : 0;
+        // Guard: never read past the 5-slot buffer we handed the collector. The
+        // original collector respects the cap (so valid runs are unchanged); this
+        // only prevents OOB if a hook reports a count larger than the buffer.
+        if (n < 0) n = 0;
+        if (n > 5) n = 5;
         for (int i = 0; i < n; ++i) {
             PersonHandle c = cand[i];
             if (c == person)
@@ -168,6 +173,9 @@ u8 NpcTarget_PickDirectionSeqA(PersonHandle person, u8 seed) {
         i32 ids[6] = {};
         int n = g_thooks->collectByCategory
                     ? g_thooks->collectByCategory(dir[k], 6, ids) : 0;
+        // Guard: clamp to the 6-slot buffer we provided (original respects the cap).
+        if (n < 0) n = 0;
+        if (n > 6) n = 6;
         if (n >= 3) {
             double sum = 0.0;
             for (int i = 0; i < n; ++i) {
@@ -195,6 +203,9 @@ u8 NpcTarget_PickDirectionSeqB(PersonHandle person, u8 seed) {
         i32 ids[6] = {};
         int n = g_thooks->collectByCategory
                     ? g_thooks->collectByCategory(dir[k], 6, ids) : 0;
+        // Guard: clamp to the 6-slot buffer we provided (original respects the cap).
+        if (n < 0) n = 0;
+        if (n > 6) n = 6;
         if (n >= 3) {
             double sum = 0.0;
             int pairs = 0;

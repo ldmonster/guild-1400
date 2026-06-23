@@ -156,27 +156,28 @@ int SuperviseStammtisch(const StammtischSeat* seats, int seatCount) {
 // ---------------------------------------------------------------------------
 // 0x45df7c — VIBE_MeisterAi_FlagIdleStaff.
 // ---------------------------------------------------------------------------
-int FlagIdleStaff(BuildingFlag* building, int /*buildId*/, StaffSlot* slots,
+int FlagIdleStaff(BuildingFlag* building, int buildId, StaffSlot* slots,
                   int slotCount, const SupervisionHooks& hooksIn) {
     SupervisionHooks h = WithDefaults(hooksIn);
     if (!building)
-        return -1;
-    // if (building+456 & 4) return 0;  — already supervised this pass
+        return -1;  // (not in the binary; defensive null guard for our view)
+    // if (building+456 & 4) return 0;  — already supervised this pass (0x45e07a)
     if (building->supervisedBit & 4)
-        return -1;
+        return 0;
     building->supervisedBit |= 4;
 
-    // Pass 1: find the first idle candidate (v2 set, v3 = its slot index).
+    // Pass 1: find the first idle candidate (v2 set, v3 = scanned count).
+    // owner gate (0x45e09b): dword_12CEA7C[slot] == *(building+364) == buildId.
     bool candidate = false;
-    int firstSlot = 0;  // v3 — the loop index at break (0 if none found)
+    int firstSlot = 0;  // v3 — increments every iteration in the original
     for (int i = 0; i < slotCount; ++i) {
         const StaffSlot& s = slots[i];
-        bool idle = s.live && s.employed && !s.hasActionObj
-                    && (s.busyFlags & 4) == 0
+        bool idle = s.live && s.ownerBuildId == buildId && s.employed
+                    && !s.hasActionObj && (s.busyFlags & 4) == 0
                     && (static_cast<double>(s.gaugeA) < dbl_619970
                         || static_cast<double>(s.gaugeB) < dbl_619970);
+        firstSlot = i + 1;  // ++v3 is unconditional in the original
         if (idle) { candidate = true; break; }
-        firstSlot = i + 1;  // v3 trails the scanned count (matches ++v3 placement)
     }
 
     // Reprieve roll: a candidate exists but rng_mod(128) < 32 -> abort.
@@ -197,10 +198,11 @@ int FlagIdleStaff(BuildingFlag* building, int /*buildId*/, StaffSlot* slots,
         }
     }
 
-    // Pass 2: flag every idle-eligible slot with bit 0x10.
+    // Pass 2: flag every idle-eligible slot with bit 0x10 (owner-gated, 0x45e052).
     for (int i = 0; i < slotCount; ++i) {
         StaffSlot& s = slots[i];
-        if (s.live && s.employed && !s.hasActionObj && (s.busyFlags & 4) == 0)
+        if (s.live && s.ownerBuildId == buildId && s.employed && !s.hasActionObj
+            && (s.busyFlags & 4) == 0)
             s.flags |= 0x10;
     }
     return 1;

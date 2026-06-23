@@ -19,6 +19,7 @@
 // kept as pure helpers: the descriptor scan (reused from mission_rules), the
 // per-tick frame-loop exit/select decode, and the post-loop outcome/return decode.
 #include "guild/common/types.h"
+#include "world/mission_rules.h"   // MissionCompletionOutcome / MissionDecodeCompletion
 
 namespace guild::world {
 
@@ -134,6 +135,15 @@ struct MissionDialogHooks {
     void (*destroyForm)(int form)                                = nullptr;
     // Snapshot accessor the drivers poll each tick (engine globals).
     void (*readFrame)(MissionDialogFrame* out)                   = nullptr;
+    // --- RewardSummary / Offer / Completion additions ---
+    void (*voiceQueueFlushAll)(int target)                       = nullptr; // 0x57ee40
+    int  (*renderTextArg)(unsigned id, unsigned arg)             = nullptr; // 0x59d6e8 (2-arg)
+    // VIBE_Voice_PlayPositionalSample(chan, 0, slot, sampleName) -> handle.
+    int  (*playPositionalSample)(int chan, int slot, const char* sample) = nullptr; // 0x581fc0
+    // VIBE_Audio_VoiceIsPlaying for a specific handle (RewardSummary tracks one).
+    int  (*voiceHandleIsPlaying)(int handle)                     = nullptr; // 0x4471b0
+    // Reads dword_62EB38 (the game-tick counter) for the audio-off timed waits.
+    int  (*readGameTick)()                                       = nullptr; // 0x62eb38
 };
 void SetMissionDialogHooks(const MissionDialogHooks* hooks);
 const MissionDialogHooks& GetMissionDialogHooks();
@@ -152,5 +162,45 @@ int MissionRunFailureDialog(u8 value, int frameArg);
 // VIBE_Mission_RunInfoDialog 0x53a41c — runs the info-ack panel; returns the
 // destroy result (modeled as the form handle that was closed).
 int MissionRunInfoDialog(int frameArg);
+
+// ===========================================================================
+// VIBE_Mission_RunRewardSummary 0x539fd8 — 4-line reward voiceover panel.
+// ===========================================================================
+// Flushes the voice queue, builds a "special\\mission" form, and plays four text
+// lines (rich-string ids 0x17A8, 0x17A9, 0x17AA, 0x17AB). For each of the first
+// three the engine either (audio-on) plays AUFTRAEGE_ALLGEMEIN slot 0/1/2 and
+// frame-loops while the sample is playing, or (audio-off) waits ~250 ticks. The
+// fourth line plays "_AUFTRAEGE_ERFOLG_HS_%.2d" formatted with reward[+12]. Every
+// loop bails early if (dword_75BF38 != -1 && childObjectId == dword_62D22C),
+// stopping the voice. Returns VIBE_Form_Destroy(form).
+//   rewardRecord : v42 (a1) — the reward descriptor; reward[+4] gives the rich-id
+//                  for the 0x17AB substitution; reward[+12] the .2d voice index.
+//   frameArg     : a2 (the dialog flags; the 4th line ORs 0x80 in).
+int MissionRunRewardSummary(const u8* rewardRecord, int frameArg);
+
+// ===========================================================================
+// VIBE_Mission_RunCompletionDialog 0x53ac34 — completion -> outcome switch.
+// ===========================================================================
+// Outcome codes (gilde.exe 0x53ad50 switch(v7)) reuse MissionCompletionOutcome
+// from world/mission_rules.h: 1->kFailure, 2->kInfo, 3->kLoadSession, else kNone.
+// The pure decoder is MissionDecodeCompletion (mission_rules.cpp).
+// Runs the completion panel for the given outcome code and active mission id;
+// returns the resolved MissionCompletionOutcome.
+MissionCompletionOutcome MissionRunCompletionDialog(int outcomeCode,
+                                                    i32 activeMissionId,
+                                                    int frameArg);
+
+// ===========================================================================
+// VIBE_Mission_RunOfferDialog 0x53a854 — give/keep/abandon offer panel.
+// ===========================================================================
+// The give button (ChildObjectId) only exists when the offer's historySeed < 4.
+// `historySeed` is `a2[1] + 1` recovered from the matched descriptor (or stays -1
+// when none matched -> the give branch is suppressed).
+bool MissionOfferGiveButtonPresent(i32 historySeed);   // v31 < 4
+// Runs the offer panel. `giveId/declineId/abandonId` are the resolved child ids
+// (pass giveId=-1 to suppress it). Returns the action that closed the panel.
+MissionOfferAction MissionRunOfferDialog(const u8* rewardRecord, int frameArg,
+                                         i32 historySeed,
+                                         i32 giveId, i32 declineId, i32 abandonId);
 
 } // namespace guild::world

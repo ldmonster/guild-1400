@@ -269,3 +269,83 @@ TEST(RenderPose, AdvanceTrackPhase_ClampOneShot) {
     // clamp-to-count: holds at the last segment, marks boundary.
     CHECK(st.boundary);
 }
+
+// ===========================================================================
+// W11-ANIM hardening — degenerate skeleton-pose / palette inputs (ASAN/UBSAN).
+// ===========================================================================
+
+// Zero groups: ComputeBoneMatrices clears the 4-record scratch and returns 0 without
+// folding any track. The apply callback is never invoked.
+TEST(RenderPoseEdge, ComputeBoneMatrices_ZeroGroups) {
+    BonePaletteRecord pal[4];
+    PaletteCapture cap;
+    int n = ComputeBoneMatrices(nullptr, 0, nullptr, 0, pal, &CaptureApply, &cap);
+    CHECK_EQ(n, 0);
+    CHECK_EQ(cap.n, 0);
+}
+
+// A group whose tracks are all inactive (or marked 0xFF) folds nothing.
+TEST(RenderPoseEdge, ComputeBoneMatrices_AllInactive) {
+    BoneGroup g[1];
+    g[0].tracks[0].active = false;
+    g[0].tracks[1].active = true; g[0].tracks[1].boneIndex = 0xFF; // inactive marker
+    g[0].tracks[2].active = true; g[0].tracks[2].boneIndex = 0;
+    g[0].tracks[2].name = nullptr;                                 // null name -> skip
+    BonePaletteRecord pal[4];
+    int n = ComputeBoneMatrices(g, 1, nullptr, 0, pal, nullptr, nullptr);
+    CHECK_EQ(n, 0);
+}
+
+// More distinct bone names than the 4-record palette cap: only 4 records are written;
+// the 5th+ distinct name is dropped (the `recCount >= 4` continue). ASAN proves the
+// 4-record `pal[4]` scratch is never written past index 3.
+TEST(RenderPoseEdge, ComputeBoneMatrices_RecordCap) {
+    static AnimFrame f2[2] = {
+        MakeAttachFrame(10, 1, 0, 0, 0, 0, 0),
+        MakeAttachFrame(10, 1, 0, 0, 0, 0, 0),
+    };
+    const char* nm[6] = {"b0","b1","b2","b3","b4","b5"};
+    BoneGroup g[2];
+    int k = 0;
+    for (int gi = 0; gi < 2; ++gi)
+        for (int ti = 0; ti < 3; ++ti) {
+            BoneTrack& t = g[gi].tracks[ti];
+            t.active = true; t.boneIndex = 0; t.name = nm[k++]; t.weight = 1.0f;
+            t.fromFrame = 0; t.toFrame = 0; t.phaseNum = 0; t.frames = f2;
+        }
+    BonePaletteRecord pal[4];
+    int n = ComputeBoneMatrices(g, 2, nullptr, 0, pal, nullptr, nullptr);
+    CHECK_EQ(n, 4);                       // capped at 4 distinct records
+}
+
+// AdvanceTrackPhase with zero frames: the W11 fail-safe returns 0 without reading the
+// (empty/garbage) durations table.
+TEST(RenderPoseEdge, AdvanceTrackPhase_ZeroFrames) {
+    TrackState st; st.fromFrame = 0; st.toFrame = 0; st.phase = 100; st.mode = 0x01;
+    int steps = AdvanceTrackPhase(st, nullptr, 0, 0, 0);   // frameCount == 0
+    CHECK_EQ(steps, 0);
+}
+
+// AdvanceTrackPhase with a null durations table (but a positive count) also bails.
+TEST(RenderPoseEdge, AdvanceTrackPhase_NullDurations) {
+    TrackState st; st.fromFrame = 0; st.phase = 50; st.mode = 0;
+    CHECK_EQ(AdvanceTrackPhase(st, nullptr, 0, 2, 3), 0);
+}
+
+// AdvanceTrackPhase whose fromFrame index is out of range for the table is clamped to
+// frame 0 on the read (no OOB) — ASAN proves durs[fromFrame] never runs off `durs`.
+TEST(RenderPoseEdge, AdvanceTrackPhase_OutOfRangeFromFrame) {
+    i32 durs[3] = {10, 10, 10};
+    TrackState st; st.fromFrame = 99; st.toFrame = 0; st.phase = 5; st.mode = 0;
+    int steps = AdvanceTrackPhase(st, durs, 0, 2, 3);
+    CHECK(steps >= 0);                    // no ASAN trap == pass
+}
+
+// A zero-duration table would spin forever without the loop guard; verify the guard
+// terminates (and no OOB) on a 0-duration table with a large phase.
+TEST(RenderPoseEdge, AdvanceTrackPhase_ZeroDurationTerminates) {
+    i32 durs[3] = {0, 0, 0};
+    TrackState st; st.fromFrame = 0; st.toFrame = 1; st.phase = 1000; st.mode = 0x01;
+    int steps = AdvanceTrackPhase(st, durs, 0, 2, 3);
+    CHECK(steps <= 3 * 2 + 2);            // bounded by the guard
+}

@@ -75,7 +75,6 @@ GuildAssignmentResult ComputeGuildAssignment(OfficeHolder* holders, int count,
         // record found). The primary record is looked up but only its id is used.
         if (SecondaryId(entry) == 0 || !secondary.valid)
             continue;
-        (void)primary;
 
         // Per-voter approach buckets; v54[v/4+6] holds each voter's approach in the
         // original. approaches[v] in {0,1,2} or 3 (== "did not vote", the init).
@@ -99,25 +98,32 @@ GuildAssignmentResult ComputeGuildAssignment(OfficeHolder* holders, int count,
         // secondary record is only passed to the AI approach evaluator as context.
         const i32 targetId = PrimaryId(entry);
 
+        // RecordById = FindRecordById(primary id). The WIN branch per-voter loop is
+        // guarded by `if (RecordById)` (gilde.exe 0x480298 `test esi,esi; jz`), and
+        // the install passes the primary RECORD pointer (0 when null). holderId is
+        // RecordById+4 == the primary id == targetId when the record exists.
+        const bool primaryRec = primary.valid;
         if (bucket[0] <= bucket[1]) {
             // --- WIN branch: install the primary holder, emit win relations. ---
-            for (int v = 0; v < count; ++v) {
-                i32 voterId = PrimaryId(holders[v]);
-                i32 holderId = targetId;
-                if (voterId != holderId && voterId != -1) {
-                    u8 ap = approaches[static_cast<size_t>(v)];
-                    if (ap < 3) {
-                        i32 delta;
-                        if (ap == 0)       delta = -20;
-                        else if (ap == 1)  delta = 20;
-                        else               delta = 4;
-                        if (gx.relation) gx.relation(voterId, holderId, delta, gx.ctx);
-                        ++r.relations;
+            if (primaryRec) {
+                for (int v = 0; v < count; ++v) {
+                    i32 voterId = PrimaryId(holders[v]);
+                    i32 holderId = targetId;
+                    if (voterId != holderId && voterId != -1) {
+                        u8 ap = approaches[static_cast<size_t>(v)];
+                        if (ap < 3) {
+                            i32 delta;
+                            if (ap == 0)       delta = -20;
+                            else if (ap == 1)  delta = 20;
+                            else               delta = 4;
+                            if (gx.relation) gx.relation(voterId, holderId, delta, gx.ctx);
+                            ++r.relations;
+                        }
                     }
                 }
             }
             if (gx.install)
-                gx.install(KeyByte(entry), targetId, 1, gx.ctx);
+                gx.install(KeyByte(entry), primaryRec ? targetId : 0, 1, gx.ctx);
             ++r.installs;
         } else {
             // --- LOSE branch: emit lose relations, clear the seat (state 3). ----
@@ -254,27 +260,32 @@ GuildAssignmentResult ComputeGuildAssignment(OfficeHolder* holders, int count,
 // ===========================================================================
 // 2. PersonHasOfficeObject — gilde.exe 0x480abc.
 // ===========================================================================
-bool PersonHasOfficeObject(const OfficeHolder& entry, GuildAssignContext& gx) {
+bool PersonHasOfficeObject(const OfficeHolder& entry,
+                           const OfficeHolder* collected, int collectedCount,
+                           GuildAssignContext& gx) {
     // if ( *(_BYTE *)(a2 + 16) != 2 ) return 0;
     if (entry.state != kHolderMemberToAssign)
         return false;
 
-    // VIBE_Office_CollectByCategory(...) -> the object list (gx.objects). The
-    // original resolves two person records: the secondary (+20) and the primary
-    // (+4). The gate: secondary exists & has building & not excluded (+433),
-    // primary exists & has building, and the object list non-empty.
+    // VIBE_Office_CollectByCategory(a1, 6, buf) -> `collected` (collectedCount).
+    // The original then resolves two person records:
+    //   edx = FindRecordById(+20 secondary), eax = FindRecordById(+4 primary).
+    // Gate (gilde.exe 0x480afa-0x480b19):
+    //   secondary != 0 && [sec+8] (hasBuilding) && ![sec+433] (!excluded) &&
+    //   primary  != 0 && [pri+8] (hasBuilding) && collectedCount > 0.
     GuildPersonRec secondary =
         gx.findPerson ? gx.findPerson(SecondaryId(entry), gx.ctx) : GuildPersonRec{};
     GuildPersonRec primary =
         gx.findPerson ? gx.findPerson(PrimaryId(entry), gx.ctx) : GuildPersonRec{};
 
     if (!secondary.valid || !secondary.hasBuilding || secondary.excluded ||
-        !primary.valid || !primary.hasBuilding || gx.objectCount <= 0)
+        !primary.valid || !primary.hasBuilding || collectedCount <= 0)
         return false;
 
-    // Scan the object list for one carrying the secondary (+20) id.
-    for (int k = 0; k < gx.objectCount && k < kGuildObjectCount; ++k) {
-        if (gx.objects[k].id == SecondaryId(entry))
+    // Scan the COLLECTED holder entries (24-byte stride): the original tests
+    //   v12[v10/4 + 1] (== collected entry's +4 == PrimaryId) == secondary id.
+    for (int j = 0; j < collectedCount; ++j) {
+        if (PrimaryId(collected[j]) == SecondaryId(entry))
             return true;
     }
     return false;
@@ -342,14 +353,18 @@ bool CheckGuildMastersPresent(const OfficeHolder* holders, int count,
 // ===========================================================================
 // 4. AssignGuildMembers — gilde.exe 0x480634.
 // ===========================================================================
-// dword_47DE58: the recovered 6-category key table. The original packs each
-// category's key in the HIBYTE of the +21 dword of v20 records and a rank byte; the
-// CollectByCategory key is HIBYTE(*(+21)). Modeled as a {key,rank} pair table. The
-// raw key bytes are recovered from the holder/category cluster; for the standalone
-// math we expose the structure and let the caller's collect hook supply entries.
+// dword_47DE58 cluster: the recovered 6-category key table. The original builds a
+// 24-byte zero scratch (qmemcpy v20, dword_47DE58, 24) whose trailing spill bytes
+// alias the {06 05 04 03 02 01} byte run at 0x47DE70 (verified via get_bytes). For
+// category index c in 0..5 the CollectByCategory key is
+//   HIBYTE(*(_DWORD*)&v20[c + 21]) == byte @ (c + 24)  ->  {6,5,4,3,2,1}
+// and the ComputeGuildAssignment rank arg is *(int*)&v20[c+21] >> 24 == the same
+// value (top byte < 0x80, so sar == HIBYTE here). The rank arg is loaded into the
+// edx:eax pair but ComputeGuildAssignment only reads the count (HIDWORD) and buffer,
+// so the per-category rank is effectively unused; recorded here for provenance.
 namespace {
 const GuildCategoryRule kGuildCategories[kGuildCategoryCount] = {
-    {14, 0x1E}, {18, 0x1F}, {20, 0x20}, {21, 0x21}, {23, 0x22}, {34, 0x23},
+    {6, 6}, {5, 5}, {4, 4}, {3, 3}, {2, 2}, {1, 1},
 };
 } // namespace
 
@@ -362,6 +377,12 @@ int AssignGuildMembers(GuildCollectHolders collect, GuildAssignContext& gx) {
     for (int c = 0; c < kGuildCategoryCount; ++c) {
         u8 catKey = kGuildCategories[c].categoryKey;
         int n = collect ? collect(catKey, buf, 64, gx.ctx) : 0;
+        // Clamp the returned count to the scratch capacity: the hook is handed a
+        // 64-entry buffer, but a malformed collector returning more would index
+        // buf[] out of bounds in the loops below. (Faithful: the original's
+        // CollectByCategory never overran its fixed scratch.)
+        if (n < 0) n = 0;
+        if (n > 64) n = 64;
 
         u8 catFlags = 0; // v20[v2] ; bit0 member present, bit1 master present
 
@@ -372,13 +393,20 @@ int AssignGuildMembers(GuildCollectHolders collect, GuildAssignContext& gx) {
                     gx.findPerson ? gx.findPerson(SecondaryId(entry), gx.ctx) : GuildPersonRec{};
                 GuildPersonRec primary =
                     gx.findPerson ? gx.findPerson(PrimaryId(entry), gx.ctx) : GuildPersonRec{};
+                // gilde.exe 0x4807f4-0x480866: the disasm gates on the SECONDARY
+                // record (edx), not the primary. edx = FindRecordById(+20 secondary),
+                // eax = FindRecordById(+4 primary).
+                //   if (secondary && [sec+8] && primary && [pri+8]) -> set bit0
+                //   else if (secondary && [sec+8])                  -> install(key,0,4)
+                //   else                                            -> install(key, primary, 1)
+                // (the final AddTableEntry passes var_28 == the PRIMARY record ptr.)
                 if (secondary.valid && secondary.hasBuilding &&
                     primary.valid && primary.hasBuilding) {
                     catFlags |= 1u;
-                } else if (primary.valid && primary.hasBuilding) {
+                } else if (secondary.valid && secondary.hasBuilding) {
                     if (gx.install) gx.install(KeyByte(entry), 0, 4, gx.ctx);
                 } else {
-                    if (gx.install) gx.install(KeyByte(entry), SecondaryId(entry), 1, gx.ctx);
+                    if (gx.install) gx.install(KeyByte(entry), PrimaryId(entry), 1, gx.ctx);
                 }
             } else if (entry.state == kHolderNeedsSuccessor && SuccCount(entry) > 0) {
                 for (int k = 0; k < gx.objectCount && k < kGuildObjectCount; ++k) {
@@ -425,20 +453,24 @@ bool HasOccupiedOffice(const GuildSeatView* seats, int count,
     if (!seats || count <= 0)
         return false;
 
-    // The original walks from index 216 backwards in steps of 6, with a budget of 7
-    // (v0). It returns 1 the moment a guild-master-category seat (category byte 7)
-    // whose city (+4) != -1 resolves to a live person; the budget caps the scan.
+    // gilde.exe 0x480cb4: v0 (budget) = 7, v1 (index) = 216, step v1 -= 6. The
+    // budget is decremented ONLY when a category-7 seat has city == -1 (a vacant
+    // guild-master seat). When city != -1 but FindRecordById returns null (dead
+    // person) the loop falls through to LABEL_5 WITHOUT touching the budget. The
+    // loop terminates at LABEL_5 when v1 reaches 0 (`!(v1*4)`) or the budget hits 0,
+    // so index 0 is never processed: it scans 216, 210, ..., 6.
     int budget = 7;
-    for (int i = count - 1; i >= 0; i -= 6) {
+    for (int i = count - 1; i > 0; i -= 6) {
         const GuildSeatView& s = seats[i];
         u8 cat = categoryOf ? categoryOf(s.officeType, ctx) : 0;
         if (cat != 7)
-            continue;
+            continue;                       // not a guild-master seat: no budget cost
         if (s.city != -1) {
             if (personLive && personLive(s.city, ctx))
-                return true;
+                return true;                // live holder -> occupied
+            continue;                       // dead person: LABEL_5, budget untouched
         }
-        if (--budget == 0)
+        if (--budget == 0)                  // vacant guild-master seat consumes budget
             return false;
     }
     return false;
@@ -499,8 +531,12 @@ int AssignSlotData(AmtSlot* slots, const AssignSlotInputs& in) {
         if (v13.objectId)
             v13.objectId = 0;
     } else {
-        // v13[4] = -1  -> the +16 dword (within AmtSlot's pad14 region).
-        // (recorded via the marker write below; +16 is engine scratch.)
+        // v13[4] = -1  -> the +16 dword (within AmtSlot's pad14 region: bytes
+        // 0x10..0x13 == pad14[2..5]). Written unconditionally in the non-model path.
+        v13.pad14[2] = 0xFF;
+        v13.pad14[3] = 0xFF;
+        v13.pad14[4] = 0xFF;
+        v13.pad14[5] = 0xFF;
         if (in.typeWord) {
             v13.marker = 1;             // *((_BYTE*)v13+13) = 1
         } else {

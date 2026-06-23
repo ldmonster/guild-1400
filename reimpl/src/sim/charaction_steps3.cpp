@@ -8,8 +8,22 @@
 #include "sim/npcaction.h"    // NpcClock(), GetNpcLeafHooks()
 
 #include <cstdint>            // std::intptr_t
+#include <cstring>            // std::memcpy
 
 namespace guild::sim {
+
+// Byte-exact, alignment-safe load of a 32-bit value at an arbitrary byte offset.
+// The original x86 binary uses unaligned `*(int*)(rec + N)` reads off He records
+// whose fields are not 4-byte aligned (e.g. +1, +2, +170); binding an `i32&`/`i32*`
+// to those addresses is UB in portable C++ (UBSAN flags the misaligned load). This
+// reads the identical 4 little-endian bytes without forming a misaligned reference.
+namespace {
+inline i32 LoadI32At(const HeRecord* h, int off) {
+    i32 v;
+    std::memcpy(&v, reinterpret_cast<const u8*>(h) + off, sizeof(v));
+    return v;
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Hook table plumbing (inert default — every leaf reports "absent"/no-op).
@@ -94,7 +108,7 @@ i32 IsAnimalTargetBusy(HeRecord* h) {
         return 1;
     // The original compares m[+176] against *(int*)(h+1) (an unaligned dword read
     // off the input record at offset +1) and m[+184] against 1.
-    i32 key = *reinterpret_cast<i32*>(HeBytes(h) + 1);   // [ecx+1]
+    i32 key = LoadI32At(h, 1);   // [ecx+1] (unaligned)
     for (;;) {
         if (*reinterpret_cast<i32*>(HeBytes(m) + 176) == key &&   // [eax+0B0h]
             *reinterpret_cast<i32*>(HeBytes(m) + 184) == 1) {     // [eax+0B8h]
@@ -184,7 +198,7 @@ i32 GroupGatherInit(HeRecord* h) {
 
 // gilde.exe 0x4dd150 — VIBE_CharAction_InitTargetState
 int InitTargetState(HeRecord* h) {
-    i32 typeId = *reinterpret_cast<i32*>(HeBytes(h) + 170) >> 16;  // sar 16
+    i32 typeId = LoadI32At(h, 170) >> 16;  // sar 16 (unaligned load)
     StampClock(He_ApptTime(h));
     if (GetCharActionStep3Hooks().fastTimeEnabled())
         return GameTimeAdvance(&He_ApptTime(h), 0, 1, 0);   // +1 second
@@ -204,7 +218,7 @@ int InitLagerErweitern(HeRecord* h) {
         if ((*reinterpret_cast<u8*>(HeBytes(obj) + 19) & 0x20) != 0)
             return GetNpcLeafHooks().freeHandlerEntry(h);
         // cmd25(obj->id@+2, 19, 32, 1, 0). The id column is read at obj+2 (dword).
-        i32 entityId = *reinterpret_cast<i32*>(HeBytes(obj) + 2);
+        i32 entityId = LoadI32At(obj, 2);  // (unaligned)
         GetCharActionStep3Hooks().queueRequestArgs25(entityId, 19, 32, 1);
     }
     StampClock(*reinterpret_cast<GameTime*>(HeBytes(h) + 96));   // clock -> +96 scratch image
@@ -229,7 +243,7 @@ i32 InitSabotage(HeRecord* h) {
         if (!begin)
             begin = GetCharActionStep3Hooks().personQueryBegin(1, 5, 15);
         if (begin)
-            Cas3_Slot16(h) = *reinterpret_cast<i32*>(HeBytes(begin) + 1);  // [begin+1]
+            Cas3_Slot16(h) = LoadI32At(begin, 1);  // [begin+1] (unaligned)
     }
     Cas3_Misc196(h) = -1;   // *(h+196) = -1
     i32 handle = GetCharActionStep3Hooks().requestBuildOp73Sabotage(Cas3_Slot16(h));

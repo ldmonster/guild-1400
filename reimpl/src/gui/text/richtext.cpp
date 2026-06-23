@@ -45,11 +45,19 @@ std::string ProduceMoney(const Arg& a) {
     return std::string(buf, buf + n);
 }
 
-// %T date: "<season> <year>" (PackToRecord + season lookup), via "%s %i".
+// %D date: "<season> <year>" (PackToRecord + season lookup), via "%s %i".
+//
+// gilde.exe 0x59d6e8 lines 549-553 (decompile):
+//   VIBE_GameTime_PackToRecord(*v207, v204);
+//   v194 = v204[0] >> 16;                                  // year word  (= rec.year)
+//   v193 = dword_8C37E0[VIBE_GameTime_GetSeasonFromYear(v204)];
+//   VIBE_Crt_Sprintf_0(v196, "%s %i", v193, v194);
+// GetSeasonFromYear(v204) = (*v204 >> 16) % 4 = rec.year % 4, NOT yearQuarter%4
+// (earlier reconstruction mis-derived the season from the raw quarter selector).
 std::string ProduceDate(const Arg& a, const char* const* seasonNames) {
     DateRecord rec{};
     PackDateRecord(a.date, rec);
-    int season = a.date.yearQuarter % 4;  // matches GetSeasonFromYear on packed year
+    int season = SeasonFromYear(static_cast<i32>(rec.year) << 16);  // (rec.year)%4
     char buf[128];
     if (seasonNames && seasonNames[season]) {
         guild::crt::Sprintf(buf, "%s %i", seasonNames[season], static_cast<int>(rec.year));
@@ -124,12 +132,23 @@ std::string RenderRichString(const char* fmt,
             // produced here (see deferred list), so it is recorded but not used.
             (void)field;
 
+            // Code letters recovered from the disasm dispatch tree in
+            // gilde.exe 0x59d6e8 (al = char after the optional field digit):
+            //   '%' 0x25 -> literal-percent glyph 0x16            (line 625)
+            //   'S'/'T' 0x53/0x54 -> money (icon 0x11)            (line 374, prev=='%')
+            //   'D' 0x44 -> date "<season> <year>"                (line 549)
+            //   'a' 0x61 -> count icon "%i%c" (0x14)              (line 969, prev=='%')
+            //   'i' 0x69 -> grouped thousands integer             (line 1200, field==-1)
+            // The earlier reconstruction guessed %m=money and %T=date and a
+            // standalone %s; the binary uses %S/%T for money, %D for date, and the
+            // %s-style substitution is the v215 case/gender + GetDelimitedField
+            // machine over runtime text tables (deferred, see header).
             switch (code) {
                 case '%':  // "%%" -> literal-percent placeholder glyph (0x16)
                     out += kLiteralPercent;
                     p = q + 1;
                     continue;
-                case 'i': {  // grouped thousands integer
+                case 'i': {  // grouped thousands integer (field-less form)
                     const Arg* a = nextArg();
                     out += ProduceGroupedInt(a ? a->i : 0);
                     p = q + 1;
@@ -141,29 +160,16 @@ std::string RenderRichString(const char* fmt,
                     p = q + 1;
                     continue;
                 }
-                case 'm': {  // money (coin icon 0x11)
+                case 'S':    // money (coin icon 0x11) -- 'S' and 'T' alias the
+                case 'T': {  // same VIBE_Money_FormatWithSeparators leaf
                     const Arg* a = nextArg();
                     out += ProduceMoney(a ? *a : Arg::MakeMoney(0));
                     p = q + 1;
                     continue;
                 }
-                case 'T': {  // date "<season> <year>"
+                case 'D': {  // date "<season> <year>"
                     const Arg* a = nextArg();
                     out += ProduceDate(a ? *a : Arg::MakeDate({}), seasonNames);
-                    p = q + 1;
-                    continue;
-                }
-                case 's': {  // text-DB / string substitution
-                    const Arg* a = nextArg();
-                    if (a) {
-                        if (a->kind == Arg::Str) {
-                            out += a->s;
-                        } else if (db) {  // small int treated as DB id
-                            const char* v = db->Text(a->i);
-                            if (v)
-                                out += v;
-                        }
-                    }
                     p = q + 1;
                     continue;
                 }

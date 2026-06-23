@@ -126,9 +126,11 @@ const TutorialNodeSpecEx kChapter3[] = {
 
 // ===========================================================================
 // gilde.exe 0x59a608 — InitChapter4Steps (intro + D,B,E + outro). No sub-tables.
+// NOTE: the intro node's +0 kind byte is 3 (*(_DWORD*)v2 = 3 @0x59a65d — the same
+// value InitChapter3's intro writes), NOT 4. The outro writes kind 4.
 // ===========================================================================
 const TutorialNodeSpecEx kChapter4[] = {
-  { 4, "4rtn", 0, 7482, "CHAPTER_4_INTRO",     0,   nullptr,             0,   nullptr,              0,   nullptr,            -1,     142,  CB::kOpenTownHallDialog,        CB::kNone345,                  CB::kNone345,                  0,  0,    11, 0, 0, 0, kMask, 8048, nullptr, nullptr, CB::kNone345 },
+  { 3, "4rtn", 0, 7482, "CHAPTER_4_INTRO",     0,   nullptr,             0,   nullptr,              0,   nullptr,            -1,     142,  CB::kOpenTownHallDialog,        CB::kNone345,                  CB::kNone345,                  0,  0,    11, 0, 0, 0, kMask, 8048, nullptr, nullptr, CB::kNone345 },
   { 1, "4s4c", 2, 7484, "CHAPTER_4_D_MAIN", 7487, "CHAPTER_4_D_REMIND", 7486, "Chapter_4_D_Aux", 7488, "CHAPTER_4_D_DONE", kVoice, 142, CB::kQueueRequestIfNotHandled, CB::kHandleWorkshopDropStep,   CB::kAllowWorkshopDropTarget,  1,  8520, 10, 0, 0, 0, 23095, 8048, nullptr, nullptr, CB::kNone345 },
   { 1, "2s4c", 2, 7489, "CHAPTER_4_B_MAIN", 7492, "CHAPTER_4_B_REMIND", 7491, "Chapter_4_B_Aux", 7493, "CHAPTER_4_B_DONE", kVoice, 142, CB::kQueueRequestIfNotHandled, CB::kHandleStorageDropStep,    CB::kAllowStorageDropTarget,   1,  8520, 10, 0, 0, 0, 23415, 8048, nullptr, nullptr, CB::kNone345 },
   { 1, "5s4c", 2, 7494, "CHAPTER_4_E_MAIN", 7497, "CHAPTER_4_E_REMIND", 7496, "Chapter_4_E_Aux", 7498, "CHAPTER_4_E_DONE", kVoice, 142, CB::kQueueRequestIfNotHandled, CB::kHandleHouseDropStep,      CB::kAllowHouseDropTarget,     1,  8520, 10, 0, 0, 0, 24439, 8048, nullptr, nullptr, CB::kNone345 },

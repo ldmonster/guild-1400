@@ -139,9 +139,12 @@ TEST(CutsceneMisc2Itest, SkyLifecycleInert) {
     SetCutscene2Hooks(&h);
     CutsceneSetupSky(nullptr);
     CHECK_EQ(CutsceneSkyState().sky, (void*)&g_skyObj);
+    CHECK_EQ(CutsceneSkyState().mirror, (void*)&g_skyObj);  // dword_64A7C8 mirror set
     CHECK_EQ(CutsceneDestroySky(), 0);
     CHECK_EQ(g_destroyCalls, 1);
-    CHECK_EQ(CutsceneSkyState().sky, (void*)nullptr);
+    // gilde.exe 0x4aa740: only the mirror (dword_64A7C8) is zeroed; dword_6315F0 stays.
+    CHECK_EQ(CutsceneSkyState().mirror, (void*)nullptr);
+    CHECK_EQ(CutsceneSkyState().sky, (void*)&g_skyObj);
     SetCutscene2Hooks(nullptr);
 }
 

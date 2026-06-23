@@ -58,6 +58,11 @@ TEST(SimRemainingE2E, ProductionAndDistribution) {
     SetStockHooks(&spy);
 
     g_buildingTypesLoaded = true;   // ComputeItemBaseValue needs a loaded table
+    // The per-kind worth columns in ComputeProductionWorth @0x58fe68 gate on the
+    // TYPE-DEF +0 kind byte (*v40 = 589*type + base), NOT the building record's +2
+    // object kind. Set the typedef kind = 7 so the kind-7 (auction) path runs.
+    std::memset(&g_buildingTypes[0], 0, sizeof(g_buildingTypes[0]));
+    g_buildingTypes[0].kind = 7;
 
     // --- production worth on a kind-7 (auction) building ---
     BuildingSaleRec bld;

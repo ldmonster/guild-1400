@@ -94,14 +94,15 @@ bool WriteCityInfoRecord(VfsHandle* h, const guild::u8* c, guild::u32 version) {
             return false;
     if (!WR(h, c + 468, 4) || !WR(h, c + 472, 4) || !WR(h, c + 476, 0xD0))
         return false;
-    // NOTE: the original WRITE path (0x5a623c) always emits the +748 8-byte tail;
-    // the gate lives only on the LOAD side (>= 0x10037). To stay byte-exact with
-    // the reconstructed loader we emit the tail only when the version would read
-    // it back, so a write->load roundtrip is consistent at every offset.
-    if (version >= 0x10037) {
-        if (!WR(h, c + 748, 8))
-            return false;
-    }
+    // gilde.exe 0x5a623c — the WRITE path ALWAYS emits the +748 8-byte tail. There
+    // is NO version gate on the writer (verified against the binary: the gate
+    // `>= 0x10037` exists ONLY on the loader at 0x5aa77f). The writer always runs
+    // at the current version (0x10045 >= 0x10037), so a current-version file always
+    // carries the tail and the loader reads it back; for faithful 1:1 behavior the
+    // write is unconditional regardless of the `version` argument.
+    (void)version;
+    if (!WR(h, c + 748, 8))
+        return false;
     return true;
 }
 

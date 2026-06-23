@@ -44,13 +44,46 @@ TEST(TerrainRenderLod, TileSubdivCountEdgeStitch) {
     CHECK_EQ(TileSubdivCount(16, 0, 0, 0, true), 0);   // guard: lod==0
 }
 
+// WAVE-10 HARDENING: LOD subdivision at the min/max LOD + the index-7 edge clamp at
+// the smallest tileSpan (where base - 4/lod underflows). The walk uses the result
+// as a loop bound (< v179 / < v180), so a NEGATIVE count must simply mean "no
+// iterations", not an under-run. TileSubdivCount itself just returns the value
+// (pure arithmetic, no indexing); we pin the documented results.
+TEST(TerrainRenderLod, TileSubdivCountMinMaxAndUnderflow) {
+    // Smallest grid: tileSpan == 1 (size 8 / 8 tiles). lod 1, interior -> base 2.
+    CHECK_EQ(TileSubdivCount(1, 1, 3, 3, true), 2);
+    // lod 1, col index 7: base 2 - 4/1 = -2 (the walk treats it as 0 iterations).
+    CHECK_EQ(TileSubdivCount(1, 1, 7, 3, true), -2);
+    // Max LOD (4): edge term 4/4 = 1. tileSpan 16 -> base 5, idx 7 -> 4.
+    CHECK_EQ(TileSubdivCount(16, 4, 7, 3, true), 4);
+    // Largest tile (tileSpan 16, size 128/8): lod 1 interior -> 17.
+    CHECK_EQ(TileSubdivCount(16, 1, 3, 3, true), 17);
+    // lod 4 (coarsest) over the same tile -> base 5; the edge clamp keeps it >= 4.
+    CHECK_EQ(TileSubdivCount(16, 4, 3, 3, true), 5);
+}
+
+// WAVE-10 HARDENING: SelectTileMeshLod over the extreme/degenerate scaleX inputs:
+// tiny scale -> clamp to 4, huge scale -> clamp to 1, negative scale -> clamp 1
+// (the 50/scaleX path goes negative, truncates, /4, clamps low). No UB / no crash.
+TEST(TerrainRenderLod, SelectMeshLodExtremes) {
+    CHECK_EQ(SelectTileMeshLod(0.001f), 4);    // 50000.5 -> /4 -> clamp 4
+    CHECK_EQ(SelectTileMeshLod(1000.0f), 1);   // 0.55 -> 0 -> clamp 1
+    CHECK_EQ(SelectTileMeshLod(-1.0f), 1);     // -49.5 -> -49/4 = -12 -> clamp 1
+    CHECK_EQ(SelectTileMeshLod(-0.001f), 1);   // large negative -> clamp 1
+}
+
 // ---------------------------------------------------------------------------
 // Tile vertex build + per-vertex RGB lighting (VIBE_Floor_RenderTerrain inner loop).
 // ---------------------------------------------------------------------------
 TEST(TerrainRenderTile, ClampLightByte) {
-    CHECK_EQ((int)ClampLightByte(100.5f), 100);
-    CHECK_EQ((int)ClampLightByte(300.0f), 255);
-    CHECK_EQ((int)ClampLightByte(255.9f), 255);
+    // The engine store is a BARE fistp => round-to-NEAREST-EVEN (NOT truncate), then
+    // a signed >255 high cap, then the LOW BYTE is kept (negatives wrap, no low clamp).
+    CHECK_EQ((int)ClampLightByte(100.5f), 100); // tie -> even (100); trunc also 100
+    CHECK_EQ((int)ClampLightByte(101.5f), 102); // tie -> even (102) — DIFFERS from trunc(101)
+    CHECK_EQ((int)ClampLightByte(99.9f), 100);  // rounds up — DIFFERS from trunc(99)
+    CHECK_EQ((int)ClampLightByte(99.4f), 99);   // rounds down
+    CHECK_EQ((int)ClampLightByte(300.0f), 255); // >255 -> 0xFF
+    CHECK_EQ((int)ClampLightByte(255.9f), 255); // rounds to 256 -> >255 -> 0xFF cap
     CHECK_EQ((int)ClampLightByte(0.0f), 0);
 }
 

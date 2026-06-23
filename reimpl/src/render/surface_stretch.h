@@ -61,11 +61,12 @@ struct StretchSurfaceDesc {
 u8 StretchSurface8(const StretchSurfaceDesc& dst, const StretchSurfaceDesc& src);
 
 // gilde.exe 0x436488 — VIBE_Render_StretchSurface8Up (eax=dst, edx=src).
-//   Same nearest-neighbour 8bpp resample but the loop is SRC-driven: src row i
-//   maps to dst row (dstH*i/srcH) and src col j scatters to dst col (j*dstW/srcW).
-//   Note args are SWAPPED relative to StretchSurface8 (a1=src, a2=dst). Used by
-//   the dispatch's up-sample (dst larger) branch. Returns the last byte read.
-u8 StretchSurface8Up(const StretchSurfaceDesc& src, const StretchSurfaceDesc& dst);
+//   8bpp up-sample. The SMALLER source (edx) row is read SEQUENTIALLY and each
+//   byte is SCATTERED into the LARGER destination (eax): src col c writes dst col
+//   (c*dstW/srcW); loop bounds are the SOURCE dimensions (esi[2]/esi[0xC]). First
+//   positional arg is the eax DST (write target), second is the edx SRC (read).
+//   Used by the dispatch's up-sample (dst larger) branch. Returns the last byte read.
+u8 StretchSurface8Up(const StretchSurfaceDesc& dst, const StretchSurfaceDesc& src);
 
 // gilde.exe 0x435E00 — VIBE_Render_StretchAverage16 (eax=dst, edx=src).
 //   Box-average down-sample of a 16bpp surface. For each dst pixel it averages the

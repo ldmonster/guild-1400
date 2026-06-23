@@ -91,13 +91,30 @@ TEST(IoSaveBrowserEnum, FiltersByExtension) {
     CHECK_EQ(n, 3);
 
     // Records are emitted in the sorted order of the file array (GAME1, GAME2, QUICKSAVE).
-    CHECK(std::strcmp(recs[0].name, "GAME1.SAV") == 0);
-    CHECK(std::strcmp(recs[1].name, "GAME2.SAV") == 0);
-    CHECK(std::strcmp(recs[2].name, "QUICKSAVE.SAV") == 0);
-    // full path is "basePath/name" truncated at the first '.'
-    CHECK(std::strcmp(recs[0].fullPath, "SAVES//GAME1") == 0);
-    CHECK(std::strcmp(recs[2].fullPath, "SAVES//QUICKSAVE") == 0);
+    // Binary-exact (@0x569530): the NAME field (record+9) is the file name TRUNCATED at
+    // its '.' (StrChr @0x5d3ef0 + *v14=0), so the extension is dropped from the name.
+    CHECK(std::strcmp(recs[0].name, "GAME1") == 0);
+    CHECK(std::strcmp(recs[1].name, "GAME2") == 0);
+    CHECK(std::strcmp(recs[2].name, "QUICKSAVE") == 0);
+    // The full-path field (record+265) keeps the extension: it is the verbatim
+    // Sprintf("%s/%s", basePath, name) and is NOT truncated by the original.
+    CHECK(std::strcmp(recs[0].fullPath, "SAVES//GAME1.SAV") == 0);
+    CHECK(std::strcmp(recs[2].fullPath, "SAVES//QUICKSAVE.SAV") == 0);
 
+    VfsTreeShutdown();
+}
+
+// maxRecords fail-safe: 3 matching files but a cap of 2 -> only 2 emitted, the
+// 3rd slot is never written (would be OOB on a tight caller buffer).
+TEST(IoSaveBrowserEnum, MaxRecordsBoundsTheEmit) {
+    BrowserMockFS fs = MakeSaveTree();
+    CHECK(VfsTreeInit(&fs, "ROOT", false));
+    SaveBrowserRecord recs[2];
+    std::memset(recs, 0, sizeof(recs));
+    int n = SaveBrowserEnumerateSaveFiles("SAVES/", VfsRoot(), kSaveExt, recs, 2);
+    CHECK_EQ(n, 2);                                   // clamped to the cap
+    CHECK(std::strcmp(recs[0].name, "GAME1") == 0);   // NAME truncated at '.'
+    CHECK(std::strcmp(recs[1].name, "GAME2") == 0);
     VfsTreeShutdown();
 }
 

@@ -120,25 +120,30 @@ TEST(SaveSerial3Integration, BuildingSlotTables_Roundtrip_RealLoader) {
     }
 }
 
-TEST(SaveSerial3Integration, BuildingSlotTables_Roundtrip_NoTailVersion) {
-    const u32 version = 0x10030;  // below 0x10037 -> no +748 tail on either side
+// gilde.exe write/load ASYMMETRY at version < 0x10037: the WRITER (@0x5a623c) has
+// NO version gate on the +748 tail and always emits it, while the LOADER (@0x5aa77f)
+// only reads it when version >= 0x10037. So at a low version the writer's stream
+// carries 8 extra bytes per city-info record that the loader does NOT consume,
+// shifting every record after the first. This is a faithful quirk of the original
+// binary (unreachable in practice — the live writer always runs at 0x10045). This
+// test pins the asymmetry: the FIRST city-info record's pre-tail fields still load
+// byte-exact, but later records desync.
+TEST(SaveSerial3Integration, BuildingSlotTables_WriteLoadAsymmetry_LowVersion) {
+    const u32 version = 0x10030;  // below the loader gate 0x10037
 
     std::vector<u8> srcSlot(kSlotTotal, 0), srcCity(kCityTotal, 0);
     Pattern(srcSlot, 7);
     Pattern(srcCity, 9);
     for (int i = 0; i < kBst_CitySlotTableCount; ++i)
         ClearSlotTableHoles(srcSlot.data() + (std::size_t)i * kSlotTableBytes);
-    for (int i = 0; i < kBst_CityInfoRecCount; ++i) {
+    for (int i = 0; i < kBst_CityInfoRecCount; ++i)
         ClearCityInfoHoles(srcCity.data() + (std::size_t)i * kCityInfoBytes);
-        // tail not serialized at this version -> loader leaves it untouched; clear
-        // it in the source so the compare reflects what is actually persisted.
-        std::memset(srcCity.data() + (std::size_t)i * kCityInfoBytes + 748, 0, 8);
-    }
 
     std::vector<u8> stream(64 * 1024, 0);
     VfsHandle* w = VfsOpenMemoryStream(stream.data(), (u32)stream.size(), "wb");
     bool wrote = false;
     if (w) {
+        // Writer emits the tail unconditionally even at this low version.
         wrote = SaveWriteBuildingSlotTables(w, srcSlot.data(), srcCity.data(), version);
         CHECK(wrote);
         VfsCloseStream(w);
@@ -152,7 +157,13 @@ TEST(SaveSerial3Integration, BuildingSlotTables_Roundtrip_NoTailVersion) {
         VfsCloseStream(r);
     }
     if (loaded) {
+        // The 5 slot tables (written before any city-info tail) roundtrip exactly.
         CHECK_EQ(std::memcmp(srcSlot.data(), dstSlot.data(), kSlotTotal), 0);
-        CHECK_EQ(std::memcmp(srcCity.data(), dstCity.data(), kCityTotal), 0);
+        // City-info record 0, all pre-tail bytes (0..747), roundtrips exactly.
+        CHECK_EQ(std::memcmp(srcCity.data(), dstCity.data(), 748), 0);
+        // The loader did NOT read the writer's +748 tail, so record 0's tail in the
+        // destination stays at its init value (0), not the source pattern.
+        bool tailReadBack = (std::memcmp(srcCity.data() + 748, dstCity.data() + 748, 8) == 0);
+        CHECK(!tailReadBack);  // asymmetry: tail emitted by writer, skipped by loader
     }
 }

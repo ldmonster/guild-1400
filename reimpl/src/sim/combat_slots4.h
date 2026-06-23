@@ -137,7 +137,7 @@ struct DmgNumberRecord {
 // return the SLOT so the caller can address it), or -1 if the table is full.
 //   `unitScale` is *(float*)(unit+28). `amount` is the incoming a2 (edx) value.
 constexpr float kDmgNumInitialTtl = 64.0f;   // 1115684864 == 0x42800000
-constexpr float kDmgNumScale      = 0.01f;   // dbl_61B1C4 (the unit-scale divisor)
+constexpr double kDmgNumScale     = 0.01;    // dbl_61B1C4 (exact double 0x3f847ae147ae147b)
 int SpawnDamageNumber(std::vector<DmgNumberRecord>& table, const void* owner,
                       int amount, int kind, float unitScale);
 

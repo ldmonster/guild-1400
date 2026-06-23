@@ -33,11 +33,18 @@ std::string StripCommentsAndWhitespace(const std::string& source,
     while (i < n) {
         unsigned char c = static_cast<unsigned char>(source[i]);
 
-        // '/' '*' ... '*' '/'  comment span -> blanked (skip entirely here).
+        // '/' '*' ... '*' '/'  comment span.  gilde.exe @0x442060: when '/' is
+        // followed by '*' and the closing '*/' is found, the original BLANKS the
+        // whole span to spaces (SetGrayColorThunk(32, v11-v8+2, v8) memsets it to
+        // ' '), it does NOT delete it; pass 2 then collapses that run of spaces to
+        // a single space.  We emit exactly one space so the comment still acts as a
+        // token separator: `a/* x */b` -> `a b` (two tokens), NOT `ab`.  (Emitting
+        // one space is behavior-identical to N-spaces-then-collapse.)
         if (c == '/' && i + 1 < n && static_cast<unsigned char>(source[i + 1]) == '*') {
             std::size_t end = source.find("*/", i + 2);
             if (end != std::string::npos) {
-                i = end + 2;          // drop the whole comment
+                s.push_back(' ');     // comment span -> single separating space
+                i = end + 2;
                 continue;
             }
             // No closing '*/': the original leaves it; fall through and emit.
@@ -148,7 +155,18 @@ LoadedScript LoadScriptFromVfs(const char* relName,
 }
 
 // ===========================================================================
-// gilde.exe 0x44396c — VIBE_Script_RunMain: enter `main` and run.
+// gilde.exe 0x44396c — VIBE_Script_RunMain: CompileBlock the source, resolve the
+// `main` function (LookupFunction "main"), EnterFunction it, mark the context
+// runnable (ctx+164 |= 1), point the scope stack at ctx+168 (ctx+2472), clear the
+// statement mode (ctx+2564 = 0), log "Run script: %s", and seed the scene fields.
+// The original returns 1 on success / 0 on no-main-or-compile-failure (the
+// script's RESULT value is stashed separately in dword_62E8D0 by the executor's
+// `return` statement, NOT returned here).  In this in-memory model — where the
+// CompiledScript is already compiled and the live ScriptContext slot is deferred
+// (see header) — RunMain instead drives ScriptExecutor from main's body cursor and
+// surfaces the script's return value; callers (CutsceneLoadAndRunScript) ignore it
+// exactly as the original ignores RunMain's return.  The "No entrypoint(main)..."
+// diagnostic (aEvtRunscriptNo @0x618354) is raised in LoadScriptFromSource.
 // ===========================================================================
 i32 RunMain(LoadedScript& ls, ScriptHost host, int stepBudget) {
     if (!ls.ok || ls.mainCursor < 0)

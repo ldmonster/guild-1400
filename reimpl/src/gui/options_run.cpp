@@ -128,7 +128,10 @@ static bool RunOptionsLoop(int okId, int cancelId, int maxFrames, OptionsRunReco
 OptionsResult Menu_RunOptionsGfx(OptionsRunState& st, OptionsRunRecord* rec, int maxFrames) {
     int form = OptionsPreamble(kOptionsGfxForm, kOptionsGfxTitle, rec);
 
-    // Resolution dropdown range (0x56c369): byte_62D59A -> 1, byte_62D59B -> 2.
+    // Resolution dropdown range (0x56c369): byte_62D59A -> v21=1, byte_62D59B -> v21=2.
+    // Disasm note: v21 is left UNINITIALIZED in the original when neither device-cap byte is
+    // set (a probe always sets at least one at runtime); we default to 0 (the well-defined,
+    // single-entry choice) — see the OptionsUnit::GfxRowCaps test (neither cap -> maxV 0).
     int resRange = 0;
     if (st.gfxResCap1) resRange = 1;
     if (st.gfxResCap2) resRange = 2;
@@ -212,8 +215,20 @@ OptionsResult Menu_RunOptionsSfx(OptionsRunState& st, OptionsRunRecord* rec, int
     g_hooks->HudBuildButtonRow(row);
     if (rec) { rec->okId = row[0]; rec->cancelId = row[1]; }
 
-    // The Sfx loop has the extra live-preview branch (0x56cbc2): while dragging a volume
-    // slider, push the live master/sfx volume and, on the sfx slider, play a test sample.
+    // The Sfx loop has the extra live-preview branch (0x56cbc2): while dword_672220 (a
+    // left-drag) is active AND the hovered widget is one of the FIRST FOUR sliders — note
+    // the original tests child0(master)/child1(sfx)/child2(msx)/child3(speech), NOT the freq
+    // dropdown — it pushes the live volumes and, on the sfx slider, plays a test sample.
+    //
+    // Disasm-verified preview math (0x56cadf..0x56cb46), behind the rule-5 AudioPreviewVolume
+    // hook: v23 = master * flt_62526C (== master / 100.0; flt_62526C = 0x3C23D70A = 0.01f);
+    //   SetMasterVolume  = trunc(sfx * v23)  = (int)(sfx * master / 100)   [VIBE_Coord_ConvertX
+    //                      sets FPU RC=truncate then frndint -> truncation toward zero]
+    //   ApplyMasterVolume= trunc(msx * v23)  = (int)(msx * master / 100).
+    // BOUNDARY: the live-preview SCALING (the *master/100 product + truncation, and the
+    // master/msx pairing) lives inside the audio backend behind AudioPreviewVolume; the hook
+    // receives master+sfx and the real impl owns the exact arithmetic.  The TRIGGER condition
+    // and the sfx-slider test-sample gate (the testable control flow) are reproduced 1:1.
     const int masterWid = wids[static_cast<int>(SfxField::kMasterVol)];
     const int sfxWid     = wids[static_cast<int>(SfxField::kSfxVol)];
     const int msxWid     = wids[static_cast<int>(SfxField::kMsxVol)];

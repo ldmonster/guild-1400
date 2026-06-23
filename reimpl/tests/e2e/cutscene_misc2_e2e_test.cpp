@@ -119,7 +119,10 @@ TEST(CutsceneMisc2E2E, FullPresentationFlow) {
     CutsceneDestroySky();
     CHECK_EQ(g_e.skyRemove, 1);
     CHECK_EQ(g_e.skyDestroy, 1);
-    CHECK_EQ(CutsceneSkyState().sky, (void*)nullptr);
+    // gilde.exe 0x4aa740: DestroySky clears ONLY dword_64A7C8 (the mirror); the sky
+    // handle dword_6315F0 is left intact. Verified vs disasm.
+    CHECK_EQ(CutsceneSkyState().mirror, (void*)nullptr);
+    CHECK(CutsceneSkyState().sky != nullptr);
 
     CutsceneTeardown();
     CHECK_EQ(g_e.finishCalls, 1);        // primary script finished

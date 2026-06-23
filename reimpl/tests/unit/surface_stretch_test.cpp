@@ -48,22 +48,27 @@ StretchSurfaceDesc Make24(int w, int h, std::vector<u8>& buf) {
 
 } // namespace
 
-// --- Convert24To16 golden vector (src bytes are B,G,R per pixel) ---------------
+// --- Convert24To16 golden vector ----------------------------------------------
+// Binary (0x437814) maps source byte +0 -> R channel, +1 -> G, +2 -> B (verified
+// in disasm 0x43790e..0x437954). For RGB565 dest: r=byte0>>3<<11, g=byte1>>2<<5,
+// b=byte2>>3. Earlier golden encoded the swapped (B,G,R) interpretation — fixed.
 TEST(SurfaceStretch, Convert24To16Golden) {
     std::vector<u8> sbuf;
     std::vector<u16> dbuf;
     StretchSurfaceDesc src = Make24(2, 2, sbuf);
     StretchSurfaceDesc dst = Make16(2, 2, dbuf);
-    // pixels (B,G,R): (10,20,30)(40,50,60) / (70,80,90)(100,110,120)
+    // source bytes (b0,b1,b2) per pixel -> (R,G,B) channels:
     const u8 px[4][3] = {{10,20,30},{40,50,60},{70,80,90},{100,110,120}};
     for (int i = 0; i < 4; ++i) { sbuf[i*3+0]=px[i][0]; sbuf[i*3+1]=px[i][1]; sbuf[i*3+2]=px[i][2]; }
 
     u32 last = Convert24To16(dst, src);
-    CHECK_EQ(dbuf[0], static_cast<u16>(0x18A1));
-    CHECK_EQ(dbuf[1], static_cast<u16>(0x3985));
-    CHECK_EQ(dbuf[2], static_cast<u16>(0x5A88));
-    CHECK_EQ(dbuf[3], static_cast<u16>(0x7B6C));
-    CHECK_EQ(last, static_cast<u32>(0x7B6C));
+    // (10,20,30): 1<<11 | 5<<5 | 3 = 0x08A3 ; (40,50,60): 5<<11|12<<5|7 = 0x2987
+    // (70,80,90): 8<<11|20<<5|11 = 0x428B ; (100,110,120):12<<11|27<<5|15 = 0x636F
+    CHECK_EQ(dbuf[0], static_cast<u16>(0x08A3));
+    CHECK_EQ(dbuf[1], static_cast<u16>(0x2987));
+    CHECK_EQ(dbuf[2], static_cast<u16>(0x428B));
+    CHECK_EQ(dbuf[3], static_cast<u16>(0x636F));
+    CHECK_EQ(last, static_cast<u32>(0x636F));
 }
 
 TEST(SurfaceStretch, Convert24To16WhiteBlack) {
@@ -117,21 +122,28 @@ TEST(SurfaceStretch, Surface8Downsample) {
     CHECK_EQ(dbuf[3], static_cast<u8>(10));
 }
 
-// --- StretchSurface8Up nearest upscale (padded src to avoid the overread quirk) -
+// --- StretchSurface8Up nearest upscale -----------------------------------------
+// Binary (0x436488): first arg = eax = DST (larger, write target); second = edx =
+// SRC (smaller, read sequentially). Loop bounds are the SOURCE dimensions; each src
+// byte scatters to dst col (c*dstW/srcW). Earlier golden called it with reversed
+// args and verified the buggy (inverted read/write) reconstruction — fixed.
 TEST(SurfaceStretch, Surface8Upscale) {
-    // logical src 2x2 stored in a 4-wide buffer (padding); dst 4x2 upscale.
     std::vector<u8> sbuf, dbuf;
-    StretchSurfaceDesc src = Make8(2, 2, sbuf, /*pitch=*/4);
-    StretchSurfaceDesc dst = Make8(4, 2, dbuf);
-    // row0 buffer: 100,101,200,201  row1: 110,111,210,211
-    sbuf[0]=100; sbuf[1]=101; sbuf[2]=200; sbuf[3]=201;
-    sbuf[4]=110; sbuf[5]=111; sbuf[6]=210; sbuf[7]=211;
-    StretchSurface8Up(src, dst);
-    // dst col = j*sw/dw = 0,0,1,1 ; later write wins. row0: col0=101,col1=201
-    CHECK_EQ(dbuf[0], static_cast<u8>(101));
-    CHECK_EQ(dbuf[1], static_cast<u8>(201));
-    CHECK_EQ(dbuf[4], static_cast<u8>(111));
-    CHECK_EQ(dbuf[5], static_cast<u8>(211));
+    StretchSurfaceDesc src = Make8(2, 2, sbuf);   // smaller source, read
+    StretchSurfaceDesc dst = Make8(4, 2, dbuf);   // larger dest, written
+    // src row0: 100,101 ; row1: 110,111
+    sbuf[0]=100; sbuf[1]=101;
+    sbuf[2]=110; sbuf[3]=111;
+    u8 last = StretchSurface8Up(dst, src);
+    // dst row = dstH*i/srcH = i ; dst col = c*dstW/srcW = 2c (col0->0, col1->2).
+    // row0 -> {100,0,101,0} ; row1 -> {110,0,111,0}
+    CHECK_EQ(dbuf[0], static_cast<u8>(100));
+    CHECK_EQ(dbuf[1], static_cast<u8>(0));
+    CHECK_EQ(dbuf[2], static_cast<u8>(101));
+    CHECK_EQ(dbuf[3], static_cast<u8>(0));
+    CHECK_EQ(dbuf[4], static_cast<u8>(110));
+    CHECK_EQ(dbuf[6], static_cast<u8>(111));
+    CHECK_EQ(last, static_cast<u8>(111));         // last src byte read
 }
 
 // --- BlitThumbnailToSurface: sequential 160x120 block copy ----------------------
@@ -160,14 +172,15 @@ TEST(SurfaceStretch, DispatchEqual16Copy) {
     for (size_t i = 0; i < dbuf.size(); ++i) CHECK_EQ(dbuf[i], sbuf[i]);
 }
 
-// Depth mismatch -> no-op (returns 0, dst untouched).
+// Depth mismatch -> no draw; dst untouched. The return register (al) still holds
+// (u8)src.bpp from the function entry `mov eax,[edx+54h]` — NOT 0 (verified disasm).
 TEST(SurfaceStretch, DispatchDepthMismatch) {
     std::vector<u16> dbuf;
     std::vector<u8> sbuf;
     StretchSurfaceDesc dst = Make16(2, 2, dbuf);
-    StretchSurfaceDesc src = Make8(2, 2, sbuf);
+    StretchSurfaceDesc src = Make8(2, 2, sbuf);   // bpp 8 != dst bpp 16
     u8 st = StretchSurfaceDispatch(dst, src);
-    CHECK_EQ(st, static_cast<u8>(0));
+    CHECK_EQ(st, static_cast<u8>(8));              // (u8)src.bpp, the eax passthrough
     for (auto p : dbuf) CHECK_EQ(p, static_cast<u16>(0));
 }
 
@@ -191,9 +204,11 @@ TEST(SurfaceStretch, ConvertDispatch24To16) {
     sbuf[0]=10; sbuf[1]=20; sbuf[2]=30;
     sbuf[3]=40; sbuf[4]=50; sbuf[5]=60;
     u32 r = BlitConvertDispatch(dst, /*status=*/0, src, /*pal=*/nullptr);
-    CHECK_EQ(dbuf[0], static_cast<u16>(0x18A1));
-    CHECK_EQ(dbuf[1], static_cast<u16>(0x3985));
-    CHECK_EQ(r, static_cast<u32>(0x3985));
+    // byte0->R, byte1->G, byte2->B (see Convert24To16Golden): {10,20,30}=0x08A3,
+    // {40,50,60}=0x2987. Returns Convert24To16's last pixel.
+    CHECK_EQ(dbuf[0], static_cast<u16>(0x08A3));
+    CHECK_EQ(dbuf[1], static_cast<u16>(0x2987));
+    CHECK_EQ(r, static_cast<u32>(0x2987));
 }
 
 // Same-size, same-depth 16bpp -> per-row memcpy, returns height.

@@ -43,6 +43,19 @@ struct FrameState {
     float runningFar  = 0.0f;   // flt_13FCF3C     running far  depth (reset 0)
     i32   appendedPolys = 0;    // dword_13FC770 snapshot -> dword_649DA4
 
+    // -- per-frame poly counters reset at the top of Begin / end of Draw --------
+    // The original zeroes these engine-internal per-frame accumulators between
+    // frames (0x5b3982..0x5b39b8 in BeginUniverseFrame, 0x5b3c19..0x5b3c50 in
+    // DrawUniverseAndStats). The scene/draw segment owns the *consumers*; we
+    // model the resets here 1:1 so the spine's side effects are reproduced.
+    i32   polyCounterA = 0;     // dword_64A060 (BeginUniverseFrame zeroes it)
+    i32   polyCounterB = 0;     // dword_64A058 (BeginUniverseFrame zeroes it)
+    i32   shadowPolyCount = 0;  // *(*(obj+492)+256) per-frame shadow poly count
+    i32   framePolyCount = 0;   // *(*(obj+492)+252) per-frame poly count
+    u8    drawFrameFlag = 0;    // byte_64A068 (DrawUniverseAndStats zeroes it)
+    i32   mirrorPolyA = 0;      // dword_1408A64 (DrawUniverseAndStats zeroes it)
+    i32   mirrorPolyB = 0;      // dword_1408A68 (DrawUniverseAndStats zeroes it)
+
     // -- fps stats (DrawUniverseAndStats) ------------------------------------
     i32  fpsFrameAccA = 0;      // dword_649DE0  frame accumulator A
     i32  fpsLastTimeA = 0;      // dword_649DDC  last sample time A
@@ -52,6 +65,7 @@ struct FrameState {
     i32  fpsValueB = 0;         // dword_649DC4  computed fps B
     i32  frameCounter = 0;      // dword_649D58  bumped when a4 set
     i32  uDelay = 1;            // uDelay        ms/tick divisor for the fps maths
+    i32  animSkipIndex = -1;    // dword_649D60  index skipped in the 64-list anim walk
 };
 
 // Subsystem callbacks the frame walk drives. A null pointer means "subsystem not
@@ -71,7 +85,20 @@ struct FrameHooks {
     void  (*renderParticles)(char a2) = nullptr; // VIBE_Particle_RenderSystem loop
     void  (*updateSkyFlares)() = nullptr;        // VIBE_Render_UpdateSkyFlares
     void  (*buildMirrors)(char a2) = nullptr;    // VIBE_Mirror_BuildMirroredGeometry
-    void  (*updateAnim)(char a2) = nullptr;      // VIBE_Anim_UpdateSkeletonPose walk
+    void  (*scrollUvCoords)(i32 t) = nullptr;    // VIBE_Texture_ScrollUvCoords(dword_62EB38)
+    void  (*projectWalk)(i16 flags, i32 t) = nullptr; // unconditional WalkAndInvoke (a2 block)
+    // The a3-gated animation pose walk. The original iterates the 64 per-zone
+    // character lists (dword_13ECF48[k*246]), skips index dword_649D60, and for
+    // each non-null list head != &dword_13FCF4C walks the linked list via +124
+    // calling VIBE_Anim_UpdateSkeletonPose(off_649D64, node, flags, t|0x80000000).
+    // We expose the list head + walk through hooks so the 64-list iteration in the
+    // frame spine is reproduced 1:1 while the per-node pose update stays in the
+    // anim segment.
+    void* (*animListHead)(int k) = nullptr;      // dword_13ECF48[k*246]  (null => empty)
+    void* (*animSentinel)() = nullptr;           // &dword_13FCF4C  (list terminator)
+    void* (*animNext)(void* node) = nullptr;     // node[124]  (linked-list next)
+    void  (*animPose)(void* node, i16 flags, i32 t) = nullptr; // VIBE_Anim_UpdateSkeletonPose
+    void  (*updateAnim)(char a2) = nullptr;      // (legacy single-hook anim path; unused)
     void  (*flushDrawList)() = nullptr;          // VIBE_Render_RasterizeMeshList
     i32   (*timeNow)() = nullptr;                // dword_62EB38 frame timestamp
 };

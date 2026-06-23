@@ -87,8 +87,17 @@ TEST(SimIntEval, RecoveredItemTables) {
     CHECK_EQ((int)kFlirtItems[1], 364);
     CHECK_EQ((int)kInsultItems[0], 380);
     CHECK_EQ((int)kInsultItems[1], 369);
+    // 0x46ff00: v26[0]=361, v26[6]=362, v26[12]=STALE, v26[18]=376, v26[24]=381,
+    // v26[30]=365, v26[36]=379 (6-int16 stride). The stale slot is index 2, so 381
+    // is slot 4 and 365 is slot 5 (old golden's [4]==365 was off-by-the-stale-slot).
     CHECK_EQ((int)kSocialGestureItems[0], 361);
-    CHECK_EQ((int)kSocialGestureItems[4], 365);
+    CHECK_EQ((int)kSocialGestureItems[2], 0);     // stale -> 0
+    CHECK_EQ((int)kSocialGestureItems[4], 381);
+    CHECK_EQ((int)kSocialGestureItems[5], 365);
+    // 0x470620: insult stale slot is index 2 as well: {380,369,STALE,348,346}.
+    CHECK_EQ((int)kInsultItems[2], 0);
+    CHECK_EQ((int)kInsultItems[3], 348);
+    CHECK_EQ((int)kInsultItems[4], 346);
     CHECK_EQ((int)kGroupGreetItems[0], 354);
     CHECK_EQ((int)kGroupGreetItems[2], 356);
     CHECK_EQ((int)kDrinkItemDrunk, 382);
@@ -170,6 +179,95 @@ TEST(SimIntEval, SocialEarlyRejects) {
     // blockedCount == n -> 0
     g_accessibleNodes = 1; g_blockedCount = 2;
     CHECK_EQ((int)EvalChooseTalkAction(0, &a, &fa, 0, &fb), 0);
+}
+
+// --- Flirt use-now never calls the planner (0x46f578) -----------------------
+// The binary's Flirt "use now" branch builds the frames and `return 30` for ANY
+// usable slot; it never calls SelectBestRecursive (unlike Talk/Gesture/Insult).
+TEST(SimIntEval, FlirtUseNowNeverCallsPlanner) {
+    Setup();
+    ai::SetClassifyItemsHook(TestClassify);
+    ai::SetSelectBestHook(TestPlanner);
+    EvalActor a = MakeActor();
+    ai::EvalFrame fa, fb;
+    // usable slot present (use-now branch). accessibleNodes>=6 forces use-now.
+    g_accessibleNodes = 6; g_usableCount = 1; g_usableSlot = 0; g_blockedCount = 0;
+    char r = EvalChooseFlirtAction(0, &a, &fa, 0, &fb);
+    CHECK_EQ((int)r, 30);            // returns default 30 directly
+    CHECK_EQ(g_plannerCalls, 0);     // planner NOT called on the use-now path
+    CHECK_EQ((int)fa.kind(), 1);     // "use now" frame kind
+    CHECK_EQ((int)fb.kind(), 0);     // companion reject frame
+}
+
+// --- Gesture acquire start is office-rank biased, not RNG (0x46ef04) ---------
+static int g_officeRank = -1;
+static int OfficeRankHook(u8) { return g_officeRank; }
+TEST(SimIntEval, GestureAcquireOfficeRankStart) {
+    Setup();
+    ai::SetClassifyItemsHook(TestClassify);
+    ai::SetSelectBestHook(TestPlanner);
+    g_evalHooks.officeRank = OfficeRankHook;
+    EvalActor a = MakeActor();
+    ai::EvalFrame fa, fb;
+    g_plannerReturn = 28;
+    // acquire branch: accessibleNodes<6 && usable==0, blocked<n. All available==0,
+    // so the scan stops at the office-rank start slot regardless of its value.
+    g_accessibleNodes = 1; g_usableCount = 0; g_blockedCount = 0; g_usableSlot = -1;
+    // Drain RNG state: rank-based path must NOT consume an RNG draw for the start.
+    crt::Srand(123);
+    int before = (int)crt::RandNext();
+    crt::Srand(123);
+    g_officeRank = 9;     // >=7 -> start slot 4
+    char r = EvalChooseGesture(0, &a, &fa, 0, &fb);
+    CHECK_EQ((int)r, 28);
+    CHECK_EQ(g_plannerCalls, 1);
+    CHECK_EQ(g_plannerLastMode, 2);   // acquire mode
+    // The acquire branch consumed no RNG (office-rank, not RandomModulo): next draw
+    // matches the pre-call draw from the same seed.
+    CHECK_EQ((int)crt::RandNext(), before);
+}
+
+// --- Insult use-now slot tiers (0x470620) -----------------------------------
+TEST(SimIntEval, InsultUseNowSlotTiers) {
+    Setup();
+    ai::SetClassifyItemsHook(TestClassify);
+    ai::SetSelectBestHook(TestPlanner);
+    EvalActor a = MakeActor();
+    ai::EvalFrame fa, fb;
+    g_plannerReturn = 34;
+    // Slot 4 (>=4): returns 34 directly, no planner.
+    g_accessibleNodes = 6; g_usableCount = 1; g_usableSlot = 4; g_blockedCount = 0;
+    CHECK_EQ((int)EvalChooseInsultAction(0, &a, &fa, 0, &fb), 34);
+    CHECK_EQ(g_plannerCalls, 0);
+    // Slot 0: planner mode 4.
+    g_plannerCalls = 0; g_usableSlot = 0;
+    CHECK_EQ((int)EvalChooseInsultAction(0, &a, &fa, 0, &fb), 34);
+    CHECK_EQ(g_plannerCalls, 1);
+    CHECK_EQ(g_plannerLastMode, 4);
+    // Slot 2 (1..3): planner mode 3.
+    g_plannerCalls = 0; g_usableSlot = 2;
+    CHECK_EQ((int)EvalChooseInsultAction(0, &a, &fa, 0, &fb), 34);
+    CHECK_EQ(g_plannerCalls, 1);
+    CHECK_EQ(g_plannerLastMode, 3);
+}
+
+// --- Gesture use-now: only slot 8 calls planner (mode 3) --------------------
+TEST(SimIntEval, GestureUseNowSlot8Planner) {
+    Setup();
+    ai::SetClassifyItemsHook(TestClassify);
+    ai::SetSelectBestHook(TestPlanner);
+    EvalActor a = MakeActor();
+    ai::EvalFrame fa, fb;
+    g_plannerReturn = 28;
+    // Slot 8 -> planner mode 3.
+    g_accessibleNodes = 6; g_usableCount = 1; g_usableSlot = 8; g_blockedCount = 0;
+    CHECK_EQ((int)EvalChooseGesture(0, &a, &fa, 0, &fb), 28);
+    CHECK_EQ(g_plannerCalls, 1);
+    CHECK_EQ(g_plannerLastMode, 3);
+    // Slot 3 (!=8) -> direct 28, no planner.
+    g_plannerCalls = 0; g_usableSlot = 3;
+    CHECK_EQ((int)EvalChooseGesture(0, &a, &fa, 0, &fb), 28);
+    CHECK_EQ(g_plannerCalls, 0);
 }
 
 // --- drink: sober 2-in-3 reject, drunk always proceeds ----------------------

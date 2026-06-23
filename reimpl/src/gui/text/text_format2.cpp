@@ -22,16 +22,20 @@ i16 g_currentIconWord = static_cast<i16>(0xFFFF);
 // by two; we mirror that by taking the cursor by reference.
 // ===========================================================================
 void FormatDigitPair(u16 value, char*& out) {
+    // 0x5fab00 `cmp al, cl` tests ONLY the low byte against 10.
     u8 al = static_cast<u8>(value);        // low byte
     u8 ah = static_cast<u8>(value >> 8);   // high byte
     u8 tens, units;
     if (al < 10u) {
-        // jb taken: no DIV. al(low) stays as low byte -> units; high byte -> tens.
-        tens  = ah;
-        units = al;
+        // jb taken (0x5fab04): no DIV. After `xchg al,ah` the bytes are swapped, then
+        // `add ah,30h; add al,30h` write AL=high byte -> out[0], AH=low byte -> out[1].
+        tens  = ah;   // out[0] = high byte
+        units = al;   // out[1] = low byte
     } else {
-        tens  = static_cast<u8>(al / 10u);
-        units = static_cast<u8>(al % 10u);
+        // jb not taken: `div cl` divides the FULL 16-bit AX (= value) by 10.
+        // AL = AX/10 -> out[0] (tens), AH = AX%10 -> out[1] (units).
+        tens  = static_cast<u8>(value / 10u);
+        units = static_cast<u8>(value % 10u);
     }
     out[0] = static_cast<char>(tens + '0');
     out[1] = static_cast<char>(units + '0');

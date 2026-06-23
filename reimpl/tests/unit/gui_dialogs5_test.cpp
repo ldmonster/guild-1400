@@ -24,6 +24,7 @@ struct Rec {
     std::vector<std::string> formNames;
     std::vector<int> selectWin;
     std::vector<unsigned> richIds;
+    int  profWealthArg = -999;   // 4th arg of RichStr(0x16A7,...) in ChooseProfession (==v37)
     int  addToWindowCalls = 0;
     int  addTextLabelCalls = 0;
     int  setEnabledCalls = 0;
@@ -56,7 +57,7 @@ int  HGetChild(int, int, int) { return 9; }
 int  HDestroy(int) { ++g_rec.destroyCalls; return -1; }
 void HSetVis(int, int) {}
 void HSetChildVis(int, int) {}
-int  HRich(unsigned id, int, int, int, int) { g_rec.richIds.push_back(id); return 0; }
+int  HRich(unsigned id, int, int, int c, int) { g_rec.richIds.push_back(id); if (id == 0x16A7u) g_rec.profWealthArg = c; return 0; }
 void HFmt(char* o, const char*, int, int, int) { if (o) std::strcpy(o, "x"); }
 void HSync(int) {}
 void HSlider(int, int, int, int, int, i32*, i32*, i32*) { ++g_rec.sliderPanelCalls; }
@@ -299,6 +300,16 @@ TEST(GuiDialogs5, ChooseProfessionLaysOutColumns) {
     CHECK_EQ(r, 0);
     // v34 goes 4->52 in steps of 4 => 12 widgets added.
     CHECK_EQ(g_rec.addToWindowCalls, 12);
+    // gilde.exe 0x566bd?: v37 = (int)trunc((double)wealth * flt_624DF8) with
+    // flt_624DF8 == 0.015f (get_bytes 0x624DF8,4 = 8F C2 75 3C). HWealth() == 1000,
+    // so v37 = trunc(1000 * 0.015) = trunc(15.0) = 15 (NOT the raw 1000).
+    // gilde.exe 0x566bd?: v37 = (int)trunc((double)wealth * flt_624DF8).  flt_624DF8 is
+    // a FLOAT32 (get_bytes 0x624DF8,4 = 8F C2 75 3C); 0.015f is NOT exact — its double
+    // promotion is 0.014999999664..., so 1000 * flt_624DF8 == 14.99999966..., and
+    // ConvertX TRUNCATES toward zero => 14 (NOT 15).  This pins the float32-vs-exact
+    // precision subtlety: the reconstruction multiplies by 0.015f promoted to double,
+    // matching the x87 fld dword load exactly.
+    CHECK_EQ(g_rec.profWealthArg, 14);
     SetGuiDialogs5Hooks(nullptr);
 }
 

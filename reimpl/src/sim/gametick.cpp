@@ -41,12 +41,13 @@ u8 PlantAdvanceStage(u8 stage, u8 cap) {
     return stage;
 }
 
-// gilde.exe 0x56ebaa..0x56ec04 — the 384-node growth loop (growth rule only).
+// gilde.exe 0x56ebaa..0x56ec04 — the 64-node growth loop (growth rule only).
+// Original span: base..base+0x600 stride 0x18 => 64 nodes (see gametick.h).
 int PlantAdvanceFarm(PlantNode* nodes, int count) {
     int advanced = 0;
     for (int i = 0; i < count; ++i) {
         PlantNode& n = nodes[i];
-        if (n.typeByte == 0xFF)          // node[10]>>24 == -1 (empty)
+        if (n.typeByte == 0xFF)          // sar [+0Ah],18h == -1 (offset-13 byte; empty)
             continue;
         u8 next = PlantAdvanceStage(n.stage, n.cap);
         if (next != n.stage) {

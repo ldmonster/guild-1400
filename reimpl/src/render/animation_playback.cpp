@@ -210,9 +210,17 @@ void AnimSetLoopFlags(AnimTrack* tracks, i32 count, bool loop, const char* name,
 i32 FindFirstActiveBone(const void* header, const char* name) {
     if (!header)
         return -1;
-    if (*reinterpret_cast<const void* const*>(CB(header) + 87 * 4) == nullptr) // a1[87]
+    // a1[87] is a 32-bit pointer slot in the original (byte offset 348). Read it as
+    // a 4-byte word and test for null — reading a host 8-byte `const void*` there is
+    // both misaligned (the slot is 4-byte aligned) and over-reads past the 4-byte
+    // field. memcpy avoids the misaligned/strict-aliasing UB while staying 1:1 (the
+    // binary's `if (!a1[87])` is exactly a 32-bit nonzero test). [W11-ANIM UBSAN fix]
+    u32 framesPtr;
+    std::memcpy(&framesPtr, CB(header) + 87 * 4, 4);                           // a1[87]
+    if (framesPtr == 0)
         return -1;
-    i32 count = *reinterpret_cast<const i32*>(CB(header) + 81 * 4);            // a1[81]
+    i32 count;
+    std::memcpy(&count, CB(header) + 81 * 4, 4);                               // a1[81]
     if (count <= 0)
         return -1;
     const char* entry = reinterpret_cast<const char*>(CB(header) + 64);        // a1 + 16

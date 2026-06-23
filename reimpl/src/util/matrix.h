@@ -79,9 +79,9 @@ void MatrixToEuler(float* m);
 
 // gilde.exe 0x5cb354 — VIBE_Math_MatrixDecompose (__usercall eax=fn(m@eax, out@edx)).
 // Recovers an averaged rotation (via three normalized basis-difference vectors fed
-// through MatrixToEuler) and a translation = 0.125 * sum of the 4 row origins,
-// written as out[0..2]. Returns the past-the-end source pointer (m+16), as the
-// original does. See cpp for the full reconstruction.
+// through MatrixToEuler) and a translation = 0.125 * sum of EIGHT row origins (m
+// float offsets 0,4,..,28), written as out[0..2]. Returns the past-the-end source
+// pointer (m+32), as the original does. See cpp for the full reconstruction.
 float* MatrixDecompose(float* m, float* out);
 
 // gilde.exe 0x5ca798 — VIBE_Math_QuatRotateVector

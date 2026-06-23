@@ -27,8 +27,12 @@ char ProjectVerticesToScreen(MeshGeometry* geom, const ProjectParams& p,
 
     // Top gate (original): skip if the object is back-culled by the view's
     // backface gate, unless the 0x10 "force" flag is set.
-    //   ((viewCull42 >> 24) & (((16*objFlags530) >> 6) & 0xFF)) == 0  ||  (objFlags530 & 0x10)
-    int backCull = ((viewCull42 >> 24) & (u8)((16 * objFlags530) >> 6)) == 0;
+    //   ((viewCull42 >> 24) & ((u8)(16*objFlags530) >> 6)) == 0  ||  (objFlags530 & 0x10)
+    // NOTE (harden 0x5c514c): the original does `shl al,4 ; shr al,6` on the 8-bit
+    // AL register, so the (objFlags530<<4) is truncated to 8 bits BEFORE the >>6.
+    // (u8)(16*objFlags530) reproduces that mod-256 truncation; the prior code cast
+    // to u8 only AFTER the >>6, which diverged for objFlags530 >= 0x10.
+    int backCull = ((viewCull42 >> 24) & ((u8)(16 * objFlags530) >> 6)) == 0;
     if (!backCull && (objFlags530 & 0x10) == 0)
         return 1;
 

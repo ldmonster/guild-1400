@@ -88,7 +88,12 @@ TEST(NetfileRun, FileSel_DirectMode_RowsOnly) {
     CHECK_EQ(rec.rowCount, 3);
     CHECK_EQ(rec.idOk, -1);         // no OK button in direct mode
     CHECK_EQ(rec.idEdit, -1);
-    // rows at y = 24*i, names extension-stripped by SaveBrowser_EnumerateSaveFiles.
+    // rows at y = 24*i. The original STRIPS the extension from the name field: the enumerator
+    // (@0x569530) copies the raw filename `*v6` into the name field at a3+9 via a 2-byte
+    // stride, then truncates it at the first '.' (disasm 0x5695f4 `mov eax,ecx` -> StrChr ->
+    // 0x5695ff `mov byte ptr [eax],0`, operating on a3+9, the NAME field). The selector
+    // (@0x569668) uses that extension-stripped field for the label and re-appends the a5
+    // extension on commit. The separate full-path buffer (a3+265) keeps its extension (unused).
     CHECK_EQ(rec.rows.size(), (size_t)3);
     CHECK_EQ(rec.rows[0].y, 0);
     CHECK_EQ(rec.rows[1].y, 24);

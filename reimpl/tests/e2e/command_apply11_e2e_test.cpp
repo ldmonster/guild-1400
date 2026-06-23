@@ -53,11 +53,11 @@ TEST(CmdApply11E2E, FullDebugConsoleSession) {
     ctx.selectionActive = &SelActive;
     ctx.selectedId      = &SelId;
 
-    DebugCmdHooks h{};
+    Apply11CmdHooks h{};
     h.parseInt = E2eParse;
     h.toLower  = [](char*) {};
     h.countActiveObjects = []() -> i16 { return 2; };
-    SetDebugCmdHooks(h);
+    SetApply11CmdHooks(h);
 
     // 1) "give gold"   -> opcode 28
     CHECK_EQ(QueueGiveGold(q, pending, ctx), 1);
@@ -104,7 +104,7 @@ TEST(CmdApply11E2E, FullDebugConsoleSession) {
     CHECK_EQ(g_dispatched[27], 2);
     CHECK_EQ(g_dispatched[17], 2);
 
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }
 
 // A rejected-command session: gates fail, nothing is queued, the flow stays inert.
@@ -115,7 +115,7 @@ TEST(CmdApply11E2E, RejectedCommandsQueueNothing) {
     DeltaWriter dw;
     DebugCmdCtx ctx;
 
-    DebugCmdHooks h{}; h.parseInt = E2eParse; SetDebugCmdHooks(h);
+    Apply11CmdHooks h{}; h.parseInt = E2eParse; SetApply11CmdHooks(h);
 
     CHECK_EQ(QueueSpawnSelected(q, pending, ctx, "noflag"), 0);     // missing '-'
     CHECK_EQ(QueueAdjustSelectedStat(q, ctx, 0, 0, "-PLUS_1"), 0);  // !selBase
@@ -124,5 +124,5 @@ TEST(CmdApply11E2E, RejectedCommandsQueueNothing) {
 
     CHECK_EQ(q.send_count(), 0u);
     CHECK(q.pending_head() == nullptr);
-    SetDebugCmdHooks(DebugCmdHooks{});
+    SetApply11CmdHooks(Apply11CmdHooks{});
 }

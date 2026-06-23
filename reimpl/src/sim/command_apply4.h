@@ -211,7 +211,14 @@ void SetScriptFinishHook(ScriptFinishFn fn);
 using BuildingRemoveFn4 = void (*)(i32 personMarker, i32 arg);
 void SetBuildingRemoveHook4(BuildingRemoveFn4 fn);
 // VIBE_Building_SetObjectParent @0x58820c — set an object's parent person.
-using SetObjectParentFn = void (*)(i32 ownerMarker, i32 newParentMarker, i32 oldChildMarker);
+// The DEFAULT now performs the disasm-verified record/column slice (the
+// dword_12CEA80 workBld-column populater + the bld +0x25/+0x27 owner words +
+// the kind-6/7 staff clear; see the .cpp provenance block); the render-coupled
+// tail (storage rooms / scene loop / texture set / flag nodes) stays the
+// hook's named gap. Args: ownerId = the BUILDING's id (resolved via
+// BuildingFindById), newParentMarker = a2 (new parent's marker word),
+// childMarker = a3 (the new owner slot; 0xFFFF == none).
+using SetObjectParentFn = void (*)(i32 ownerId, i32 newParentMarker, i32 childMarker);
 void SetSetObjectParentHook(SetObjectParentFn fn);
 // VIBE_Object_SpawnChimneySmoke @0x4b60a0 — production-building smoke effect.
 using ChimneySmokeFn = void (*)(i32 personMarker);

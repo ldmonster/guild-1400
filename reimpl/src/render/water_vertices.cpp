@@ -52,34 +52,42 @@ void AnimateWaterVertices(WaterMesh* meshes, u32 count, i32 time,
             continue;
 
         // ---- TEXTURE-COORD ACCUMULATORS (5be4b9..5be4fb) ------------------
+        // VERIFIED against the live 0x5be428 disasm (Fmod @0x5d3fb2 == fprem,
+        // i.e. st0 mod st1 with st0=dividend, st1=divisor):
         //   dt = (float)(time-lastTime);
-        //   texAccumA = Fmod(texRateA*dt + texAccumA, 1.0);
-        //   texAccumB = Fmod(1.0,           texAccumA);
+        //   5be4b9: fld a3[3](texRateA); fmul dt; fadd a3[82](texAccumA); fld1;
+        //           fxch; Fmod -> (texRateA*dt + texAccumA) mod 1.0
+        //   5be4d7: fld a3[4](texRateB); fmul dt; fadd a3[83](texAccumB); fld1;
+        //           fxch; Fmod -> (texRateB*dt + texAccumB) mod 1.0
+        //   5be4f3: fxch; fstp a3[82]=resultA; fstp a3[83]=resultB.
+        // (The Hex-Rays `Fmod(1.0, v5)` for the second accumulator is a
+        //  misrendering — the disasm fadds a3[14Ch] and divides by the fld1
+        //  divisor, identical structure to the first accumulator.)
         float dtF = (float)dtInt;
         double tA = (double)m.texRateA * (double)dtF + (double)m.texAccumA;
+        double tB = (double)m.texRateB * (double)dtF + (double)m.texAccumB;
         double newAccumA = util::Fmod(tA, 1.0);           // dividend=tA, /1.0
-        double newAccumB = util::Fmod(1.0, newAccumA);    // dividend=1.0, /accumA
+        double newAccumB = util::Fmod(tB, 1.0);           // dividend=tB, /1.0
         m.texAccumA = (float)newAccumA;
         m.texAccumB = (float)newAccumB;
 
-        // ---- PHASE PROPAGATION (loc_5BE50B): faithful +0x134 write that ---
-        // overlaps the +0x138 phase read by one float. The loop writes
-        //   phaseOut buffer [-1..2] (bytes +0x134..+0x140) from speeds [0..3]
-        //   and phases  [0..3], then the wave grid reads phase[0..3]
-        //   (bytes +0x138..+0x144). Net effect (reproduced exactly):
-        //     phase[0] <- Fmod(speed[1]*dt + phase[1], 2π)
-        //     phase[1] <- Fmod(speed[2]*dt + phase[2], 2π)
-        //     phase[2] <- Fmod(speed[3]*dt + phase[3], 2π)
-        //     phase[3] <- (unchanged: +0x144 is never written)
+        // ---- PHASE PROPAGATION (loc_5BE50B..loc_5BE52A) -------------------
+        // VERIFIED against the live 0x5be428 disasm: the loop runs edx from a3
+        // to a3+0x10 (4 iterations). Each iteration reads waveSpeed[k] at
+        // [edx+0x18] and phase[k] at [edx+0x138], then does `add edx,4` and
+        // stores to [edx+0x134] == the SAME byte +0x138+4k it just read. So it
+        // is an IN-PLACE update of all four phase accumulators:
+        //     phase[k] = Fmod(waveSpeed[k]*dt + phase[k], 2π)   for k in [0,4)
+        // (There is NO +0x134 scratch write and NO one-float overlap shift; an
+        // earlier reconstruction misread the post-increment store offset.)
         // The (float)dt the FILD reloads is var_14 == dtF.
         float prop[4];
         PropagatePhases(m.waveSpeed, m.phase, (double)dtF, prop);
-        // prop[k] was written to byte +0x134+4k == phase index (k-1). Shift down:
-        m.phaseOut[0] = prop[0];          // +0x134 (scratch, never read by grid)
-        m.phase[0]    = prop[1];          // +0x138
-        m.phase[1]    = prop[2];          // +0x13C
-        m.phase[2]    = prop[3];          // +0x140
-        // m.phase[3] (+0x144) intentionally untouched.
+        m.phase[0] = prop[0];             // +0x138
+        m.phase[1] = prop[1];             // +0x13C
+        m.phase[2] = prop[2];             // +0x140
+        m.phase[3] = prop[3];             // +0x144
+        m.phaseOut[0] = prop[0];          // mirror (unused by the grid; kept for tests)
 
         // ---- WAVE GRID (loc_5BE53C): 16 vec4 from amp/phase, t = 2π -------
         AnimateWaterWaveGrid(m.waveOut, m.amp, m.phase, kTwoPi);

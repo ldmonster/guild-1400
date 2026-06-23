@@ -22,6 +22,14 @@ struct Block { u8 b[700]; };
 
 inline HeRecord* H(Block& blk) { return reinterpret_cast<HeRecord*>(blk.b); }
 inline void Zero(Block& blk) { std::memset(blk.b, 0, sizeof(blk.b)); }
+// Byte-exact stores at arbitrary (possibly unaligned) record offsets — the binary
+// uses unaligned `*(int*)(rec+N)` writes; binding an i32&/u16& to a misaligned
+// address is UB (UBSAN). memcpy writes the identical little-endian bytes.
+inline void Poke32(u8* p, int off, i32 v) { std::memcpy(p + off, &v, sizeof(v)); }
+inline void Poke16(u8* p, int off, u16 v) { std::memcpy(p + off, &v, sizeof(v)); }
+// Host-width pointer slot stored at a 4-byte (unaligned) stride, as the 32-bit
+// layout does; memcpy avoids binding a misaligned `void*&`.
+inline void PokePtr(u8* p, int off, void* v) { std::memcpy(p + off, &v, sizeof(v)); }
 
 // Recording Wire: counts leaf invocations and parks return values the tests pin.
 struct Wire {
@@ -241,7 +249,7 @@ TEST(CharActionSteps8, InitArrestNormalArmsCmd) {
     CharActionStep8Hooks h = MakeHooks();
     Block person; Zero(person);
     person.b[0] = 3;                  // ordinary class
-    *reinterpret_cast<u16*>(person.b + 37) = 0xFFFF;  // no guild city
+    Poke16(person.b, 37, 0xFFFF);  // no guild city
     g.personBegin = reinterpret_cast<HeRecord*>(person.b);
     SetCharActionStep8Hooks(&h);
     SetNpcClock(MkClock(10, 8, 30, 0));
@@ -317,20 +325,21 @@ TEST(CharActionSteps8, InitEscortStampsAndAdvances) {
     Reset();
     CharActionStep8Hooks h = MakeHooks();
     Block person; Zero(person);
-    *reinterpret_cast<i32*>(person.b + 1) = 4242;  // begin[+1] entity id
+    Poke32(person.b, 1, 4242);  // begin[+1] entity id
     g.personBegin = reinterpret_cast<HeRecord*>(person.b);
     SetCharActionStep8Hooks(&h);
     SetNpcClock(MkClock(10, 8, 30, 0));
     Block blk; Zero(blk);
-    Cas8_CountA(H(blk)) = 10;         // speed -> 10*0.5 = 5 minutes on +68
+    Cas8_CountA(H(blk)) = 10;         // speed -> 10 * dbl_61F630(=10.0) = 100 minutes on +68
     InitEscortPrisoner(H(blk), 0, reinterpret_cast<HeRecord*>(0x10));
     CHECK_EQ(Cas8_Misc16(H(blk)), 4242);
     CHECK_EQ(g.args25, 1);
     // appointment (+82) advanced +10 min: 8:40
     CHECK_EQ(He_ApptTime(H(blk)).minute, 40);
-    // saved pose (+68) advanced +5 min: 8:35
+    // saved pose (+68) advanced +100 min (10*10.0, dbl_61F630): 8:30 -> 10:10
     GameTime* saved = reinterpret_cast<GameTime*>(blk.b + 68);
-    CHECK_EQ(saved->minute, 35);
+    CHECK_EQ(saved->minute, 10);
+    CHECK_EQ(static_cast<int>(saved->hour), 10);
     SetCharActionStep8Hooks(nullptr);
 }
 
@@ -338,7 +347,7 @@ TEST(CharActionSteps8, LagerFuellenCancelPhase) {
     Reset();
     CharActionStep8Hooks h = MakeHooks();
     Block obj; Zero(obj);
-    *reinterpret_cast<i32*>(obj.b + 1) = 77;
+    Poke32(obj.b, 1, 77);
     g.resolveObj = reinterpret_cast<HeRecord*>(obj.b);
     SetCharActionStep8Hooks(&h);
     Block blk; Zero(blk);
@@ -354,7 +363,7 @@ TEST(CharActionSteps8, LagerFuellenFinalizeAnnounces) {
     Reset();
     CharActionStep8Hooks h = MakeHooks();
     Block obj; Zero(obj);
-    *reinterpret_cast<i32*>(obj.b + 1) = 77;
+    Poke32(obj.b, 1, 77);
     g.resolveObj = reinterpret_cast<HeRecord*>(obj.b);
     g.building = nullptr; g.workProduct = nullptr;
     SetCharActionStep8Hooks(&h);
@@ -487,7 +496,7 @@ TEST(CharActionSteps8, FindGestureNoHandlersReturnsZero) {
     g.findFirst = nullptr;           // empty pool
     SetCharActionStep8Hooks(&h);
     Block self; Zero(self);
-    *reinterpret_cast<u8**>(self.b + 97) = self.b;  // selfChar (byte 97) nonnull
+    PokePtr(self.b, 97, self.b);  // selfChar (byte 97) nonnull
     Block goal; Zero(goal);
     GestureCtx ctx{}; ctx.self = self.b; ctx.radius = 5.0f; ctx.goal = goal.b; ctx.found = nullptr;
     int r = FindGestureTarget(&ctx);
@@ -512,7 +521,7 @@ TEST(CharActionSteps8, MorphAttachFailUnlinks) {
     SetCharActionStep8Hooks(&h);
     Block blk; Zero(blk);
     Block charRec; Zero(charRec);
-    *reinterpret_cast<void**>(blk.b + 5 * 4) = charRec.b;  // a1[5] = char sub-record
+    PokePtr(blk.b, 5 * 4, charRec.b);  // a1[5] = char sub-record
     int r = MorphMovementInit(H(blk), nullptr);
     CHECK_EQ(g.attach, 1);
     CHECK_EQ(r, 0);
@@ -527,7 +536,7 @@ TEST(CharActionSteps8, MorphAttachSuccessSetsFlags) {
     SetCharActionStep8Hooks(&h);
     Block blk; Zero(blk);
     Block charRec; Zero(charRec);
-    *reinterpret_cast<void**>(blk.b + 5 * 4) = charRec.b;
+    PokePtr(blk.b, 5 * 4, charRec.b);
     charRec.b[4] = 0;                // normal speed -> 20.0f base
     int r = MorphMovementInit(H(blk), nullptr);
     CHECK_EQ(r, 1);

@@ -296,12 +296,16 @@ TEST(IoVfsTreeFile, TextLineRead) {
     BufferedFile* f = FileOpenBuffered(&fs, "lines.txt", "rt");
     CHECK(f != nullptr);
     char line[64];
+    // 1:1 with VIBE_Vfs_ReadLine @0x4516cc: the swallow loop @0x451758 over-reads
+    // one byte past each CR/LF run and discards it, so every line after the first
+    // loses its leading character. Faithful output of "alpha\r\nbeta\ngamma\r\n"
+    // is therefore: "alpha", "eta", "amma".
     CHECK(FileReadLine(line, 63, f) != nullptr);
     CHECK(std::strcmp(line, "alpha") == 0);
     CHECK(FileReadLine(line, 63, f) != nullptr);
-    CHECK(std::strcmp(line, "beta") == 0);
+    CHECK(std::strcmp(line, "eta") == 0);   // 'b' consumed by prior swallow loop
     CHECK(FileReadLine(line, 63, f) != nullptr);
-    CHECK(std::strcmp(line, "gamma") == 0);
+    CHECK(std::strcmp(line, "amma") == 0);  // 'g' consumed by prior swallow loop
     CHECK(FileReadLine(line, 63, f) == nullptr);   // EOF
     FileClose(f);
 }

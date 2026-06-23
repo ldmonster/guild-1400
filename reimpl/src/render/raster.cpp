@@ -1,5 +1,7 @@
 #include "render/raster.h"
 
+#include "render/fog.h"   // wave-6 W6-INTEGRATE: per-pixel span fog (SpanFog())
+
 #include <cstring>
 
 // =============================================================================
@@ -33,7 +35,11 @@ static constexpr int kPrev[3] = {2, 0, 1}; // dword_5AC544[2*i]
 // ---------------------------------------------------------------------------
 static i32 EdgeSlope(i32 num, i32 dy) {
     if (dy >= 0x10000) {
-        return (i32)(((i64)num << 16) / dy);
+        // The x86 `shl`/widening is bit-exact regardless of sign; do the <<16 in
+        // the unsigned domain so a negative `num` does not invoke signed-shift UB
+        // (the two's-complement bit pattern, and hence the 64-bit divide, is
+        // identical). HARDENING wave-10 (UBSAN: left shift of negative value).
+        return (i32)(((i64)((u64)(i64)num << 16)) / dy);
     } else {
         i32 recip = (i32)(0x40000000 / dy);
         return (i32)(((u64)((i64)recip * (i64)num)) >> 14);
@@ -44,7 +50,10 @@ static i32 EdgeSlope(i32 num, i32 dy) {
 //   ((y + 0xFFFF) >> 16 << 16) - y   ==  (ceil(y) in 16.16) - y
 // i.e. the sub-pixel distance from y up to the next integer scanline.
 static i32 SubpixelToCeil(i32 y16) {
-    return (((y16 + 0xFFFF) >> 16) << 16) - y16;
+    // The `>>16 <<16` integer-floor mask: do the final <<16 unsigned so a
+    // negative ceil() (off-screen top edge) is not signed-shift UB. The masked
+    // bits are identical to the original `sar/shl`. HARDENING wave-10 (UBSAN).
+    return (i32)((u32)((y16 + 0xFFFF) >> 16) << 16) - y16;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,8 +64,10 @@ void InterpolateEdgeZTex(RasterState& rs, int a, int b) {
     i32 dy = rs.vy[b] - rs.vy[a];                     // dword_13FC59C delta
     i32 uStep;
     if (dy >= 0x10000) {
-        rs.xLeftStep = (i32)(((i64)(rs.vx[b] - rs.vx[a]) << 16) / dy);
-        uStep        = (i32)(((i64)(rs.vlight[b] - rs.vlight[a]) << 16) / dy);
+        // <<16 in the unsigned domain (negative dx/dlight would be signed-shift
+        // UB; bits identical). HARDENING wave-10 (UBSAN).
+        rs.xLeftStep = (i32)(((i64)((u64)(i64)(rs.vx[b] - rs.vx[a]) << 16)) / dy);
+        uStep        = (i32)(((i64)((u64)(i64)(rs.vlight[b] - rs.vlight[a]) << 16)) / dy);
     } else {
         i32 recip = (i32)(0x40000000 / dy);
         rs.xLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vx[b] - rs.vx[a]))) >> 14);
@@ -95,106 +106,330 @@ void InterpolateEdgeZ(RasterState& rs, int a, int b) {
 // reproduce it scalar with explicit 16.16 accumulators; the patched immediates
 // arrive in `p` (see SpanTexParams / the self-modifying-code note in raster.h).
 // ---------------------------------------------------------------------------
+// EQUIVALENCE NOTE (combined-index vs separate accumulators). The original's
+// inner loop keeps ONE combined texel index ebx = (Vint<<shift)+Uint, advanced
+// per pixel by the patched delta dword_13DCE54[0] = (dVint<<shift)+dUint, plus
+// +1 via the `adc` when the U fraction (eax += dword_13FC594) carries, plus
+// +width (dword_13DCE50 selected by `sbb ebp,ebp`) when the V fraction
+// (ecx += dword_13FC5A8) carries — and the V-fraction add is PRE-RUN once in
+// the prologue so its carry chain lands on the correct pixel. Both carries are
+// therefore exactly timed, and the per-iteration `and ebx, mask` is a mod-2^k
+// reduction (the mask is contiguous low bits) that commutes with the adds. The
+// separate full-16.16 U/V accumulators below produce the identical masked
+// address on every pixel.
 void FillSpanTextured(RasterState& rs, u16* dst, i32 u, i32 v,
                       const SpanTexParams& p) {
     int n = rs.spanLen;
+    // wave-6/wave-7: the per-pixel fog blend — the software realisation of D3D
+    // fixed-function VERTEX fog (rule 3). DEFAULT DISABLED (SpanFog().enabled ==
+    // false) so this whole branch is bypassed and the span is byte-identical.
+    //
+    // wave-7 W7-FOGPIX: when rs.fPerPixel is set, the fog factor is the PER-PIXEL
+    // interpolated value the engine's D3D vertex fog produces — the per-vertex
+    // factor (vertex+79) carried as a third 16.16 span channel (rs.fStart, stepped
+    // by rs.fGrad), clamped to [0,255]. When fPerPixel is clear we fall back to the
+    // per-triangle constant SpanFog().factor (the wave-6 first cut — kept so direct
+    // FillSpanTextured callers that do not seed the channel stay byte-identical).
+    const SpanFogState& fog = SpanFog();
+    if (fog.enabled) {
+        const u32 fogColor = (u32)fog.color;
+        if (rs.fPerPixel) {
+            i32 f16 = rs.fStart;                            // 16.16 fog factor
+            for (int i = 0; i < n; ++i) {
+                int factor = f16 >> 16;                     // interp factor
+                if (factor < 0) factor = 0;
+                else if (factor > 255) factor = 255;
+                i32 uInt = u >> 16;
+                i32 vInt = v >> 16;
+                u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
+                u8  idx = p.texBase[addr];
+                dst[i] = BlendFog565(p.palBase[p.lightRow8 | idx], fogColor, factor);
+                u = WrapAddI32(u, p.uStepFrac);
+                v = WrapAddI32(v, p.vStep);
+                f16 = WrapAddI32(f16, rs.fGrad);                            // step the 3rd channel
+            }
+            rs.fStart = f16;                                // (mirrors the original
+            return;                                         //  edge-walk persistence)
+        }
+        if (fog.factor < 255) {
+            const int factor = fog.factor;
+            for (int i = 0; i < n; ++i) {
+                i32 uInt = u >> 16;
+                i32 vInt = v >> 16;
+                u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
+                u8  idx = p.texBase[addr];
+                dst[i] = BlendFog565(p.palBase[p.lightRow8 | idx], fogColor, factor);
+                u = WrapAddI32(u, p.uStepFrac);
+                v = WrapAddI32(v, p.vStep);
+            }
+            return;
+        }
+    }
     for (int i = 0; i < n; ++i) {
         i32 uInt = u >> 16;                                  // sar edx,16
         i32 vInt = v >> 16;                                  // sar ebx,16
         u32 addr = (((u32)vInt) << p.widthShift) + (u32)uInt;// (V<<shift)+U
         addr &= p.texelMask;                                 // and ebx, mask
         u8  idx = p.texBase[addr];                           // mov dl,[ebx+base]
-        dst[i] = p.palBase[idx];                             // mov cx,pal[edx*2]
-        u += p.uStepFrac;                                    // add edx (U step)
-        v += p.vStep;                                        // add ebx (V step)
+        dst[i] = p.palBase[p.lightRow8 | idx];               // mov cx,pal[edx*2]
+        u = WrapAddI32(u, p.uStepFrac);                                    // add edx (U step)
+        v = WrapAddI32(v, p.vStep);                                        // add ebx (V step)
     }
 }
 
 // ---------------------------------------------------------------------------
-// gilde.exe 0x5F721A — VIBE_Raster_FillSpanTexturedMasked. As above but the
-// `test dl,dl / jz` skips writing when the source index is 0 (colour key).
+// gilde.exe 0x5F721A — VIBE_Raster_FillSpanTexturedMasked.
+//
+// As FillSpanTextured but transparent texels are skipped (left untouched in the
+// framebuffer). TWO transparency rules, selected by SpanTexParams::useColorKey:
+//
+//   useColorKey == false (DEFAULT): the EXACT original rule — `test dl,dl / jz`
+//     skips the texel when its SOURCE INDEX is 0. Byte-identical to the binary's
+//     software masked span and to every prior reconstruction/test.
+//
+//   useColorKey == true (wave-5 W5-CKEY): the faithful software realisation of
+//     the DDraw colour-key the engine actually uses for 24-bit colour-keyed
+//     (record +104 bit 2) textures. VIBE_Render_LoadAndStretchTexture @0x5dea50
+//     colour-keys the transparent surface on `v111 = pal[0]` (0x5df40a) which,
+//     for a 24-bit source, is (0,0,0) == BLACK (the palette buffer is memset-0
+//     and never rebuilt — the 24-bit arm of VIBE_Bmp_LoadBuffer @0x5f0ce4 skips
+//     VIBE_Quant_BuildPalette), and the DDBLT_KEYSRC blit (&unk_1000000,
+//     0x5df086) makes every pixel whose RESOLVED colour equals that key
+//     transparent. The octree quantizer (TreeCollectPalette @0x603180) does NOT
+//     put black at index 0, so the index-0 rule cannot stand in for black; we
+//     key on the RESOLVED 16bpp value instead — skip when
+//     palBase[lightRow8|idx] == colorKey565 (black == 565 0x0000). This matches
+//     the DDraw key exactly. (Black scaled by any HiColTab light ramp row is
+//     still 0, so the key is row-invariant.)
 // ---------------------------------------------------------------------------
 void FillSpanTexturedMasked(RasterState& rs, u16* dst, i32 u, i32 v,
                             const SpanTexParams& p) {
     int n = rs.spanLen;
+    // wave-6/wave-7: per-pixel fog (default disabled == byte-identical). Fog only
+    // touches WRITTEN (non-transparent) pixels — transparent texels keep the
+    // existing destination untouched, exactly as without fog. The interpolated
+    // fog-factor channel (rs.fStart/fGrad) advances per pixel regardless of the
+    // transparency test (D3D interpolates fog at every covered pixel; only the
+    // BLEND/write is masked), so the gradient stays in phase across skipped texels.
+    const SpanFogState& fog = SpanFog();
+    const bool fogEnabled  = fog.enabled;
+    const bool fogPerPixel = fogEnabled && rs.fPerPixel;
+    const bool fogConst    = fogEnabled && !rs.fPerPixel && fog.factor < 255;
+    const u32  fogColor    = (u32)fog.color;
+    i32 f16 = rs.fStart;                                     // 16.16 fog factor
+    auto fogPixel = [&](u16 col) -> u16 {
+        if (fogPerPixel) {
+            int factor = f16 >> 16;
+            if (factor < 0) factor = 0;
+            else if (factor > 255) factor = 255;
+            return BlendFog565(col, fogColor, factor);
+        }
+        if (fogConst) return BlendFog565(col, fogColor, fog.factor);
+        return col;
+    };
+    if (p.useColorKey) {
+        for (int i = 0; i < n; ++i) {
+            i32 uInt = u >> 16;
+            i32 vInt = v >> 16;
+            u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
+            u8  idx = p.texBase[addr];
+            u16 col = p.palBase[p.lightRow8 | idx];          // resolved 16bpp
+            if (col != p.colorKey565)                        // DDraw KEYSRC == key
+                dst[i] = fogPixel(col);
+            u = WrapAddI32(u, p.uStepFrac);
+            v = WrapAddI32(v, p.vStep);
+            f16 = WrapAddI32(f16, rs.fGrad);
+        }
+        rs.fStart = f16;
+        return;
+    }
     for (int i = 0; i < n; ++i) {
         i32 uInt = u >> 16;
         i32 vInt = v >> 16;
         u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
         u8  idx = p.texBase[addr];
-        if (idx != 0) {                                      // test dl,dl; jz
-            dst[i] = p.palBase[idx];
-        }
-        u += p.uStepFrac;
-        v += p.vStep;
+        if (idx != 0)                                        // test dl,dl; jz
+            dst[i] = fogPixel(p.palBase[p.lightRow8 | idx]);
+        u = WrapAddI32(u, p.uStepFrac);
+        v = WrapAddI32(v, p.vStep);
+        f16 = WrapAddI32(f16, rs.fGrad);
     }
+    rs.fStart = f16;
 }
 
 // ---------------------------------------------------------------------------
-// gilde.exe 0x5F7960 (core) — VIBE_Raster_FillTexturedSpansShaded.
+// gilde.exe 0x5F7960 — VIBE_Raster_FillTexturedSpansShaded.
 //
-// Walks `rowCount` scanlines starting at row y0, emitting the 8-bit *shaded*
-// affine span. For each row, [ceil(xLeft), ceil(xRight)) is the pixel range
-// (dword_13FC588 = right-left). The per-pixel value is the integer part of the
-// horizontal U/shade accumulator: start = uLeft + (uGrad * (rowStartX<<16 -
-// xLeft)) >> 16, then step += uGrad per pixel. The original keeps that
-// accumulator ROR'd by 16 and uses an `adc` chain so the sub-pixel fraction
-// carries into the integer byte for free — we reproduce the *value* with a
-// plain 16.16 accumulator (bit-identical output bytes).
+// Walks `rowCount` scanlines starting at row y0. For each row,
+// [ceil(xLeft), ceil(xRight)) is the span (dword_13FC588 = right-left).
 //
-// The 24-byte/pixel parallel shading buffer (dword_1408AA4) and its blur-radius
-// spread (dword_1408AA0) are part of this routine in the original; that
-// secondary shade-marker fill is DEFERRED (see raster.h / final report) — it
-// only stamps shade-edge markers and does not affect the colour framebuffer
-// span coordinates or texel values this module is responsible for. We keep the
-// pixel/edge maths fully and faithfully.
+// BIT 1 (modeMask & 2): the shaded BYTE span. The per-pixel value is the
+// integer part of the horizontal U/shade accumulator: start = uLeft +
+// (uGrad * ((rowStartX<<16) - xLeft)) >> 16, then += uGrad per pixel. The
+// original keeps the accumulator ROR'd by 16 and advances it with an `adc`
+// chain (0x5f7a53..0x5f7a60):
+//     v8 = ROR(start,16); v9 = ROR(uGrad,16); CF = 0;
+//     do { *dst++ = (u8)v8; v8 = adc(v8, v9); } while (--n);
+// The carry out of the FRACTION half (bit 31 of the rotated word) re-enters
+// the INTEGER half (bit 0) only on the NEXT iteration's adc — so the
+// sub-pixel carry lands ONE PIXEL LATE relative to plain 16.16 accumulation
+// (and an integer-half overflow at bit 15 spills into the fraction). We
+// reproduce the rotated adc chain verbatim; the bytes are bit-identical to
+// the original including the carry-boundary pixels.
 //
-// Returns the last filled row index, or -1 if no span was emitted (matches the
-// original v34 = -1 sentinel).
+// BITS 0/2 (modeMask & 5, "v43"): the tile-type stamp into the 24-byte-stride
+// tile array (rs.shadeBase = dword_1408AA4 cursor; rs.blurRadius =
+// dword_1408AA0). Stamp value: v44 = v47 = 11 when (modeMask & 1) == 0, else
+// 0 (0x5f7987..0x5f799d). Per nonempty row: a width-clamped halo row
+// (blur > 0), once per firstBatch call a pyramid halo above the first
+// nonempty span (the a3/v46 once-flag), the core span bytes, and after the
+// walk a pyramid halo below the last nonempty span (v34/v31/v33 saved state).
+// Transcribed verbatim from the captured decompile.
+//
+// Returns the last filled row index, or -1 if no span was emitted. (The
+// original's char return value is dead in all callers; internally the v34
+// sentinel is the LEFT X of the last nonempty span — used verbatim for the
+// trailing halo below.)
+//
+// Reconstruction-only byte-map guard: bit 1 writes one shade byte per pixel
+// into an 8bpp byte map. The single live caller (BuildTerrainMesh @0x5c5610)
+// always passes the terrain byte map ([esi+28h]); a host caller pointing it at
+// a 16bpp surface would produce 0xC8C8-style byte-pair garbage (the pink-
+// polygon artifact pinned by tests/e2e/render_fidelity_w3a_e2e_test.cpp), so a
+// non-8bpp `fb` clears bit 1 — the same masking RasterizeTexturedTriangle's
+// `if (!a4) a5 &= 5` applies when the byte map is absent. Byte writes are also
+// clipped to the surface rect (the original writes unclipped, trusting the
+// caller's geometry).
 // ---------------------------------------------------------------------------
-int FillTexturedSpansShaded(RasterState& rs, Surface* fb, int rowCount, int y0) {
-    int lastRow = -1;                                        // v34 = -1
+int FillTexturedSpansShaded(RasterState& rs, Surface* fb, int rowCount, int y0,
+                            int firstBatch, u8 modeMask) {
+    const u8 stamp = (u8)(((modeMask & 5) != 0 && (modeMask & 1) == 0) ? 11 : 0);
+    const bool stamping  = (modeMask & 5) != 0 && rs.shadeBase != nullptr; // v43
+    const bool byteSpan  = (modeMask & 2) != 0 && fb && fb->bpp == 8;
+    bool topHaloDone = false;                                // v46
+
+    int lastRow = -1;                                        // reconstruction ret
+    i32 v34 = -1;                                            // left X of last span
+    i32 v31 = 0;                                             // its span length
+    u8* v33 = nullptr;                                       // its tile row cursor
+
     if (rowCount <= 0)
         return lastRow;
 
-    const int pitchPx = rs.fbPitch;                          // a2 (pixels/row)
-    u8* const fbPixels = fb->pixels;
-    const int fbW = fb->width;
-    const int fbH = fb->height;
+    const int pitchPx = rs.fbPitch;                          // a2 (width/pitch)
+    u8* const fbPixels = fb ? fb->pixels : nullptr;
+    const int fbW = fb ? fb->width : 0;
+    const int fbH = fb ? fb->height : 0;
+    const i32 blur = rs.blurRadius;                          // dword_1408AA0
+    u8* tileRow = rs.shadeBase;                              // dword_1408AA4
 
     int row = y0;                                            // v37 = a5
     do {
-        i32 xL = (rs.xLeft + 0xFFFF) >> 16;                  // ceil(xLeft)
+        i32 xL = (rs.xLeft + 0xFFFF) >> 16;                  // v39 = ceil(xLeft)
         rs.spanLen = ((rs.xRight + 0xFFFF) >> 16) - xL;      // dword_13FC588
         if (rs.spanLen > 0) {
-            lastRow = row;                                   // v34 = current row
-            // Per-pixel shade accumulator (the (a4>>1)&1 pixel-write block).
-            // start = uLeft + (uGrad * ((xL<<16) - xLeft)) >> 16
-            i32 sub  = (xL << 16) - rs.xLeft;
-            i32 acc  = rs.uLeft + (i32)(((i64)rs.uGrad * (i64)sub) >> 16);
-            i32 step = rs.uGrad;
-            // Destination row (8-bit). row*pitch is the framebuffer offset; we
-            // clip writes to the surface rect (the original relied on the caller
-            // having clamped the triangle; we clip here for safety/testability).
-            if (row >= 0 && row < fbH) {
-                u8* dstRow = fbPixels + (i64)row * pitchPx;
-                for (int i = 0; i < rs.spanLen; ++i) {
-                    int x = xL + i;
-                    if ((unsigned)x < (unsigned)fbW) {
-                        // value = integer part of accumulator (top 16 bits of
-                        // the ROR'd word == high word of acc).
-                        dstRow[x] = (u8)((u32)acc >> 16);
+            lastRow = row;
+            v31 = rs.spanLen;                                // saved for trailing
+            v33 = tileRow;                                   // saved 1408AA4
+            v34 = xL;                                        // saved left X
+
+            if (byteSpan) {                                  // ((a4>>1)&1) block
+                // v8 = ROR(uLeft + (uGrad*((xL<<16)-xLeft))>>16, 16)
+                // <<16 unsigned: xL can be a negative ceil() for an off-screen
+                // left edge (signed-shift UB; bits identical). HARDENING wave-10.
+                i32 sub = (i32)((u32)xL << 16) - rs.xLeft;
+                u32 r  = Ror4((u32)(rs.uLeft +
+                              (i32)(((i64)rs.uGrad * (i64)sub) >> 16)), 16);
+                u32 s  = Ror4((u32)rs.uGrad, 16);            // v9
+                u32 cf = 0;                                  // v10 = 0
+                if (row >= 0 && row < fbH) {
+                    u8* dstRow = fbPixels + (i64)row * pitchPx;
+                    for (int i = 0; i < rs.spanLen; ++i) {
+                        int x = xL + i;
+                        if ((unsigned)x < (unsigned)fbW)
+                            dstRow[x] = (u8)r;               // *v6 = v8
+                        u64 t = (u64)r + s + cf;             // adc v8, v9
+                        cf = (u32)(t >> 32);
+                        r  = (u32)t;
                     }
-                    acc += step;
                 }
             }
+
+            if (stamping) {                                  // if (v43)
+                if (blur > 0) {                              // dword_1408AA0 > 0
+                    // current-row halo: x in [max(xL-blur,0), ...), width
+                    // min(spanLen + 2*blur, pitch - xL).
+                    i32 x0 = xL - blur;                      // v13
+                    if (x0 <= 0) x0 = 0;
+                    u8* cell = tileRow + 24 * x0;            // v14
+                    i32 n = rs.spanLen + 2 * blur;           // v15
+                    if (n >= pitchPx - xL) n = pitchPx - xL;
+                    for (i32 i = 0; i < n; ++i, cell += 24)
+                        *cell = stamp;                       // = v44
+                    if (firstBatch && !topHaloDone) {        // if (a3 && !v46)
+                        // pyramid halo over the `blur` rows ABOVE this row:
+                        // v17 = blur..1; row v37-blur..v37-1 widening toward
+                        // the span.
+                        i32 v17 = blur;
+                        if (blur > 0) {
+                            i32 v41 = row - blur;
+                            i64 v40 = (i64)pitchPx * 24 * blur;
+                            do {
+                                if (v41 > 0) {
+                                    i32 v18 = xL - (blur - v17);
+                                    if (v18 <= 0) v18 = 0;
+                                    i32 v19 = 2 * (blur - v17) + rs.spanLen;
+                                    u8* v20 = tileRow - v40 + 24 * v18;
+                                    if (v19 >= pitchPx - xL) v19 = pitchPx - xL;
+                                    for (i32 j = 0; j < v19; ++j, v20 += 24)
+                                        *v20 = stamp;        // = v44
+                                }
+                                --v17;
+                                ++v41;
+                                v40 += -24 * (i64)pitchPx;
+                            } while (v17 > 0);
+                        }
+                        topHaloDone = true;                  // v46 = 1
+                    }
+                }
+                // core span stamp: bytes at tileRow + 24*x, x in [xL, xL+len).
+                u8* cell = tileRow + 24 * xL;                // v23
+                for (i32 k = 0; k < rs.spanLen; ++k, cell += 24)
+                    *cell = stamp;                           // = v47
+            }
         }
-        // advance edge accumulators one scanline (dword_13FC5D8 += step etc.)
-        rs.xLeft  += rs.xLeftStep;                            // 13FC5D8 += 13FC5E8
-        rs.xRight += rs.xRightStep;                           // 13FC5BC += 13FC5C8
-        rs.uLeft  += rs.uLeftStep;                            // 13FC5F4 += 13FC5C4
-        ++row;
+        // advance one scanline (the 0x5f7bfd..0x5f7c32 block). The accumulator
+        // adds wrap mod 2^32 like the original `add` (WrapAddI32 avoids
+        // signed-overflow UB at the fixed-point range edge). HARDENING wave-10.
+        rs.xLeft  = WrapAddI32(rs.xLeft,  rs.xLeftStep);      // 13FC5D8 += 13FC5E8
+        ++row;                                                // ++v37
+        rs.xRight = WrapAddI32(rs.xRight, rs.xRightStep);     // 13FC5BC += 13FC5C8
+        rs.uLeft  = WrapAddI32(rs.uLeft,  rs.uLeftStep);      // 13FC5F4 += 13FC5C4
+        if (byteSpan) { /* 13FC5DC += a2 — folded into row*pitch above */ }
+        tileRow += 24 * (i64)pitchPx;                         // 1408AA4 += 24*a2
     } while (row < rowCount + y0);
+    rs.shadeBase = tileRow;                                   // cursor persists
+
+    // trailing pyramid halo below the LAST nonempty span (the v34 >= 0 block).
+    if (v34 >= 0 && stamping && blur > 0) {
+        i32 v25 = blur;
+        i32 v35 = blur + rowCount + y0;                       // end row + blur
+        u8* v36 = v33 + (i64)pitchPx * 24 * blur;
+        do {
+            if (v35 <= pitchPx) {                             // row gate vs width
+                i32 v26 = v34 - (blur - v25);                 // (square grid)
+                if (v26 <= 0) v26 = 0;
+                i32 v27 = 2 * (blur - v25) + v31;
+                u8* v28 = v36 + 24 * v26;
+                if (v27 >= pitchPx - v34) v27 = pitchPx - v34;
+                for (i32 m = 0; m < v27; ++m, v28 += 24)
+                    *v28 = stamp;                             // = v44
+            }
+            --v25;
+            --v35;
+            v36 += -24 * (i64)pitchPx;
+        } while (v25 > 0);
+    }
 
     return lastRow;
 }
@@ -202,19 +437,27 @@ int FillTexturedSpansShaded(RasterState& rs, Surface* fb, int rowCount, int y0) 
 // ---------------------------------------------------------------------------
 // Internal: load the 3 float screen vertices into the 16.16 per-vertex arrays
 // and return the index of the top-most (min-Y) vertex. Mirrors the two scan
-// loops in RasterizeTexturedTriangle (the only difference between them is the
-// iteration direction chosen by the signed-area sign; the per-vertex setup is
-// identical, so we share it).
+// loops in RasterizeTexturedTriangle: the signed-area sign selects the FORWARD
+// loop (slot i <- vertex i; 0x5f7ef2..) or the REVERSE loop (slot i <- vertex
+// 2-i; pointers v10 = a1+4 / v8 = a2+2 walking DOWN, 0x5f7db3..) — the
+// original normalises a positive-area (back-wound) triangle to the winding the
+// fixed left/right edge tables expect.
 // ---------------------------------------------------------------------------
-static int LoadVertices(RasterState& rs, const RasterVertex v[3]) {
+static int LoadVertices(RasterState& rs, const RasterVertex v[3], bool reverse) {
     int topIdx = -1;
-    i32 minY = 0x7FFFFFFF;
+    // 0x5f7d9f (textured) / 0x603f6f (flat): the min-Y tracker is seeded with the
+    // pitch shifted left 16 (`shl ecx,10h` on a3 = pitch), NOT INT_MAX. A vertex
+    // whose 16.16 Y exceeds (pitch<<16) is therefore NOT a valid top candidate; if
+    // none qualify, topIdx stays -1 and the caller draws nothing. Match the binary
+    // exactly. The <<16 is done unsigned (no signed-shift UB; bits identical).
+    i32 minY = (i32)((u32)rs.fbPitch << 16);
     for (int i = 0; i < 3; ++i) {
+        const RasterVertex& src = v[reverse ? 2 - i : i];
         // VIBE_Coord_ConvertX rounds float->int (truncation toward zero in the
         // original FPU path); x*65536, y*65536 give 16.16 screen coordinates.
-        rs.vx[i]     = (i32)(v[i].x * kFixedScale);          // dword_13FC5B0
-        rs.vy[i]     = (i32)(v[i].y * kFixedScale);          // dword_13FC59C
-        rs.vlight[i] = (i32)v[i].light << 16;                // dword_13FC578
+        rs.vx[i]     = (i32)(src.x * kFixedScale);           // dword_13FC5B0
+        rs.vy[i]     = (i32)(src.y * kFixedScale);           // dword_13FC59C
+        rs.vlight[i] = (i32)src.light << 16;                 // dword_13FC578
         if (rs.vy[i] <= minY) {                              // v16 >= v17 (<=)
             topIdx = i;
             minY = rs.vy[i];
@@ -226,30 +469,53 @@ static int LoadVertices(RasterState& rs, const RasterVertex v[3]) {
 // ---------------------------------------------------------------------------
 // gilde.exe 0x5F7D58 — VIBE_Raster_RasterizeTexturedTriangle.
 //
-// 1. Signed-area test (a1[..] cross product): <= 0 selects the forward vertex
-//    scan, > 0 the reverse — both produce the same vx/vy/vlight arrays and the
-//    top (min-Y) vertex index v7. (We share LoadVertices.)
-// 2. Compute the horizontal U/shade gradient dword_13FC590 from the triangle's
+// 1. Signed-area test (the literal a1[] expression below): <= 0 selects the
+//    forward vertex scan, > 0 the REVERSE scan (slot i <- vertex 2-i — winding
+//    normalisation for the fixed edge tables). Both track the top (min-Y)
+//    vertex index v7 in the LOADED order.
+// 2. Mode masking (0x5f7e26..0x5f7e34): `if (!a6) a5 &= 2; if (!a4) a5 &= 5;
+//    if (!a5) return` — a6 = tile array, a4 = byte map.
+// 3. Compute the horizontal U/shade gradient dword_13FC590 from the triangle's
 //    light values and screen positions (the (*a1 - a1[2]) etc. cross product).
-// 3. From the top vertex, walk the long edge (top->next or top->prev, whichever
-//    spans the larger Y) with InterpolateEdgeZTex, the opposite short edge with
-//    InterpolateEdgeZ, fill the top sub-triangle, then re-set the short edge for
-//    the bottom sub-triangle and fill it.
+//    NOTE: the gradient uses the ORIGINAL a1/a2 argument order (NOT the
+//    possibly-reversed load order) — exactly as the binary reads *a1/a2[i].
+// 4. From the top vertex, walk the long edge with InterpolateEdgeZTex, the
+//    opposite short edge with InterpolateEdgeZ, fill the top sub-triangle
+//    (firstBatch=1), then re-set an edge and fill the bottom one (firstBatch=0).
 // ---------------------------------------------------------------------------
-int RasterizeTexturedTriangle(Surface* fb, const RasterVertex v[3]) {
+int RasterizeTexturedTriangle(Surface* fb, const RasterVertex v[3],
+                              u8 modeMask, u8* tileBase, i32 blurRadius,
+                              i32 gridPitch) {
     RasterState rs;
     std::memset(&rs, 0, sizeof(rs));
-    rs.fbBase  = fb->pixels;
-    rs.fbPitch = fb->widthPx;
+    rs.fbBase  = fb ? fb->pixels : nullptr;
+    rs.fbPitch = fb ? fb->widthPx : gridPitch;   // a3 (grid width)
 
-    int top = LoadVertices(rs, v);
+    // --- signed-area / winding select (0x5f7da9) -----------------------------
+    // a1[4]*a1[3] - a1[5]*a1[2] + a1[2]*a1[1] - a1[3]*a1[0] + a1[0]*a1[5]
+    //   - a1[1]*a1[4]   with a1 = (x0,y0,x1,y1,x2,y2):
+    float area = v[2].x * v[1].y - v[2].y * v[1].x
+               + v[1].x * v[0].y - v[1].y * v[0].x
+               + v[0].x * v[2].y - v[0].y * v[2].x;
+    const bool reverse = !(area <= 0.0f);     // forward when <= 0.0
+    int top = LoadVertices(rs, v, reverse);
     if (top < 0)
+        return 0;
+
+    // --- a5 mode masking (0x5f7e26 / 0x5f7e32) -------------------------------
+    u8 a5 = modeMask;
+    if (!tileBase)                 // if (!a6) a5 &= 2
+        a5 &= 2;
+    if (!fb || fb->bpp != 8)       // if (!a4) a5 &= 5  (byte map absent/unusable)
+        a5 &= 5;
+    if (!a5)
         return 0;
 
     // --- horizontal shade gradient dword_13FC590 ----------------------------
     // v42 = y0 - y1 ; v43 = y2 - y1 ; v45 = (x0-x1)*v43 - (x2-x1)*v42  (2*area).
     // grad = ((l0-l1)*v43 - (l2-l1)*v42) * (65536 / v45)  if v45 != 0 else 0.
-    // (Uses the float screen coords + light bytes exactly as the original.)
+    // (Uses the float screen coords + light bytes exactly as the original —
+    // always in ARGUMENT order, independent of the winding reversal.)
     float v42 = v[0].y - v[1].y;
     float v43 = v[2].y - v[1].y;
     float v45 = (v[0].x - v[1].x) * v43 - (v[2].x - v[1].x) * v42;
@@ -290,16 +556,20 @@ int RasterizeTexturedTriangle(Surface* fb, const RasterVertex v[3]) {
             InterpolateEdgeZ(rs, v19, v21);        // short right edge
             i32 y0fix = rs.vy[v7];
             int y0 = (y0fix + 0xFFFF) >> 16;       // v32 = ceil(topY)
-            rs.fbBase   = fb->pixels;              // dword_13FC5DC base row 0
-            rs.shadeBase = nullptr;                // 24-byte buffer deferred
-            rs.blurRadius = 0;
+            rs.fbBase = fb ? fb->pixels : nullptr; // 13FC5DC = v32*a3 + a4
+            // 1408AA4 = 24 * v32 * a3 + a6 ; 1408AA0 = a7. The cursor then
+            // persists across both fills exactly like the original globals.
+            rs.shadeBase = tileBase
+                ? tileBase + 24 * (i64)y0 * rs.fbPitch : nullptr;
+            rs.blurRadius = blurRadius;
 
             i32 yMidR = rs.vy[v20];
             i32 yBot  = rs.vy[v21];
             bool rightShorter = yMidR < yBot;      // v41
             i32 yEnd = rightShorter ? (yMidR + 0xFFFF) : (yBot + 0xFFFF);
             int rowCount = (yEnd >> 16) - y0;      // v46
-            last = FillTexturedSpansShaded(rs, fb, rowCount, y0);
+            last = FillTexturedSpansShaded(rs, fb, rowCount, y0,
+                                           /*firstBatch=*/1, a5);
 
             // --- bottom sub-triangle -------------------------------------
             if (rs.vy[v20] != rs.vy[v21]) {
@@ -316,7 +586,8 @@ int RasterizeTexturedTriangle(Surface* fb, const RasterVertex v[3]) {
                     lo = rs.vy[v21];
                 }
                 int rc2 = ((hi + 0xFFFF) >> 16) - ((lo + 0xFFFF) >> 16);
-                int last2 = FillTexturedSpansShaded(rs, fb, rc2, y1);
+                int last2 = FillTexturedSpansShaded(rs, fb, rc2, y1,
+                                                    /*firstBatch=*/0, a5);
                 if (last2 >= 0)
                     last = last2;
             }
@@ -327,11 +598,13 @@ int RasterizeTexturedTriangle(Surface* fb, const RasterVertex v[3]) {
 }
 
 // ---------------------------------------------------------------------------
-// Flat-shaded triangle (gilde.exe 0x603DA8 VIBE_Raster_FillSpans + 0x603D00
-// VIBE_Raster_ComputeEdgeSlope). ComputeEdgeSlope is the same fixed-point math
-// as InterpolateEdgeZ but targets the LEFT accumulators (xLeft/xLeftStep). The
-// fill memsets [ceil(xLeft), ceil(xRight)) with a constant index per row.
-// We use the 8-bit (byte_140A220 set) path: memset of `color`.
+// Flat-shaded triangle — gilde.exe 0x603ED4 VIBE_Shadow_RasterizeTriangle, plus
+// the flat-fill leaves 0x603D00 VIBE_Raster_ComputeEdgeSlope (LEFT-edge setup,
+// same two-path fixed-point divide as InterpolateEdgeZ) and 0x603DA8
+// VIBE_Raster_FillSpans (the per-row span loop — memsets [ceil(xLeft),
+// ceil(xRight)) with the constant index dword_13FC5E0 per row; word-stores in
+// the 16bpp byte_140A220==0 path). The flat-fill leaves carry NO winding logic
+// of their own (wave-5 verified); the winding is decided here by 0x603ED4.
 // ---------------------------------------------------------------------------
 static void ComputeEdgeSlopeLeft(RasterState& rs, int a, int b) {
     i32 dy = rs.vy[b] - rs.vy[a];
@@ -340,14 +613,47 @@ static void ComputeEdgeSlopeLeft(RasterState& rs, int a, int b) {
     rs.xLeft = rs.vx[a] + (i32)(((u64)((i64)rs.xLeftStep * (i64)sub)) >> 16);
 }
 
-int RasterizeFlatTriangle(Surface* fb, const RasterVertex v[3], u8 color) {
+int RasterizeFlatTriangle(Surface* fb, const RasterVertex v[3], u8 color,
+                          u8 polyFlags38) {
     RasterState rs;
     std::memset(&rs, 0, sizeof(rs));
     rs.fbPitch = fb->widthPx;
 
-    int top = LoadVertices(rs, v);
+    // --- winding select (0x603F0F) -------------------------------------------
+    // Screen-space cross product on the ORIGINAL vertex order (the binary reads
+    // *a1/a1[1]/a1[2] before any reversal). Back-wound when `>`:
+    //   (x0-x2)*(y0-y1)  >  (x0-x1)*(y0-y2)
+    // Back-wound + (poly+38 & 4)==0  -> cull (0x603FB0 `return`).
+    // Back-wound + bit2 set          -> reverse load (v18 = v+2, --v18).
+    // Front-wound                    -> forward load.
+    const bool backWound =
+        (v[0].x - v[2].x) * (v[0].y - v[1].y) >
+        (v[0].x - v[1].x) * (v[0].y - v[2].y);
+    bool reverse = false;
+    if (backWound) {
+        if ((polyFlags38 & 4) == 0)
+            return 0;            // cull: no span drawn
+        reverse = true;
+    }
+
+    int top = LoadVertices(rs, v, reverse);
     if (top < 0)
         return 0;
+
+    // --- bounds rejection (0x603f72..0x603f8d) -------------------------------
+    // The shadow flat path rejects the WHOLE triangle if ANY loaded vertex falls
+    // outside [0, (pitch<<16)-1] in EITHER X or Y. edx = (a3<<16)-1; per vertex:
+    //   vx < 0  || vx > limit || vy < 0 || vy > limit  -> return (draw nothing).
+    // (The textured path @0x5F7D58 has no such loop — flat only.) The compares are
+    // signed (jl); `cmp edx, vx; jl` rejects when vx > limit, etc.
+    {
+        i32 limit = (i32)((u32)rs.fbPitch << 16) - 1;   // (a3<<16)-1
+        for (int i = 0; i < 3; ++i) {
+            if (rs.vx[i] < 0 || limit < rs.vx[i] ||
+                rs.vy[i] < 0 || limit < rs.vy[i])
+                return 0;
+        }
+    }
 
     int n = kNext[top];
     int p = kPrev[top];
@@ -381,8 +687,8 @@ int RasterizeFlatTriangle(Surface* fb, const RasterVertex v[3], u8 color) {
                     drew = 1;
                 }
             }
-            rs.xLeft  += rs.xLeftStep;
-            rs.xRight += rs.xRightStep;
+            rs.xLeft  = WrapAddI32(rs.xLeft,  rs.xLeftStep);   // mod-2^32 (no UB)
+            rs.xRight = WrapAddI32(rs.xRight, rs.xRightStep);  // HARDENING wave-10
         }
     };
 

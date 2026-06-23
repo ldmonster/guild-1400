@@ -100,8 +100,12 @@ int SceneFlagGateObject(bool matched, u8* loByte, i32* flag536) {
 
 // 0x504ce0 — VIBE_Scene_SyncMeisterBuildings classification core.
 //   v3 = anchorB (class 12, sub-state 1); v4 = anchorA (class 12, sub-state 0).
-//   The first scan stops once BOTH anchors are found (v5 == 3). A second scan
-//   collects all class-11 records into the dword_6498EC list.
+//   The first scan OVERWRITES the candidate on every class-12 match (v4 = rec /
+//   v5 |= 1 at 0x504d45/0x504d47, v3 = rec / v5 |= 2 at 0x504e09/0x504e0b —
+//   stored unconditionally) and stops only once BOTH anchors have been found
+//   (the `while (.. && v5 != 3)` loop guard), so the LAST qualifying match
+//   before the both-found point wins. A second scan collects all class-11
+//   records into the dword_6498EC list.
 int SceneClassifyMeisterRecords(const u8* kinds, const u8* subState, int count,
                                 int* anchorA, int* anchorB,
                                 int* outB, int outBCap) {
@@ -109,21 +113,21 @@ int SceneClassifyMeisterRecords(const u8* kinds, const u8* subState, int count,
     int aB = -1;   // v3 (class 12 / sub 1)
     int found = 0; // v5 bitmask: 1 -> A found, 2 -> B found
 
-    // First scan: pick the two anchors; stop early when both are found.
+    // First scan: overwrite-until-both-found (verbatim 0x504d25..0x504df5).
+    // Each class-12 record with sub-state 0/1 unconditionally overwrites its
+    // anchor and ORs its bit; the loop exits as soon as found == 3, so records
+    // past the both-found point never update either anchor.
     for (int i = 0; i < count && found != 3; ++i) {
         if (kinds[i] == kMeisterClassA) {       // byte_12CE912[..] == 12
             u8 v7 = subState ? subState[i] : 0; // HIBYTE(dword_12CE919[..])
             if (v7 == 0) {
-                if ((found & 1) == 0) { aA = i; found |= 1; }
+                aA = i; found |= 1;             // v4 = rec; v5 |= 1
             } else if (v7 == 1) {
-                if ((found & 2) == 0) { aB = i; found |= 2; }
+                aB = i; found |= 2;             // v3 = rec; v5 |= 2
             }
             // any other sub-state value: ignored (verbatim — only 0/1 branch).
         }
     }
-    // The binary's first scan only LATCHES the first match for each (because it
-    // ORs the bit and the `if (v7==1) { if matches } ` guards prevent overwrite);
-    // we mirror that with the (found & bit) guards above.
 
     // Second scan: collect every class-11 record id index.
     int nB = 0;

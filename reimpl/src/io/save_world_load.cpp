@@ -438,9 +438,78 @@ bool LoadCharacterSlot(VfsHandle* h, guild::u8* rec, guild::u32 version,
 }
 
 // ===========================================================================
+// gilde.exe 0x5abb84 — VIBE_Save_RelinkLoadedPointers, the PERSON-RECORD column
+// slice (0x5abbe2..0x5abc4f). The original walks all 768 records (marker word
+// +0 != -1) and converts the four link columns the city loader read as SAVED
+// IDs into live pointers:
+//   +364 (v7[91], dword_12CEA7C homeBld): id == -1 -> 0 (@0x5abc06); else
+//        GameObject_ResolveEntityById(&col, 0, id, 0) @0x5abe22 — the a1-only
+//        call searches the 169-stride OBJECT/BUILDING array dword_13CE298
+//        (id dword @+1, loop @0x583bb2) and leaves 0 on a miss.
+//   +368 (v7[92], dword_12CEA80 workBld): same (@0x5abc1b / 0x5abe38).
+//   +380 (v7[95]): -1 -> 0; else He_FindFirstHandlerByFilter(1,1,id) @0x5abe4f.
+//        The partial (.cty, header.flag&2) path loads NO He records, so every
+//        non-(-1) id misses and the column reads 0 — reproduced here; a full
+//        .SAV He relink needs the live He registry (out of this slice's scope,
+//        like the rest of the full-save tail).
+//   +388 (v7[97], dword_12CEA94 live-char ptr): 0 unconditionally (@0x5abc3d).
+// This tree's column model stores building IDS (the pointer-as-id convention,
+// sim/npc_daily.h), so a resolve hit keeps the id and a miss/-1 writes 0 —
+// observably identical gates for the daily director.
+//
+// Gate (@0x5abb8e..0x5abb9a): the local player record dword_6498E4 must
+// resolve via Person_FindRecordById; otherwise the original returns WITHOUT
+// relinking anything. Returns false in that case.
+bool RelinkPersonRecordColumns(guild::i32 playerId) {
+    using namespace guild;
+    if (!sim::PersonFindRecordById(playerId))
+        return false;   // 0x5abb9a: nothing relinked
+    for (int i = 0; i < sim::kPersonCapacity; ++i) {
+        if (sim::g_persons[i].marker == -1)
+            continue;
+        u8* rec = reinterpret_cast<u8*>(&sim::g_persons[i]);
+        const i32 zero = 0;
+        // +364 (v7[91], homeBld) / +368 (v7[92], workBld): the binary writes 0
+        // ONLY when the saved id == -1 (@0x5abc00 / 0x5abc15); for any other id
+        // it calls GameObject_ResolveEntityById(&col, 0, id, 0) @0x5abe22/0x5abe38
+        // which clears the column to 0 and re-scans the 169-stride OBJECT/BUILDING
+        // array dword_13CE298 (id @+1) — exactly VIBE_Building_FindById's scan —
+        // leaving the resolved record's identity on a hit and 0 on a miss. There
+        // is NO `id == 0` short-circuit in the original: id 0 is resolved like any
+        // other (so a record whose id is 0 would still bind). The pointer-as-id
+        // model keeps `id` on a hit (the matched record's own key) and 0 otherwise.
+        for (int off : {364, 368}) {
+            i32 id;
+            std::memcpy(&id, rec + off, 4);
+            if (id == -1 || !sim::BuildingFindById(id))
+                std::memcpy(rec + off, &zero, 4);
+        }
+        // +380 (v7[95], He link): the binary writes 0 ONLY when the saved id is
+        // -1 (@0x5abc2a/0x5abc30); for any other id it resolves via
+        // He_FindFirstHandlerByFilter(1, 1, id) @0x5abe4f. On the partial .cty
+        // path the save carries NO He-handler records (byte_11D6040 is the live
+        // full-save handler array, never populated here), so the lookup always
+        // returns null -> the column is 0 for every record. We reproduce the
+        // exact gate (-1 -> 0, else He-resolve) with the partial-path resolve
+        // result (null == 0).
+        i32 he;
+        std::memcpy(&he, rec + 380, 4);
+        if (he == -1 || /* He_FindFirstHandlerByFilter(1,1,he) on empty registry */ true)
+            std::memcpy(rec + 380, &zero, 4);
+        std::memcpy(rec + 388, &zero, 4);       // v7[97] = 0 (live-char ptr) @0x5abc3d
+    }
+    return true;
+}
+
+// ===========================================================================
 // VIBE_Save_LoadGameFile @0x5a7604 — the full load driver (recovered table order).
 // ===========================================================================
 bool LoadWorld(const char* path, WorldState& world) {
+    return LoadWorldEx(path, world, nullptr);
+}
+
+bool LoadWorldEx(const char* path, WorldState& world,
+                 std::vector<guild::u8>* embeddedSceneOut) {
     if (!path)
         return false;
 
@@ -528,21 +597,67 @@ bool LoadWorld(const char* path, WorldState& world) {
         }
 
         // 8. Amt table (>=0x10045) — owned by world/Amt module; deferred.
-        // 9. PostLoadInitScene — render/scene refresh; deferred (live-state only).
+        // 9. PostLoadInitScene — the live-state scene refresh is deferred, but the
+        //    SCENE STREAM it consumes is captured here when requested: at exactly
+        //    this stream position VIBE_Save_PostLoadInitScene @0x5a7ef8 hands the
+        //    open save stream to VIBE_Scene_LoadFromStream @0x5e7e38 (edx = stream),
+        //    i.e. the .cty embeds a full .ed3-grammar scene (node world positions
+        //    +76, eulers +132, the +512 owner-object ids RebuildModelByOwner
+        //    @0x5a8140 matches). Raw remaining bytes from the scene tag onward.
+        //    Gated to version < 0x10045 (>= reads the Amt table first, unparsed
+        //    in this slice; the shipped cities are 0x1003B).
+        if (embeddedSceneOut && version < 0x10045) {
+            embeddedSceneOut->clear();
+            guild::u8 buf[16384];
+            for (;;) {
+                guild::u32 got = VfsReadStream(buf, 1, h, sizeof buf);
+                if (got == 0 || got == 0xFFFFFFFFu)
+                    break;
+                embeddedSceneOut->insert(embeddedSceneOut->end(), buf, buf + got);
+                if (got < sizeof buf)
+                    break;
+            }
+        }
 
         // 10. Partial path (header.flag & 2): the .cty / network-save case stops
-        //     here (the full-game tables Gesetz/MapTiles/.../Characters/Mission are
-        //     only read for non-partial saves). The shipped cities are partial.
+        //     here — the original CLOSES the stream then runs
+        //     VIBE_Save_RelinkLoadedPointers @0x5abb84 (the person-record column
+        //     relink; gated on resolving the local player dword_6498E4 from the
+        //     scalar block) before returning. The full-game tables
+        //     Gesetz/MapTiles/.../Characters/Mission are only read for
+        //     non-partial saves; the shipped cities are partial.
         if (hdr.flagByte & 2) {
+            RelinkPersonRecordColumns(static_cast<guild::i32>(blk.g6498E4));
             ok = true;
             break;
         }
 
-        // Non-partial (full .SAV) tail: Gesetz/MapTiles/GameGlobals/Avatar/Object/
-        // Amt/History/ActionQueues/Hotkey + Characters + Mission. These reuse the
-        // io/save_tables + io/save_building loaders and the live render/universe
-        // subsystem; the full-game tail is out of scope for this slice and listed
-        // in the report. A partial .cty load is complete above.
+        // Non-partial (full .SAV) tail — the EXACT decompiled order/version gates
+        // of VIBE_Save_LoadGameFile @0x5a791c..0x5a7ae4 (recovered wave-15, live
+        // MCP), each a separate loader OWNED BY ANOTHER MODULE (out of this
+        // slice; named gaps in the report — rule 8, genuinely unreachable-here):
+        //   if (version <  0x10045) VIBE_Amt_LoadAemter        @0x4832d0
+        //   VIBE_Gesetz_LoadState                              @0x4c28d8
+        //   if (version >= 0x10016) VIBE_Save_LoadMapTiles     @0x5aa7a8
+        //   VIBE_Save_LoadGameGlobals                          @0x5aa8dc
+        //   if (version >= 0x1002A) VIBE_Avatar_Load           @0x4846ec
+        //   VIBE_Save_LoadObjectTable                          @0x5aae40
+        //   VIBE_Save_LoadAmtTable                             @0x5ab3ac
+        //   VIBE_Save_LoadHistoryAndCarts                      @0x5ab59c
+        //   VIBE_Save_LoadActionQueues                         @0x5ab704
+        //   if (version >= 0x1002E) VIBE_Save_LoadHotkeyTable  @0x5aba98
+        //   VIBE_Save_RelinkLoadedPointers @0x5abb84  (the FULL relink: column
+        //     slice + the scene-tile / He-registry / B5FB66 typed-table passes)
+        //   then VIBE_Universe_SwitchActiveSlot / Scene_RefreshBuildingEffects /
+        //   Light_EnableDaylight, VIBE_Save_LoadCharacters @0x5a986c (creates the
+        //   live actors via LoadCharacterSlot @0x5a96c0), Mission_LoadSlotTable,
+        //   and (>=0x10029) Hotkey_LoadTable.  The shipped cities are PARTIAL
+        //   (flag&2, handled above) so this tail is never on the city flow; it is
+        //   reached only by a real .SAV load, which needs the live render/universe
+        //   subsystem this portable slice does not own.
+        // We run the column relink (the only tail piece this slice reconstructs)
+        // so g_persons is consistent; the table loaders above are deferred.
+        RelinkPersonRecordColumns(static_cast<guild::i32>(blk.g6498E4));
         ok = true;
     } while (false);
 

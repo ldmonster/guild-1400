@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <new>
+#include <vector>
 
 namespace guild::render {
 
@@ -17,6 +18,17 @@ SpawnStats g_spawnStats;
 // AllocSystem success path runs without a real GPU upload.
 int g_defaultTextureSentinel = 0;
 
+// Wave-10 (W10-PARTICLE) leak fix: the default in-process backend allocates with
+// new[] (the production backend routes to the engine heap, which reclaims on
+// teardown). Without a heap to return to, every AllocSystem block (the 0x310
+// header + the particle array + the two scratch buffers — note the ParticlePoints
+// scratch return is DISCARDED at the call site, so it was leaked unconditionally)
+// stayed live for the whole process. We register every default-backend block here
+// so FreeAllSpawnAllocations() / DestroyAllSystems() can reclaim it. This is a
+// pure memory-safety fix in the TEST backend: it changes no engine-observable
+// behaviour (the original heap reclaimed the same bytes).
+std::vector<unsigned char*> g_defaultAllocs;
+
 void* DefaultLoadTexture(const u8* /*name*/, int /*slot*/) {
     ++g_spawnStats.textureCalls;
     return &g_defaultTextureSentinel;
@@ -28,7 +40,10 @@ void* DefaultAlloc(u32 size, const char* /*tag*/) {
     // Zero-initialised, matching the cleared-then-used pattern in the original
     // (AllocSystem explicitly clears the slots it touches; we zero the rest so
     // untouched bytes are deterministic for tests).
-    return new (std::nothrow) unsigned char[size]();
+    unsigned char* p = new (std::nothrow) unsigned char[size]();
+    if (p)
+        g_defaultAllocs.push_back(p);
+    return p;
 }
 
 void DefaultInitObject(ParticleSystem* /*sys*/) {
@@ -72,6 +87,32 @@ const SpawnHooks& CurrentSpawnHooks() { return g_spawnHooks; }
 
 SpawnStats& MutableSpawnStats() { return g_spawnStats; }
 void ResetSpawnStats() { g_spawnStats = SpawnStats(); }
+
+// Wave-10 leak fix. Free + forget every block the DEFAULT spawn backend handed
+// out (AllocSystem's four allocations per system). No-op for blocks a custom
+// backend allocated (they are not registered). Returns the number freed.
+int FreeAllSpawnAllocations() {
+    int n = (int)g_defaultAllocs.size();
+    for (unsigned char* p : g_defaultAllocs)
+        delete[] p;
+    g_defaultAllocs.clear();
+    return n;
+}
+
+// Release a single default-backend block (and drop it from the registry so the
+// bulk free won't double-free). No-op if `p` is null or was not default-allocated.
+bool ReleaseSpawnAllocation(void* p) {
+    if (!p)
+        return false;
+    for (auto it = g_defaultAllocs.begin(); it != g_defaultAllocs.end(); ++it) {
+        if (*it == static_cast<unsigned char*>(p)) {
+            delete[] *it;
+            g_defaultAllocs.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
 
 void SetKillHooks(const KillHooks& hooks) {
     g_killHooks.isValid  = hooks.isValid  ? hooks.isValid  : &DefaultIsValid;
@@ -126,18 +167,29 @@ ParticleSystem* AllocSystem(int owner, const u8* texName, int texSlot, float lif
     sys->spawnedCount = 0;     // v22[8]
     sys->lastUpdateTick = 0;   // v22[9]
 
+    // wave-10 (W10-PARTICLE) UB fix: the original computes these byte counts in
+    // 32-bit registers (imul, defined modular wrap on x86); writing them as signed
+    // `int` products is C++ UB on overflow. Compute in u32 (defined wraparound) so
+    // the stored size is the IDENTICAL low-32-bit value the original produced for
+    // every input (in-bounds counts are unaffected). The slot-init loop below also
+    // does not run for slotCount<=0, so a degenerate count allocates nothing it
+    // then indexes.
+    const u32 sc32 = static_cast<u32>(slotCount);
     // 0x5e109e — particle array: 84 bytes per slot.
     sys->particles =
-        g_spawnHooks.alloc(static_cast<u32>(84 * slotCount), "d3_par:Particles");
+        g_spawnHooks.alloc(84u * sc32, "d3_par:Particles");
     // 0x5e10c0 — ParticlePoints scratch: 80 * (4*count).
-    g_spawnHooks.alloc(static_cast<u32>(80 * (4 * slotCount)), "d3_par:ParticlePoints");
+    g_spawnHooks.alloc(80u * (4u * sc32), "d3_par:ParticlePoints");
     // 0x5e10e4 — ParticlePolys scratch: 40 * (2*count).
     sys->polysBuf =
-        g_spawnHooks.alloc(static_cast<u32>(40 * (2 * slotCount)), "d3_par:ParticlePolys");
+        g_spawnHooks.alloc(40u * (2u * sc32), "d3_par:ParticlePolys");
 
     // 0x5e1143 — per-particle slot init. Particle stride = 84 (0x54) bytes.
+    // wave-10: guard a failed particle-array allocation (the original assumes the
+    // alloc succeeds; a null here would OOB the init loop). The success path is
+    // byte-identical.
     unsigned char* base = static_cast<unsigned char*>(sys->particles);
-    for (int i = 0; i < slotCount; ++i) {       // v24 < system+208
+    for (int i = 0; base && i < slotCount; ++i) {       // v24 < system+208
         unsigned char* p = base + static_cast<size_t>(i) * 84;
         std::memset(p + 56, 0, 12);             // +56/+60/+64 position = 0
         std::memset(p + 0,  0, 12);             // +0/+4/+8 velocity = 0

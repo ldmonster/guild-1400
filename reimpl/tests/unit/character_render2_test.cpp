@@ -246,10 +246,12 @@ TEST(CharRender2_ShowWithScale, RunsFullPathWorldPosFromBoneChain) {
     ShowScaleCtx c{};
     c.mesh = &mesh; c.bodyMesh = &body;
     c.vis.bodyMesh = &body; c.vis.hasTransport = false; c.vis.hasLowPoly = false;
-    // rotateResult == refAxis => VectorAngleBetween(ref, ref) == 0 (coincident -> 0).
+    // The binary rotates the FIXED +Z axis flt_5CA2B0 == {0,0,1} and measures the yaw
+    // against it. Make the mock return {0,0,1} so the rotated vector is coincident with
+    // the reference => VectorAngleBetween == 0. placeRot is ignored by the binary.
     float place[3] = {10, 20, 30};
-    float placeRot[3] = {1, 0, 0};
-    s.rec.rotateResult[0] = 1; s.rec.rotateResult[1] = 0; s.rec.rotateResult[2] = 0;
+    float placeRot[3] = {1, 0, 0};   // unused by ShowWithScale (binary uses flt_5CA2B0)
+    s.rec.rotateResult[0] = 0; s.rec.rotateResult[1] = 0; s.rec.rotateResult[2] = 1;
     CHECK_EQ(ShowWithScale(c, place, placeRot), true);
     CHECK_EQ(s.rec.pointCalls, 1);
     CHECK_EQ(s.rec.rotateCalls, 1);

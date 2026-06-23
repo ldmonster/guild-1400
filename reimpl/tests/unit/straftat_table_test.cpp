@@ -146,7 +146,7 @@ TEST(GesetzPenaltyText, GoldenVectors) {
     // byte+0 == lawId == category). The threshold parameter does NOT affect output.
     const V vecs[] = {
         {0, true, 4146, 4145, 4115}, // subcat 1: v7(=2)   + 4113
-        {1, true, 4151, 4150, 4658}, // subcat 2: v7(=536) + 4122
+        {1, true, 4151, 4150, 4122}, // subcat 2: v7(=0) + 4122  (WAVE-16: rec1 fixed)
         {2, true, 4156, 4155, 4128}, // subcat 3: v7(=0)   + 4128
         {8, true, 4186, 4185, 10},   // subcat 0: v7(=10)
     };
@@ -188,4 +188,64 @@ TEST(GesetzPenaltyText, RenderHookReceivesComputedIds) {
     GesetzBuildPenaltyText(buf, 26, 0);
     CHECK_EQ(calls, 0);
     GesetzSetPenaltyRenderFn(nullptr, nullptr); // restore default
+}
+
+// ===========================================================================
+// HARDENING (wave-12): boundary / out-of-range tests for the mission crime-
+// tracking table accessors. Clean under -fsanitize=address,undefined.
+// ===========================================================================
+TEST(StraftatTableHarden, FindAndContainsOnEmpty) {
+    StraftatTableReset();
+    CHECK_EQ(StraftatTableFindBySource(123), -1);
+    CHECK_EQ(StraftatTableContainsSource(123), 0);
+    CHECK_EQ(StraftatTableFindAndInit(123), -1);
+}
+
+TEST(StraftatTableHarden, MissionTrackUntrackedAndMissingType) {
+    StraftatTableReset();
+    // Occupy slot 0 with a tracked source.
+    g_crimeTrackTable[0].type   = 0x0B;   // a tracked type
+    g_crimeTrackTable[0].source = 42;
+
+    // No record for this source -> 0.
+    CHECK_EQ(MissionTrackCrimeProgress(999, 0x0B), 0);
+
+    // Record found but crimeType untracked -> 0, progress unchanged.
+    CHECK_EQ(MissionTrackCrimeProgress(42, 0x00), 0);
+    CHECK_EQ(MissionTrackCrimeProgress(42, 0xFF), 0);  // u8 max, untracked
+    CHECK_EQ(MissionTrackCrimeProgress(42, 0x18), 0);  // gap in the accept chain
+    CHECK_EQ(g_crimeTrackTable[0].progress, 0);
+
+    // Found + tracked + type matches -> 1, progress bumped.
+    CHECK_EQ(MissionTrackCrimeProgress(42, 0x0B), 1);
+    CHECK_EQ(g_crimeTrackTable[0].progress, 1);
+
+    // Found + tracked but type MISMATCH (record is 0x0B, asking 0x13) -> 1 but
+    // no progress bump.
+    CHECK_EQ(MissionTrackCrimeProgress(42, 0x13), 1);
+    CHECK_EQ(g_crimeTrackTable[0].progress, 1);
+}
+
+TEST(StraftatTableHarden, MissionTrackAcceptsEachTrackedCode) {
+    const guild::u8 tracked[] = {0x0B, 0x13, 0x17, 0x1C, 0x28};
+    for (guild::u8 code : tracked) {
+        StraftatTableReset();
+        g_crimeTrackTable[0].type   = code;
+        g_crimeTrackTable[0].source = 7;
+        CHECK_EQ(MissionTrackCrimeProgress(7, code), 1);
+        CHECK_EQ(g_crimeTrackTable[0].progress, 1);
+    }
+}
+
+TEST(StraftatTableHarden, FindAndInitLastSlot) {
+    StraftatTableReset();
+    int last = kStraftatTableCount - 1;
+    g_crimeTrackTable[last].type   = 5;
+    g_crimeTrackTable[last].source = 555;
+    g_crimeTrackStaging16 = 0x1234;
+    CHECK_EQ(StraftatTableFindBySource(555), last);
+    CHECK_EQ(StraftatTableFindAndInit(555), last);
+    CHECK_EQ(g_crimeTrackTable[last].staging16, 0x1234);
+    CHECK_EQ(g_crimeTrackTable[last].progress, 0);
+    g_crimeTrackStaging16 = 0; // restore
 }

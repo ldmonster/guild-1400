@@ -1,5 +1,8 @@
 #include "gui/mapview.h"
 
+#include "gui/window.h"   // Object_AddToWindow (0x41ae10)
+#include "gui/zorder.h"   // ZOrder_RemoveObject (0x41aa50)
+
 #include <cmath>
 
 namespace guild::gui {
@@ -7,12 +10,52 @@ namespace guild::gui {
 int g_mapWidth  = 0; // dword_1233440
 int g_mapHeight = 0; // dword_1233444
 
+// gilde.exe dword_12334F0 / dword_12334F4 — the last clamped scroll offset, written
+// UNCONDITIONALLY at the tail of VIBE_MapView_StepScrollOffset @0x543c7c/0x543c82
+// (dword_12334F4 = v4 (clamped Y), dword_12334F0 = v1 (clamped X)).  These are
+// write-only in the original binary (the only xref to each is this store; nothing
+// reads them), so they are dead scratch — but they ARE an observable side effect of
+// every step, so we reproduce them faithfully.
+int g_mapLastClampedX = 0; // dword_12334F0
+int g_mapLastClampedY = 0; // dword_12334F4
+
+// (mx,my) == (0,0) snapshot of the four Object_AddToWindow(win, y@dx, x@ax, gfx) calls.
 const CornerPlacement kMapCornerPlacements[4] = {
-    {0, 0},     // VIBE_Object_AddToWindow(a1,   0,   0, a2+0)
-    {0, 418},   // VIBE_Object_AddToWindow(a1, 418,   0, a2+1)
-    {0, 120},   // VIBE_Object_AddToWindow(a1, 120,   0, a2+2)
-    {579, 120}, // VIBE_Object_AddToWindow(a1, 120, 579, a2+3)
+    {0, 0},     // obj0: x=mx(0),  y=my(0)
+    {0, 418},   // obj1: x=mx(0),  y=0x1A2 (418)
+    {0, 120},   // obj2: x=mx(0),  y=0x78  (120)
+    {579, 120}, // obj3: x=0x243 (579), y=0x78 (120)
 };
+
+// gilde.exe 0x5437d8 — VIBE_MapView_AddCornerObjects.
+// Places the four corner objects (gfxBase+0..+3) on `win`, each removed from the
+// z-order immediately, in the original call ORDER. (mx,my) is the cursor offset the
+// original reads off the packed mouse globals; obj0..2 use x=mx, obj0 uses y=my,
+// obj1/obj2 use y=418/120, obj3 uses x=579,y=120.
+int MapView_AddCornerObjects(int win, int gfxBase, int cursorX, int cursorY) {
+    const int mx = cursorX, my = cursorY;
+    int r;
+
+    // obj0: Object_AddToWindow(win, my, mx, gfxBase+0); ZOrder_RemoveObject(r)
+    r = Object_AddToWindow(win, static_cast<i16>(my), static_cast<i16>(mx), gfxBase + 0);
+    ZOrder_RemoveObject(r);
+    // obj1: y = 0x1A2 (418)
+    r = Object_AddToWindow(win, static_cast<i16>(0x1A2), static_cast<i16>(mx), gfxBase + 1);
+    ZOrder_RemoveObject(r);
+    // obj2: y = 0x78 (120)
+    r = Object_AddToWindow(win, static_cast<i16>(0x78), static_cast<i16>(mx), gfxBase + 2);
+    ZOrder_RemoveObject(r);
+    // obj3: x = 0x243 (579), y = 0x78 (120)
+    r = Object_AddToWindow(win, static_cast<i16>(0x78), static_cast<i16>(0x243), gfxBase + 3);
+    ZOrder_RemoveObject(r);
+
+    // The original tail-returns ZOrder_RemoveObject's eax; our reconstructed
+    // ZOrder_RemoveObject (gui/zorder.cpp) is void, so we return the last placed
+    // widget index `r` instead (the value passed to the final RemoveObject). The
+    // return value is unused by the sole caller (VIBE_MapView_PanelDispatcher
+    // @0x5441d0 calls it as a statement), so this is observationally equivalent.
+    return r;
+}
 
 // gilde.exe 0x5440b4 — VIBE_MapView_ComputeMarkerScreenPos.
 // The original reads the marker world coords as ints at +8/+12, the camera origin as
@@ -102,6 +145,10 @@ int MapView_StepScrollOffset(ScrollOffset& off, int mouseX, int mouseY,
         v3 = 1;
         off.y = v4;
     }
+    // Unconditional tail stores (0x543c7c/0x543c82): the clamped offset is mirrored
+    // into the dead scratch globals regardless of whether anything changed.
+    g_mapLastClampedY = v4; // dword_12334F4 = ecx (v4)
+    g_mapLastClampedX = v1; // dword_12334F0 = edx (v1)
     return v3;
 }
 

@@ -205,16 +205,25 @@ struct DialogOutcome {
     int  action    = 0;      // DialogAction byte used
 };
 
-// gilde.exe 0x5126cc — VIBE_Location_RobberCampStandard. Gates: target != 0,
-// no existing request (else "already" msg 5790), table not full (else 5791-ish),
-// target busy-check; then collect the active selection and queue action 98.
+// gilde.exe 0x5126cc — VIBE_Location_RobberCampStandard. Gate order matches the
+// binary: if(!a1) return; existing-handler(code 98) -> msg 5790, return;
+// FirstOccupiedSlot>=768 -> msg(dword_8C90C8), return; else IsAnimalTargetBusy
+// -> open form (else msg 5782, return). On confirm: break on first active
+// selection, queue a single-id action 98.
+// `requestExists` == VIBE_He_FindFirstHandlerByFilter(1,0,98) match (0x5126ff).
+// `targetBusy`    == VIBE_CharAction_IsAnimalTargetBusy(target) (0x512748).
 DialogOutcome RobberCampStandard(std::int32_t target, bool hasTarget,
+                                 bool requestExists, bool targetBusy,
                                  const SlotTableView& table,
                                  const SelectionTable& sel);
 
-// gilde.exe 0x512eb0 — VIBE_Location_RobberCampRaid. Collects ALL occupied slot
-// ids and queues action 117 when any exist; else shows the "no camp" message.
-DialogOutcome RobberCampRaid(const SlotTableView& table);
+// gilde.exe 0x512eb0 — VIBE_Location_RobberCampRaid. Gate: a2 && NPC city != -1
+// && IsAnimalTargetBusy (else msg 5791); then collects ALL occupied slot ids and
+// queues action 117 when any exist; else shows the "no camp" message.
+// `hasTarget`  == (a2 && *(WORD*)(a2+39) != 0xFFFF) (0x512ec3).
+// `targetBusy` == VIBE_CharAction_IsAnimalTargetBusy(a2) (0x512ed7).
+DialogOutcome RobberCampRaid(bool hasTarget, bool targetBusy,
+                             const SlotTableView& table);
 
 // gilde.exe 0x524074 — VIBE_Location_ThiefBurglaryDialog. Occupied-slots batch,
 // action 63; gated by target-busy and a building security threshold.

@@ -18,6 +18,16 @@ using namespace guild::sim;
 
 namespace {
 
+// Alignment-safe byte-exact poke/peek for the unaligned He-record fields the
+// engine reads via `*(int*)(rec+N)` (e.g. +1, +2, +170). Binding an i32& to those
+// addresses is UB (UBSAN traps); memcpy is byte-identical and aligned-safe.
+inline void Poke32(HeRecord* h, int off, i32 v) {
+    std::memcpy(reinterpret_cast<unsigned char*>(h) + off, &v, sizeof(v));
+}
+inline i32 Peek32(HeRecord* h, int off) {
+    i32 v; std::memcpy(&v, reinterpret_cast<unsigned char*>(h) + off, sizeof(v)); return v;
+}
+
 // A fresh, zeroed He record large enough for the +200 field accesses.
 struct RecBuf {
     HeRecord rec{};
@@ -222,7 +232,7 @@ TEST(CharActionY, IsAnimalTargetBusy_BusyReturnsZero) {
     ResetHooks();
     RecBuf r, m;
     // key = *(int*)(r+1). Make a handler match.
-    i32 key = *reinterpret_cast<i32*>(HeBytes(r.get()) + 1);
+    i32 key = Peek32(r.get(), 1);
     *reinterpret_cast<i32*>(HeBytes(m.get()) + 176) = key;
     *reinterpret_cast<i32*>(HeBytes(m.get()) + 184) = 1;
     g_s3.scanList.push_back(m.get());
@@ -233,7 +243,7 @@ TEST(CharActionY, IsAnimalTargetBusy_NonMatchingHandlerSkipped) {
     ResetHooks();
     RecBuf r, m;
     // handler present but field +184 != 1 -> not busy -> scan ends -> 1
-    i32 key = *reinterpret_cast<i32*>(HeBytes(r.get()) + 1);
+    i32 key = Peek32(r.get(), 1);
     *reinterpret_cast<i32*>(HeBytes(m.get()) + 176) = key;
     *reinterpret_cast<i32*>(HeBytes(m.get()) + 184) = 0;
     g_s3.scanList.push_back(m.get());
@@ -365,7 +375,7 @@ TEST(CharActionY, InitTargetState_TypeIdShift) {
     RecBuf r;
     g_s3.fastTime = false;
     // typeId = (dword@+170) >> 16 ; set high word = 7
-    *reinterpret_cast<i32*>(HeBytes(r.get()) + 170) = (7 << 16);
+    Poke32(r.get(), 170, (7 << 16));
     InitTargetState(r.get());
     // (mock ignores typeId, but the shift must not crash / mis-read)
     CHECK_EQ(g_s3.actionMinutes, 45);
@@ -411,7 +421,7 @@ TEST(CharActionY, InitLagerErweitern_ObjectArgs25AndCap) {
     Cas3_Mult(r.get()) = 1;
     Cas3_TargetId(r.get()) = 40;
     Cas3_Counter(r.get()) = 61;
-    *reinterpret_cast<i32*>(HeBytes(obj.get()) + 2) = 555;   // entity id @ obj+2
+    Poke32(obj.get(), 2, 555);   // entity id @ obj+2 (unaligned)
     *reinterpret_cast<u8*>(HeBytes(obj.get()) + 18) = 80;    // cap @ obj+18
     g_s3.entities.push_back({61, obj.get()});
     int result = InitLagerErweitern(r.get());
@@ -444,7 +454,7 @@ TEST(CharActionY, InitSabotage_QueryHitFirst) {
     ResetHooks();
     RecBuf r, person;
     Cas3_Slot16(r.get()) = -1;
-    *reinterpret_cast<i32*>(HeBytes(person.get()) + 1) = 777;   // person id @ +1
+    Poke32(person.get(), 1, 777);   // person id @ +1 (unaligned)
     g_s3.queryResults.push_back(person.get());   // first query (1,5,22) hits
     InitSabotage(r.get());
     CHECK_EQ(Cas3_Slot16(r.get()), 777);

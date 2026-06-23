@@ -153,7 +153,11 @@ bool LoadBgfPostProcess(ParsedModel& pm, const std::string& name,
         std::vector<u8> used(static_cast<size_t>(matCount), 0);  // v162 (reused)
         for (int p = 0; p < polyCount; ++p) {
             int mi = static_cast<int>(polys[p].matIndex);  // +40
-            if (mi >= 0)
+            // Guard the material index against the table size. On a valid asset
+            // every poly's matIndex is in [0, matCount); a malformed/oversized
+            // index would otherwise write past `used` (heap OOB). The in-range
+            // path is byte-identical to the original. (W11 hardening.)
+            if (mi >= 0 && mi < matCount)
                 used[mi] = 1;
         }
         // Compact: walk the material list; for each unused entry remove it and
@@ -202,7 +206,10 @@ bool LoadBgfPostProcess(ParsedModel& pm, const std::string& name,
         int next = 0;  // v69
         for (int p = 0; p < polyCount; ++p) {
             int mi = static_cast<int>(mpolys[p].matIndex);  // +40
-            if (mi > -1 && !placed[mi]) {
+            // Bound `mi` against matCount before indexing placed[]/tmp[] — a
+            // malformed index would corrupt the heap otherwise. Valid assets are
+            // unaffected (mi always in range). (W11 hardening.)
+            if (mi > -1 && mi < matCount && !placed[mi]) {
                 placed[mi] = 1;
                 for (int q = 0; q < polyCount; ++q) {
                     if (static_cast<int>(mpolys[q].matIndex) == mi)
@@ -225,7 +232,10 @@ bool LoadBgfPostProcess(ParsedModel& pm, const std::string& name,
     // scale/offset/rotation, then offset by (uOffset, vOffset).
     for (int p = 0; p < polyCount; ++p) {
         int mi = static_cast<int>(mpolys[p].matIndex);  // +40
-        if (mi < 0)
+        // After the reorder, valid indices are in [0, matCount); an unremapped
+        // out-of-range index (malformed asset) must not index `reordered` OOB.
+        // Valid assets keep every poly's mi in range. (W11 hardening.)
+        if (mi < 0 || mi >= matCount)
             continue;
         const MeshMaterial& mat = reordered[mi];
         float* uv = &mpolys[p].uv0[0];  // 3 (u,v) pairs at +0..; stride 8 bytes

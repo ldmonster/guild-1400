@@ -168,7 +168,10 @@ ActiveTargetResult PickActiveTargetEntry(const ActiveRing& ring) {
     ActiveTargetResult out;
 
     int v7 = *ring.cursor;
-    int remaining = kActiveRingCount;   // v6 = 255 then --v6 each miss; 256 tries
+    // 0x57e9c6: v6 = 255. Each miss advances v7 (mod 256) then `if (!--v6)
+    // return 0` — so the ring is probed at most 255 positions (cursor,
+    // cursor+1, ... cursor+254), NOT 256. (Verified disasm 0x57e9c6/0x57ea0f.)
+    int remaining = 255;                // v6 = 255
     const u8* entry = nullptr;
     bool found = false;
 
@@ -184,8 +187,8 @@ ActiveTargetResult PickActiveTargetEntry(const ActiveRing& ring) {
                 break;
             }
         }
-        v7 = (v7 + 1) % kActiveRingCount;
-        if (--remaining == 0)
+        v7 = (v7 + 1) % kActiveRingCount;   // (v7 + 1) % 256
+        if (--remaining == 0)               // if ( !--v6 ) return 0
             break;
     }
 

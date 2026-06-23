@@ -149,9 +149,12 @@ TEST(IoVfsTreeE2E, ScanResolveRead) {
         BufferedFile* f = FileOpenBuffered(&fs, hostPath("gfx", "scripts/main.scr").c_str(), "rt");
         CHECK(f != nullptr);
         char line[64];
+        // 1:1 with VIBE_Vfs_ReadLine @0x4516cc: the swallow loop @0x451758 reads
+        // and discards the first byte of the next line, so "line2"/"line3" lose
+        // their leading 'l'. Faithful output of "line1\r\nline2\r\nline3\r\n":
         CHECK(FileReadLine(line, 63, f) != nullptr); CHECK(std::strcmp(line, "line1") == 0);
-        CHECK(FileReadLine(line, 63, f) != nullptr); CHECK(std::strcmp(line, "line2") == 0);
-        CHECK(FileReadLine(line, 63, f) != nullptr); CHECK(std::strcmp(line, "line3") == 0);
+        CHECK(FileReadLine(line, 63, f) != nullptr); CHECK(std::strcmp(line, "ine2") == 0);
+        CHECK(FileReadLine(line, 63, f) != nullptr); CHECK(std::strcmp(line, "ine3") == 0);
         CHECK(FileReadLine(line, 63, f) == nullptr);
         FileClose(f);
     }

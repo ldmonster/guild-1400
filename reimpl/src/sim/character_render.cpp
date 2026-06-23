@@ -176,10 +176,14 @@ u8 ApplyHeadVariant(RenderActor* actor, int headCount, int activeMeshId) {
             variant = static_cast<u8>(static_cast<unsigned>(actor->id) % static_cast<unsigned>(headCount));
     }
 
-    // dword_62D080 == *(root+44): the active scene mesh id equals the actor's.
+    // 0x57c59d: result = (char)dword_62D080;  (default return when the gate fails)
+    // 0x57c5a5: if (dword_62D080 == *(root+44)) result = SelectTextureSet(...).
+    // `activeMeshId` models dword_62D080 (and the caller passes it equal to the
+    // attached-record's +44 when the gate should fire). The binary's fall-through
+    // return is therefore (char)activeMeshId, NOT the computed variant.
     if (activeMeshId == static_cast<int>(static_cast<unsigned>(actor->id)))
         return static_cast<u8>(GetCharRenderHooks().selectTextureSet(root->mesh, variant));
-    return variant;
+    return static_cast<u8>(activeMeshId);
 }
 
 // ===========================================================================
@@ -299,13 +303,15 @@ bool IsAccidentCandidate(const RenderActor* a) {
 // Anim / queue control.
 // ===========================================================================
 
-// gilde.exe 0x4047f0 — VIBE_Character_ToggleAniPlayback.
-//   if (result[74] && result[28]) {                 // animB && mesh handles
-//     if (a2) { ClearLoopFlags(mesh+492+244); +140 |= 4; }
-//     else    { SetLoopFlags(mesh+492+244, 1); +140 &= ~4; }
+// gilde.exe 0x4047f0 — VIBE_Character_ToggleAniPlayback.  (disasm-verified)
+//   if (*(eax+128h)[=+296 action] && *(eax+70h)[=+112 handle112]) {
+//     if (a2) { ClearLoopFlags(*(eax+34h)[=mesh+52]+492+244, *(esi+68h)); +140 |= 4; }
+//     else    { SetLoopFlags(...mesh+492+244..., 1);                      +140 &= ~4; }
 //   }
+// NB: the gate's second operand is the +112 handle (esi), NOT the +52 mesh; the +52
+// mesh is read only inside the body to derive the loop-flags target (mesh+492+244).
 void ToggleAniPlayback(RenderActor* a, bool pause) {
-    if (!a->action || !a->mesh)   // result[74] (animB) && result[28] (mesh) present
+    if (!a->action || !a->handle112)   // result[74] (+296) && result[28] (+112)
         return;
     const CharRenderHooks& h = GetCharRenderHooks();
     if (pause) {

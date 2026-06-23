@@ -34,6 +34,9 @@ struct Rec {
     HeRecord* person = nullptr;
     HeRecord* findFirst = nullptr;
     i32 statusRet = 0;
+    int rnd = 0;
+    HeRecord* resolveRet = nullptr;
+    int req16 = 0; std::vector<int> req16Vals;
     std::vector<HeRecord*> byId;
 } g;
 
@@ -60,6 +63,9 @@ void EPanelDestroy(HeRecord*) { ++g.panelDestroy; }
 void EDialogLine(HeRecord*, int, int) {}
 i32 EDlgWin() { return g.dlgWin; }
 i32 EDlgRes() { return g.dlgRes; }
+int ERnd(int) { return g.rnd; }
+HeRecord* EResolve(i32) { return g.resolveRet; }
+void EReq16(i32, i32, int v, u8) { ++g.req16; g.req16Vals.push_back(v); }
 
 void Install() {
     g = Rec{};
@@ -87,6 +93,9 @@ void Install() {
     s4.renderDialogLine = EDialogLine;
     s4.dialogWindow = EDlgWin;
     s4.dialogResult = EDlgRes;
+    s4.randomModulo = ERnd;
+    s4.resolveEntityById = EResolve;
+    s4.queueRequest16 = EReq16;
     SetCharActionStep4Hooks(&s4);
 
     SetNpcClock(Clock());

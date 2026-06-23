@@ -137,9 +137,30 @@ bool ParseSceneHeader(SceneReader& r, SceneHeader& out) {
 // reads two presence bytes that recursively pull a child then a sibling record.
 // Here the body is delegated to hooks.consumeBody; the framing is verbatim.
 // ===========================================================================
+namespace {
+// Depth-guarded core of ReadObjectRecord. `depth` is the number of records
+// already on the recursion stack; when it reaches kSceneMaxNodeDepth we stop the
+// walk (returning an empty record without consuming further bytes) instead of
+// recursing into a stack overflow on a malformed/over-deep node stream. Valid
+// scenes never approach the limit, so the in-bounds path is byte-identical.
+SceneObjectRecord ReadObjectRecordDepth(SceneReader& r, u32 version,
+                                        const SceneObjectHooks& hooks, int depth);
+} // namespace
+
 SceneObjectRecord ReadObjectRecord(SceneReader& r, u32 version,
                                    const SceneObjectHooks& hooks) {
+    return ReadObjectRecordDepth(r, version, hooks, 0);
+}
+
+namespace {
+SceneObjectRecord ReadObjectRecordDepth(SceneReader& r, u32 version,
+                                        const SceneObjectHooks& hooks, int depth) {
     SceneObjectRecord rec;
+
+    // HARDENING (wave-11): bound the recursion (see kSceneMaxNodeDepth). A
+    // degenerate stream cannot drive us past this many nested frames.
+    if (depth >= kSceneMaxNodeDepth)
+        return rec;
 
     // The whole record is gated on version >= 0x3A6C000B in the original; older
     // scenes skip straight to the post-read fixup. All shipped scenes are newer,
@@ -147,51 +168,57 @@ SceneObjectRecord ReadObjectRecord(SceneReader& r, u32 version,
     if (version < kSceneVerTooOld)
         return rec;
 
-    // Leading presence byte (v122). Zero => empty node (no further reads here;
-    // the original still does the child/sibling reads below, but only when the
-    // node spawned — an absent node returns immediately with v6 == 0).
+    // Leading presence byte (v122). Zero => empty node: the original does NOT
+    // read the name/body, but it DOES still spawn a placeholder ("STRANGEFUCK",
+    // 0x5e7839) — a spawn that reads NO stream bytes — and then falls through to
+    // the SAME child/sibling presence-byte reads (0x5e6b3e/0x5e6b9c) and the
+    // event-binding read (0x5e6c15). So the stream cursor must advance through
+    // child + sibling here too; only the body reads are skipped. (The old recon
+    // returned early on present==0, desyncing the cursor for any scene whose
+    // object list contains an empty node — verified against 0x5e67c8 disasm.)
     u8 present = r.ReadByte();
     rec.present = (present != 0);
-    if (!rec.present)
-        return rec;
 
-    // Name (Bio_ReadString -> v111).
-    rec.name = r.ReadString();
+    if (rec.present) {
+        // Name (Bio_ReadString -> v111).
+        rec.name = r.ReadString();
 
-    // >= 0x3A6C00B2: a dword (v116 -> obj+512).
-    if (version >= 0x3A6C00B2u)
-        rec.field116 = r.ReadDword();
-    // >= 0x3A6C00AB: a dword (v115 -> obj+535).
-    if (version >= 0x3A6C00ABu)
-        rec.field115 = r.ReadDword();
+        // >= 0x3A6C00B2: a dword (v116 -> obj+512).
+        if (version >= 0x3A6C00B2u)
+            rec.field116 = r.ReadDword();
+        // >= 0x3A6C00AB: a dword (v115 -> obj+535).
+        if (version >= 0x3A6C00ABu)
+            rec.field115 = r.ReadDword();
 
-    // The kind/LOD selector dword (n).
-    rec.kindRaw = static_cast<i32>(r.ReadDword());
+        // The kind/LOD selector dword (n).
+        rec.kindRaw = static_cast<i32>(r.ReadDword());
 
-    // >= 0x3A6C00A6: a trailing "explicit kind" byte (v120) is read; older
-    // scenes derive the kind from the switch on (char)n instead. We don't need
-    // the spawn result for the framing, but the BYTE read must be reproduced so
-    // the stream cursor matches.
-    if (version >= 0x3A6C00A6u)
-        (void)r.ReadByte();
+        // >= 0x3A6C00A6: a trailing "explicit kind" byte (v120) is read; older
+        // scenes derive the kind from the switch on (char)n instead. We don't
+        // need the spawn result for the framing, but the BYTE read must be
+        // reproduced so the stream cursor matches.
+        if (version >= 0x3A6C00A6u)
+            (void)r.ReadByte();
 
-    // ---- object body (spawn + mesh attach): render leaf, delegated ----------
-    if (hooks.consumeBody) {
-        if (!hooks.consumeBody(r, version, rec))
-            return rec;   // host aborted (e.g. unknown body) — stop the walk
+        // ---- object body (spawn + mesh attach): render leaf, delegated ------
+        if (hooks.consumeBody) {
+            if (!hooks.consumeBody(r, version, rec))
+                return rec;   // host aborted (e.g. unknown body) — stop the walk
+        }
     }
 
     // ---- recursive child then sibling (the two presence bytes) --------------
+    // Reached for BOTH present!=0 and present==0 (the STRANGEFUCK placeholder).
     // child presence (v122): pulls a nested record linked as a child.
     u8 hasChild = r.ReadByte();
     if (hasChild) {
-        SceneObjectRecord child = ReadObjectRecord(r, version, hooks);
+        SceneObjectRecord child = ReadObjectRecordDepth(r, version, hooks, depth + 1);
         rec.childCount = 1 + child.childCount + child.siblingCount;
     }
     // sibling presence (v123): pulls a nested record linked as a sibling.
     u8 hasSibling = r.ReadByte();
     if (hasSibling) {
-        SceneObjectRecord sib = ReadObjectRecord(r, version, hooks);
+        SceneObjectRecord sib = ReadObjectRecordDepth(r, version, hooks, depth + 1);
         rec.siblingCount = 1 + sib.childCount + sib.siblingCount;
     }
 
@@ -201,6 +228,7 @@ SceneObjectRecord ReadObjectRecord(SceneReader& r, u32 version,
 
     return rec;
 }
+} // namespace
 
 // ===========================================================================
 // gilde.exe 0x5e7e38 (object-list portion) — ReadObjectList.
@@ -212,7 +240,16 @@ std::vector<SceneObjectRecord> ReadObjectList(SceneReader& r, u32 version,
                                               bool* floorPresent) {
     std::vector<SceneObjectRecord> out;
     u32 count = r.ReadDword();
-    out.reserve(count);
+    // HARDENING (wave-11): the count dword is untrusted. The read loop already
+    // stops at end-of-buffer, and each top-level record consumes at least its
+    // 1-byte presence flag, so the real record count can never exceed the bytes
+    // left in the stream. Cap the pre-reservation to that bound instead of trusting
+    // `count` directly (a malformed 0xFFFFFFFF would otherwise reserve gigabytes —
+    // a recon artifact; the original used raw recursion with no pre-reserve). The
+    // decoded result is identical on valid input.
+    const std::size_t reserveCap =
+        (count < r.remaining()) ? (std::size_t)count : r.remaining();
+    out.reserve(reserveCap);
     for (u32 i = 0; i < count && !r.atEnd(); ++i)
         out.push_back(ReadObjectRecord(r, version, hooks));
 

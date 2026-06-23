@@ -76,6 +76,7 @@ DonationResult ChurchComputeDonation(int playerWealth, int employerWealth, int p
 //   base   = playerWealth * flt_622430;                 // 0.5% of player wealth
 //   factor = (npc == player) ? 1.5
 //          : (flt_622434 - Favorability(player,npc)) * flt_622438;  // (200-fav)*0.01
+//   factor *= (double)crimeHandlerSum;                  // ecx leftover = He_SumPlayerHandlerValues
 //   cost0  = (int)(base * factor);
 //   // clamp the cost to a sane band, measured in 1/10ths:
 //   t = cost0 * 0.1;
@@ -92,11 +93,13 @@ struct IndulgenceResult {
 };
 
 // gilde.exe 0x521bac — the indulgence cost rule core.
-//   hasCrime     : VIBE_He_SumPlayerHandlerValues(...) != 0
-//   playerWealth : VIBE_Person_ComputeTotalWealth(player)
-//   npcIsPlayer  : (person+39)==player  (self-indulgence path -> fixed 1.5 factor)
-//   favorability : VIBE_Ai_ComputePersonFavorability(player, npc, 1)
-IndulgenceResult ChurchComputeIndulgence(bool hasCrime, int playerWealth,
+//   crimeHandlerSum : VIBE_He_SumPlayerHandlerValues(...)  (0 -> not offered).  The
+//                     NONZERO value is also reused (the ecx leftover, preserved across
+//                     the wealth/favorability calls) as a multiplier on `factor`.
+//   playerWealth    : VIBE_Person_ComputeTotalWealth(player)
+//   npcIsPlayer     : (person+39)==player  (self-indulgence path -> fixed 1.5 factor)
+//   favorability    : VIBE_Ai_ComputePersonFavorability(player, npc, 1)
+IndulgenceResult ChurchComputeIndulgence(int crimeHandlerSum, int playerWealth,
                                          bool npcIsPlayer, int favorability);
 
 // ===========================================================================

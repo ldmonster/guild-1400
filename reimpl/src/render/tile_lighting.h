@@ -17,18 +17,27 @@
 //   0x5c47dc  VIBE_Heightmap_BuildLitTileGeometry    (heightmap mip downsample +
 //                                                      per-tile illumination fill)
 //
-// LIGHT-SOURCE struct (recovered from ComputeTileIllumination @0x5c4718 disasm):
-//   The Floor record carries an array of 8 dynamic light sources beginning at
-//   Floor+0x1A64, stride 0x40 (64) bytes. The disasm walks:
-//     ebp = Floor;  for i in [0,8): name = *(Floor + 0x1A64 + 0x40*i)
-//                                   active = name[0] != 0
-//   i.e. the light source's NAME (a C string) is at +0x00 of the 64-byte record,
-//   and "active" is simply name[0] != 0. The build half matches each active name
-//   against 15 wildcard patterns (stride 9: "_ill*", "_unk*", ...) via a
-//   '*'-wildcard matcher and stores the matched pattern index into an 8-entry
-//   illumination array byte_1405100[i] (default 1 when no pattern matches). That
-//   name->pattern build is data-coupled (the pattern table + wildcard matcher) and
-//   is LISTED deferred; here we model the recovered record + the per-tile LOOKUP.
+// THE 8-NAME TABLE AT Floor+0x1A64 (corrected, terrain-ground wave 4):
+//   The Floor record carries 8 64-byte NAME slots at Floor+0x1A64 (== +6756).
+//   VIBE_Floor_LoadFromHeightmap @0x5bd44c (v144 = floor+6756, the @0x5bd810..
+//   0x5bd89d loop) copies the floor block's 8 terrain-type/texture-slot names
+//   ("SAND", "EINFACHER_WEG", ...; ctx+164+64*i of LoadFloorRegions @0x5e78a8)
+//   into these slots — they are the floor TEXTURE-SLOT names, NOT dynamic light
+//   sources (the earlier interpretation). ComputeTileIllumination @0x5c4718
+//   walks them:  for i in [0,8): name = Floor + 0x1A64 + 0x40*i; active = name[0].
+//
+// THE NAME -> TERRAIN-CLASS BUILD (was deferred; now captured in full):
+//   For each non-empty slot name the build half matches the name against the 15
+//   9-byte-stride patterns at 0x5c4690 ('_ill*','_unk*','SAND','ERDE','WIESE',
+//   'MOOR','PFLASTER','KIESEL','FELS','EIS','WASSER','WEG','WEG','_ill*','')
+//   via VIBE_Util_StrToUpper @0x5e9f50 + the strstr at loc_5CB930 and stores the
+//   FIRST matching pattern INDEX into byte_1405100[i] (slot default 1 when the
+//   name is empty; pattern 14 is the empty string, which strstr always matches,
+//   so every non-empty name resolves to an index <= 14). dword_64A04C caches the
+//   floor the table was last built for. Reconstructed below as
+//   BuildTileIlluminationTable. (StrToUpper's body was not captured; its
+//   uppercase-the-name semantics follow from its name + the call shape — the
+//   shipped slot names are already uppercase, so the inference is inert there.)
 // =============================================================================
 namespace guild::render {
 
@@ -40,8 +49,18 @@ namespace guild::render {
 //  the source's transform/colour which the deferred build half consumes.)
 // ---------------------------------------------------------------------------
 struct TileLightSource {
-    char name[64];   // +0x00  source name (empty => inactive)
+    char name[64];   // +0x00  slot name (empty => inactive); see header note:
+                     // these are the floor texture-slot/terrain-type names the
+                     // 0x5bd44c loader copies to Floor+0x1A64.
 };
+
+// The 15 terrain-class match patterns at gilde.exe 0x5c4690 (9-byte stride,
+// dumped byte-for-byte: get_bytes(0x5c4690, 9*15)). Pattern index == the
+// terrain class stored into the illumination table:
+//   0 '_ill*'  1 '_unk*'  2 'SAND'  3 'ERDE'  4 'WIESE'  5 'MOOR'
+//   6 'PFLASTER'  7 'KIESEL'  8 'FELS'  9 'EIS'  10 'WASSER'  11 'WEG'
+//   12 'WEG'  13 '_ill*'  14 ''  (empty: matches everything)
+extern const char kTerrainTypePatterns[15][9];
 
 // The 8-entry per-light-source illumination array (gilde.exe byte_1405100[8]).
 // Entry i = the illumination value for light source i: 1 by default, or the
@@ -52,8 +71,21 @@ struct TileIlluminationTable {
     u8 value[8];     // byte_1405100[0..7]
 };
 
+// gilde.exe 0x5c4718 — VIBE_Heightmap_ComputeTileIllumination, the once-per-floor
+// NAME -> TERRAIN-CLASS table build (the @0x5c475c..0x5c479e slot loop). For each
+// of the 8 64-byte name slots (Floor+0x1A64):
+//   table[i] = 1;                              (default, @0x5c475c)
+//   if (name[0]) for k in [0,15):              (@0x5c477f pattern loop)
+//       if (strstr(StrToUpper(name), pattern[k])) { table[i] = k; break; }
+// Pattern 14 is the empty string (strstr always matches), so every non-empty
+// unmatched name lands on 14; only an EMPTY slot keeps the default 1. `names` is
+// the 8-slot 64-byte-stride name block (Floor+0x1A64 == the typeNames the
+// 0x5bd44c loader copied there). The dword_64A04C per-floor cache is the
+// caller's (build once per floor).
+TileIlluminationTable BuildTileIlluminationTable(const TileLightSource names[8]);
+
 // gilde.exe 0x5c4718 — VIBE_Heightmap_ComputeTileIllumination (the per-tile lookup
-// half, recovered from disasm; the once-per-floor name-match build is deferred).
+// half, recovered from disasm).
 //   cell = (mask & x) + size * (mask & y)          (mask == size-1)
 //   t    = types[cell]                              (the per-cell type byte)
 //   if (t & 0x80)  return 0;                        (high bit => hole/unlit)
@@ -141,9 +173,54 @@ u8 BuildTileElevationByte(u8 h, float scaleH, float originY, float tileMinY,
 // engine's `v36 >> 2` of the 4-sample sum). `src` is an n x n byte grid (n even);
 // `dst` receives the (n/2) x (n/2) reduced grid. Returns n/2.
 //   (The engine ALSO writes a seam-blended (sum/4 + 2*edgePair)/5 variant into the
-//    same buffer to anti-alias the 2:1 tile seams; that in-place pyramid blend with
-//    its interleaved vertex-grid indexing is LISTED deferred — see report.)
+//    same buffer to anti-alias the 2:1 tile seams; that in-place pyramid blend is
+//    now reconstructed in full inside BuildLitTileGeometry below.)
 i32 MipDownsample(const u8* src, i32 n, u8* dst);
+
+// ---------------------------------------------------------------------------
+// gilde.exe 0x5c47dc — VIBE_Heightmap_BuildLitTileGeometry, the COMPLETE driver
+// (was deferred; the full decompile is now captured). Inputs:
+//   a1 = the Floor:    +0   N (grid edge)        +16 heights (N*N bytes)
+//                      +148 originY (float)      +196 scaleH (axisH.y, float)
+//                      +20  texture grid          (via ComputeTileIllumination)
+//   a2 = the Heightmap: +4 originY  +20 scaleY  +32 size  +36 entries (24-byte
+//                      stride, terrain-class byte at +0)  +40 heights.
+//
+// Branch 1 (hm.size >= floor.N, the `if (v93/v89)` arm): for every floor cell
+// (tx,ty) write
+//   hm.heights[(ty*r)*S + tx*r] = BuildTileElevationByte(h, scaleH, originY,
+//                                                        hm.originY, 1/hm.scaleY)
+//   hm.entries[24*((ty*r)*S + tx*r)] = ComputeTileIllumination(tx, ty, floor)
+// (r = hm.size/floor.N, S = hm.size; the heights store index, whose register the
+// decompile lost to the ConvertX clobber, is reconstructed from the entries
+// cursor symmetry 24*S*ty*r stepping 24*r), then run the in-place midpoint
+// pyramid (`while (r > 1)`): per coarse cell A=(x,y), with B=(x,y+r), C=(x+r,y),
+// D=(x+r,y+r) (x+r / y+r wrapped through mask S-1):
+//   avg4                    = (A+B+C+D) >> 2          (signed-shift /4)
+//   heights[x+r/2, y]       = (avg4 + 2*(A+C)) / 5    (top-edge midpoint)
+//   heights[x,     y+r/2]   = (avg4 + 2*(A+B)) / 5    (left-edge midpoint)
+//   heights[x+r/2, y+r/2]   = avg4                    (centre)
+//   entries byte at all three midpoints = entries[A]
+//
+// Branch 2 (floor.N > hm.size): per hm cell box-average the ratio^2 projected
+// floor elevations (sum of ConvertX-truncated per-cell bytes, / ratio^2) and
+// majority-vote the ratio^2 ComputeTileIllumination classes over 15 bins
+// (first-max wins; all-zero bins store 0).
+//
+// `illum` is the BuildTileIlluminationTable result for this floor (the engine
+// builds it lazily inside ComputeTileIllumination via the dword_64A04C cache).
+// Returns the original's (meaningless) loop-counter eax.
+// ---------------------------------------------------------------------------
+struct LitFloorView {
+    i32       size    = 0;        // floor+0   N
+    const u8* heights = nullptr;  // floor+16  N*N elevation bytes
+    const u8* texGrid = nullptr;  // floor+20  N*N texture-slot indices
+    float     originY = 0.0f;     // floor+148 world height origin
+    float     scaleH  = 0.0f;     // floor+196 world units per height byte (axisH.y)
+};
+struct Heightmap;  // render/heightmap.h
+u32 BuildLitTileGeometry(const LitFloorView& floor, Heightmap* hm,
+                         const TileIlluminationTable& illum);
 
 // gilde.exe 0x5bc45c — VIBE_Floor_BuildTilePolys, the QUAD POLY-VISIBILITY build.
 // For each quad of 4 corner type bytes (each cell's high bit = "hole/unwalkable"),

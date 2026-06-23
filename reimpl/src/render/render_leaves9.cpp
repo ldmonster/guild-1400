@@ -83,6 +83,11 @@ u32 ShiftAccumulate(u32 mid, u32 hi, u32 lo, i32 exp,
     u32 a = mid;    // eax
     u32 b = lo;     // ebp
     i32 e = exp;    // edi
+    // esi is zeroed at entry (`sub esi,esi`) and is the exponent OUTPUT register.
+    // It only receives the adjusted edi (`mov esi,edi`) inside the nonzero branch;
+    // on the all-zero path it stays 0, so the exponent output is 0 there (NOT the
+    // unchanged input exponent).
+    u32 eSi = 0;    // esi (exponent output)
 
     if ((a | d | b) != 0) {
         // Step 2 (word shifts), at most twice.
@@ -122,11 +127,12 @@ u32 ShiftAccumulate(u32 mid, u32 hi, u32 lo, i32 exp,
             d = (d >> 1) | 0x80000000u;
             ++e;
         }
+        eSi = static_cast<u32>(e);   // mov esi, edi
     }
 
     if (hiOut)  *hiOut = d;
     if (loOut)  *loOut = a;
-    if (expOut) *expOut = static_cast<u16>(e);
+    if (expOut) *expOut = static_cast<u16>(eSi);
     return a;
 }
 

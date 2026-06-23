@@ -54,13 +54,21 @@ TEST(AudioLeaves, ClampDigitalMasterVolume) {
 }
 
 TEST(AudioLeaves, ApplyVolumeSettingsGolden) {
+    // Golden corrected to the binary (disasm @0x56c148, reference of record):
+    //   v6     = (float)(soundByte * scale0)          // fstp var_C (32-bit float)
+    //   master = trunc(musicByte * v6)                // fild byte_1233551, fmul var_C
+    //   sfx    = trunc(sfxByte   * v6)                // fild byte_1233552, fmul var_C
+    //   music  = trunc(musicByte * v6)                // fild byte_1233551, fmul var_C
+    //   amb    = ambByte  * scale0 ; amb2 = amb2Byte * scale1
+    // (Hex-Rays mislabelled the operands; master & music both use musicByte, and
+    //  soundByte only feeds v6 — the prior goldens encoded the wrong master.)
     struct C { u8 s, m, sf, a, a2; float sc0, sc1; int em, esfx, emus; float eamb, eamb2; };
     const C cases[] = {
-        {200,128,255,100,50,0.5f,0.8f, 100,25500,12800, 50.0f,40.0f},
-        {255,255,255,255,255,1.0f,1.0f, 255,65025,65025, 255.0f,255.0f},
+        {200,128,255,100,50,0.5f,0.8f, 12800,25500,12800, 50.0f,40.0f},
+        {255,255,255,255,255,1.0f,1.0f, 65025,65025,65025, 255.0f,255.0f},
         {0,0,0,0,0,1.0f,1.0f, 0,0,0, 0.0f,0.0f},
-        {180,90,200,30,77,0.25f,0.5f, 45,9000,4050, 7.5f,38.5f},
-        {127,64,127,200,10,1.0f,0.333f, 127,16129,8128, 200.0f,3.33f},
+        {180,90,200,30,77,0.25f,0.5f, 4050,9000,4050, 7.5f,38.5f},
+        {127,64,127,200,10,1.0f,0.333f, 8128,16129,8128, 200.0f,3.33f},
     };
     for (const auto& c : cases) {
         VolumeSettingsIn in{c.s, c.m, c.sf, c.a, c.a2, c.sc0, c.sc1};
@@ -211,6 +219,27 @@ TEST(AudioLeaves, SetTrackNamePrefix) {
     CHECK(dst.empty());
 }
 
+// --- WAVE-11 hardening: out-of-bounds / degenerate-input edge tests ----------
+
+// A DigitalOutput whose maxSampleHandles is larger than its actual slot vectors
+// (an inconsistent/malformed record) must NOT drive the Lookup scans off the end
+// of the std::vector. The faithful guard clamps the scan to the real slot count
+// (the original's array always had exactly maxSampleHandles entries).
+TEST(AudioLeaves, LookupClampsToActualSlotSize) {
+    MockDevice dev;
+    int idx = -1;
+    DigitalAudio d = makeDriver(dev, /*cap=*/4, /*alloc=*/2, /*stream=*/2, &idx);
+    CHECK_EQ(idx, 0);
+    DigitalOutput* o = d.outputAt(idx);
+    CHECK(o != nullptr);
+    // Corrupt the capacity field to be far beyond the real vector sizes (4).
+    o->maxSampleHandles = 4096;
+    // These scans must stay in-bounds (ASAN would flag a heap read past the end).
+    CHECK_EQ(LookupStreamHandleIndex(d, 99999), -1);
+    CHECK_EQ(LookupStreamDriverIndex(d, 99999), -1);
+    CHECK_EQ(LookupSampleDriverIndex(d, 99999), -1);
+}
+
 TEST(AudioLeaves, AmbientVoiceListAppendAndStop) {
     AmbientVoiceList list{};
     CHECK_EQ(AppendAmbientVoice(list, 10), 1);
@@ -220,11 +249,13 @@ TEST(AudioLeaves, AmbientVoiceListAppendAndStop) {
     CHECK_EQ(list.handles[0], 10);
     CHECK_EQ(list.handles[2], 30);
 
-    // Fill to capacity then overflow: count stays at 16, returns prior.
+    // Fill to capacity then overflow: count stays at 16. When full the binary
+    // returns `result` (the StartVoiceSample handle == the passed-in handle), not
+    // the count (decompile @0x505ba8: `return result;`). Golden = the handle.
     AmbientVoiceList big{};
     for (int i = 0; i < kMaxAmbientVoices; ++i)
         CHECK_EQ(AppendAmbientVoice(big, 100 + i), i + 1);
-    CHECK_EQ(AppendAmbientVoice(big, 999), kMaxAmbientVoices); // refused, prior count
+    CHECK_EQ(AppendAmbientVoice(big, 999), 999); // full -> returns the handle
     CHECK_EQ(big.count, kMaxAmbientVoices);
 
     // Stop clears and resets.

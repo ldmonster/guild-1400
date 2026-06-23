@@ -114,18 +114,20 @@ bool CheckQueueReady(const ChActor* actor) {
 int UpdateNeedsDecay(u8* person, int seed) {
     if (!person) return seed;
 
-    // primary need: value += rate - value*decay; clamp [0,1000].
-    float prim = RdF32(person, kPnPrimaryValue)
-               + RdF32(person, kPnPrimaryRate)
-               - RdF32(person, kPnPrimaryValue) * RdF32(person, kPnPrimaryDecay);
-    float v11;
-    if (prim >= 0.0f && prim >= static_cast<float>(kNeedDecayEps))
-        v11 = kNeedCeiling;
+    // gilde.exe 0x4521f2: v3 = value + rate - value*decay (x87 double accumulation).
+    // gilde.exe 0x452217: clamp ceiling is dbl_619110 == 1000.0 (NOT the 0.002 eps),
+    //   clamp floor 0.0; the stored value is written verbatim (no 1.0 clamp exists).
+    double prim = static_cast<double>(RdF32(person, kPnPrimaryValue))
+                + static_cast<double>(RdF32(person, kPnPrimaryRate))
+                - static_cast<double>(RdF32(person, kPnPrimaryValue))
+                      * static_cast<double>(RdF32(person, kPnPrimaryDecay));
+    float v18 = static_cast<float>(prim);
+    double v11;
+    if (prim >= 0.0 && prim >= static_cast<double>(kNeedCeiling))  // dbl_619110 == 1000.0
+        v11 = 1000.0;
     else
-        v11 = (prim >= 0.0f) ? prim : 0.0f;
-    // original: `if (v11 >= 1.0) v12 = 1.0; else v12 = v11;`
-    float primClamped = (v11 >= 1.0f) ? 1.0f : v11;
-    WrF32(person, kPnPrimaryValue, primClamped);
+        v11 = (v18 >= 0.0f) ? static_cast<double>(v18) : 0.0;
+    WrF32(person, kPnPrimaryValue, static_cast<float>(v11));       // *(a1+300) = v11
 
     int active = ActiveNeedIndex(person);
     float best = 0.0f;
@@ -140,32 +142,55 @@ int UpdateNeedsDecay(u8* person, int seed) {
             } else if (k == 2 && (RdI32(person, kPnBusyFlag) != 0 || RdU8(person, kPnKind) == 3)) {
                 WrI32(person, kPnNeedBase + eoff, 0);
             } else if (k == 3) {
-                float nv = RdF32(person, kPnRateBase + eoff) * RdF32(person, kPnScale)
-                         + RdF32(person, kPnNeedBase + eoff)
-                         - RdF32(person, kPnNeedBase + eoff) * RdF32(person, kPnDecayBase + eoff);
-                float c;
-                if (nv >= 0.0f && nv >= static_cast<float>(kNeedDecayEps)) c = kNeedCeiling;
-                else c = (nv >= 0.0f) ? nv : 0.0f;
-                WrF32(person, kPnNeedBase + eoff, c);
+                // gilde.exe 0x452434: rate*scale + value - value*decay.
+                double nv = static_cast<double>(RdF32(person, kPnRateBase + eoff))
+                              * static_cast<double>(RdF32(person, kPnScale))
+                          + static_cast<double>(RdF32(person, kPnNeedBase + eoff))
+                          - static_cast<double>(RdF32(person, kPnNeedBase + eoff))
+                                * static_cast<double>(RdF32(person, kPnDecayBase + eoff));
+                float v17 = static_cast<float>(nv);
+                double c;
+                // gilde.exe 0x4524a6: if (v7 < 0.0 || v7 < 1000.0) clamp [0..]; else 1000.0
+                if (nv < 0.0 || nv < static_cast<double>(kNeedCeiling))
+                    c = (v17 >= 0.0f) ? static_cast<double>(v17) : 0.0;
+                else
+                    c = 1000.0;
+                WrF32(person, kPnNeedBase + eoff, static_cast<float>(c));
             } else {
-                float nv = RdF32(person, kPnNeedBase + eoff)
-                         + RdF32(person, kPnRateBase + eoff)
-                         - RdF32(person, kPnNeedBase + eoff) * RdF32(person, kPnDecayBase + eoff);
-                float c;
-                if (nv >= 0.0f && nv >= static_cast<float>(kNeedDecayEps)) c = kNeedCeiling;
-                else c = (nv >= 0.0f) ? nv : 0.0f;
-                WrF32(person, kPnNeedBase + eoff, c);
+                // gilde.exe 0x4524f4: value + rate - value*decay.
+                double nv = static_cast<double>(RdF32(person, kPnNeedBase + eoff))
+                          + static_cast<double>(RdF32(person, kPnRateBase + eoff))
+                          - static_cast<double>(RdF32(person, kPnNeedBase + eoff))
+                                * static_cast<double>(RdF32(person, kPnDecayBase + eoff));
+                float v8 = static_cast<float>(nv);
+                double c;
+                // gilde.exe 0x452564: if (v8 < 0.0 || v8 < 1000.0) clamp [0..]; else 1000.0
+                if (nv < 0.0 || nv < static_cast<double>(kNeedCeiling))
+                    c = (v8 >= 0.0f) ? static_cast<double>(v8) : 0.0;
+                else
+                    c = 1000.0;
+                WrF32(person, kPnNeedBase + eoff, static_cast<float>(c));
             }
         }
 
         float val = RdF32(person, kPnNeedBase + eoff);
         if (k == active) {
-            // active need weighted by (2.0 - primaryValue*0.002).
-            float weighted = val * (static_cast<float>(kNeedTwo)
-                                    - primClamped * static_cast<float>(kNeedDecayEps));
-            if (best <= weighted) { dominant = k; best = weighted; }
+            // gilde.exe 0x4522f3: active need weighted by (2.0 - storedPrimary*0.002),
+            // using the just-written *(a1+300) (== v11) and dbl_619128/dbl_619118.
+            double weighted = static_cast<double>(val)
+                            * (static_cast<double>(kNeedTwo)
+                               - static_cast<double>(RdF32(person, kPnPrimaryValue))
+                                     * static_cast<double>(kNeedDecayEps));
+            if (static_cast<double>(best) <= weighted) {
+                dominant = k;
+                best = static_cast<float>(weighted);
+            }
         } else {
-            if (val >= best) { dominant = k; best = val; }
+            // gilde.exe 0x452594: if (val >= (double)v16) ...
+            if (static_cast<double>(val) >= static_cast<double>(best)) {
+                dominant = k;
+                best = val;
+            }
         }
     }
 

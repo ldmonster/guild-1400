@@ -17,13 +17,14 @@
 //   placed where a relative is missing.  Each node also gets its person record stored at
 //   widget+736 and a selectable flag (+444 = 3).
 //
-//   Node X placement around `center` (the load-bearing math, recovered byte-for-byte):
-//     self           : center - (nw + 90);     portrait at +2
-//     spouse         : center + 90;            portrait at +2  (only when married)
-//     parents (2)    : left = center - (nw+16), right = center + 16   (when both present)
-//     parent  (1)    : center - nw/2                                   (single parent)
-//     children odd   : center - nw/2, then spread by +/- (nw+40) outward
-//     children even  : center - nw - 20, center + 20, then +/- (nw+40) outward
+//   Node X placement around `center` (recovered byte-for-byte). The STORED node x is the
+//   AddCenteredLabel x = anchor + nw/2; the portrait sprite sits at anchor + 2:
+//     self           : anchor center - (nw + 90)  -> x = anchor + nw/2; portrait anchor+2
+//     spouse         : anchor center + 90         -> x = anchor + nw/2  (only when married)
+//     parents (2)    : father anchor center-(nw+16), mother anchor center+16
+//     parent  (1)    : anchor center - nw/2       -> x = center
+//     children odd   : anchors {center-nw/2, center-nw/2-40-nw, nw+center-nw/2+40, ...}
+//     children even  : anchors {center-nw-20, center+20, ...}   (each x = anchor + nw/2)
 //
 //   modal loop: right-click exits; a click on any node's object recentres the tree on that
 //   person (the loop re-runs the layout for the new focus).  Depending on the mode byte the

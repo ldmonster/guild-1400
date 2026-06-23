@@ -125,8 +125,10 @@ bool MissionReqCheckMultiStat(const ObjectiveRecord* objective);
 bool MissionReqCheckStatCombo(const ObjectiveRecord* objective);
 
 // gilde.exe 0x539534 — VIBE_MissionReq_CheckCumulativeStats (edx=row). Five
-// gating states (21,20,18,22,8) must not be "count>0 with avg<1", and the final
-// (sum+count) over state 9 must reach row.threshold.
+// gating states (21,20,18,22,8) must not be "count>0 with avg<1"; the final gate
+// is (count(9)<=0 || avg(9)>=1.0) AND (sum(21)+sum(20)+sum(18)+sum(22)+sum(8)+
+// sum(9)) >= row.threshold. The original accumulates each state's out->sum into a
+// running register (ecx) and compares the total — see the .cpp note for addrs.
 bool MissionReqCheckCumulativeStats(const ReqTableRow* row);
 
 // gilde.exe 0x53963c — VIBE_MissionReq_CheckMemberStats (ebx=row). States 11,12,

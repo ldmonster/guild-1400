@@ -174,6 +174,50 @@ TEST(AiMeisterEconomy, RuleQualitySetting) {
     CHECK(!ai::RuleEvalQualitySetting(2, 0, 0.1f, &out));
 }
 
+TEST(AiMeisterEconomy, RuleDemandToggle) {
+    // gilde.exe 0x465ac8: 2-trend rule (base from setting61, high from setting67,
+    // NO mid) with the INVERSE first-branch test (base > high -> out=1) and
+    // unconditional *0.8 group multiplier.
+    ai::RuleEnv env = MakeEnv();
+    const ai::RuleConfig& cfg = ai::RuleConfigDemandToggle();
+    CHECK_EQ(cfg.lawId, 18);
+
+    // drive score < 1.0: rating small. score = (rating - (scalar+1)*c0)*c1*0.8.
+    g_env.group = 0;        // default mul (== 0.8 for this config)
+    g_env.scalar = 0;
+    g_env.rating = 0.01f;
+    g_env.law = 0;
+
+    ai::RuleBuilding b;
+    // base = (setting61-2)*weight63 ; high = (setting67-2)*weight69.
+    b.setting61 = 5.0f; b.weight63 = 1.0f; // base = 3.0
+    b.setting64 = 99.0f; b.weight66 = 99.0f; // mid is IGNORED by this rule
+    b.setting67 = 3.0f; b.weight69 = 1.0f; // high = 1.0 ; base > high
+    int out = -1;
+    CHECK(ai::RuleEvalDemandToggle(b, env, cfg, &out));
+    CHECK_EQ(out, 1);                       // score<1.0, law==0, base>high -> raise
+
+    // If high >= base, the first branch does NOT fire (inverse of SettingToggle).
+    b.setting67 = 6.0f;                     // high = 4.0 > base 3.0
+    out = -1;
+    CHECK(!ai::RuleEvalDemandToggle(b, env, cfg, &out));
+
+    // Lower branch: score > 1.0, law==1, high > base -> out=0.
+    g_env.rating = 100.0f;                  // (100-~0)*c1*0.8 ~= 1.90 > 1.0
+    g_env.law = 1;
+    b.setting61 = 3.0f; b.weight63 = 1.0f;  // base = 1.0
+    b.setting67 = 5.0f; b.weight69 = 1.0f;  // high = 3.0 > base
+    out = -1;
+    CHECK(ai::RuleEvalDemandToggle(b, env, cfg, &out));
+    CHECK_EQ(out, 0);
+
+    // mid is ignored: with high <= base the lower branch must not fire even if a
+    // SettingToggle-style mid would have.
+    b.setting67 = 3.0f; b.weight69 = 1.0f;  // high = 1.0 == base -> high<=base
+    out = -1;
+    CHECK(!ai::RuleEvalDemandToggle(b, env, cfg, &out));
+}
+
 // ---------------------------------------------------------------------------
 // Staffing decision cores (seeded RNG).
 // ---------------------------------------------------------------------------
@@ -230,13 +274,15 @@ TEST(AiMeisterEconomy, TrainStaffDecision) {
 // PlanProduction ratio (golden, vs. exact recovered constants).
 // ---------------------------------------------------------------------------
 TEST(AiMeisterEconomy, PlanProductionRatio) {
-    // tier 1: stock*flt_6198F0 then *0.5 + 0.25.
+    // case 1: stock*flt_6198F0 (1.5625e-05) then *0.5 + 0.25.
+    // (disasm 0x4598a0: case 1 multiplies by flt_6198F0 = 1.5625000742147677e-05.)
     double r1 = ai::PlanProductionRatio(1, 1000);
-    double exp1 = 1000.0 * 3.906250185536919e-06 * 0.5 + 0.25;
+    double exp1 = 1000.0 * 1.5625000742147677e-05 * 0.5 + 0.25;
     CHECK(r1 > exp1 - 1e-9 && r1 < exp1 + 1e-9);
-    // tier 3 is 4x tier 1's stock scale.
+    // case 3: stock*flt_6198E8 (3.906e-06); case 1 is 4x case 3's stock scale.
+    // (disasm 0x4599ad: case 3 multiplies by flt_6198E8 = 3.906250185536919e-06.)
     double r3 = ai::PlanProductionRatio(3, 1000);
-    double exp3 = 1000.0 * 1.5625000742147677e-05 * 0.5 + 0.25;
+    double exp3 = 1000.0 * 3.906250185536919e-06 * 0.5 + 0.25;
     CHECK(r3 > exp3 - 1e-9 && r3 < exp3 + 1e-9);
     // default tier -> bias only.
     double r0 = ai::PlanProductionRatio(0, 1000);

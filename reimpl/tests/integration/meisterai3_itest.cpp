@@ -50,7 +50,6 @@ TEST(Meister3Itest, SessionCoinFlipUsesRealRandomModulo) {
     SessionInputs in{};
     in.sessionType = 6;
     in.match6      = true;     // actor.id == session+24 -> the draw is taken
-    in.randModulus = 2;
 
     MethodEnv env = MakeEnvRealRng();
     g_rngCalls = 0;
@@ -69,19 +68,18 @@ TEST(Meister3Itest, SessionCoinFlipUsesRealRandomModulo) {
     CHECK_EQ(g_rngCalls, 0);      // real RNG untouched
 }
 
-// Session type 2 (random value) returns RandomModulo(randModulus) directly. With
-// a modulus of 5 over the real LCG, the orchestrator's output equals the real
-// sibling's draw for the same seed.
+// Session type 2 (random value, VIBE_AiMethod_RandomValue @0x467994) returns
+// RandomModulo(7) directly — the modulus is hardcoded 7 in the binary. Over the
+// real LCG the orchestrator's output equals the real sibling's draw for the same seed.
 TEST(Meister3Itest, SessionRandomValueUsesRealRandomModulo) {
     const u32 seed = 0x5151AAu;
 
     crt::Srand(seed);
-    int expected = ai::RandomModulo(5);
+    int expected = ai::RandomModulo(7);
 
     SessionInputs in{};
     in.sessionType = 2;
     in.match2      = true;
-    in.randModulus = 5;
 
     MethodEnv env = MakeEnvRealRng();
     g_rngCalls = 0;

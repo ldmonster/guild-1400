@@ -4,6 +4,14 @@
 
 namespace guild::sim {
 
+// The originals form the id field as `*(record + 4)` — a 32-bit register/pointer
+// add, which wraps in two's complement. Doing `id + 4` on a signed i32 in C++ is
+// signed-overflow UB at the boundary (flagged by UBSAN). Compute the add in
+// unsigned space so the result is the same well-defined wrap the binary produces.
+static inline i32 Plus4(i32 id) {
+    return static_cast<i32>(static_cast<u32>(id) + 4u);
+}
+
 // gilde.exe 0x495874 — VIBE_Command_RequestBuildOp80.
 // Stack frame: v3[16] (header, opcode @+0), v4=a1 @+0x10, v5[44] @+0x14 (the
 // staging copy), v6 @+0x40 (local-battle cut target). Then EnqueuePacket(v3),
@@ -67,9 +75,9 @@ i32 BuildAttackPacket(CommandQueue& q, const CombatOrderHandle& h,
         || c == 340 || c == 342 || c == 344 || c == 366 || c == 370 || c == 0;
 
     if (meleeBranch) {
-        v15.set_targetId(target + 4);   // v15[0] = *(a2+4) -> here the id field
+        v15.set_targetId(Plus4(target));   // v15[0] = *(a2+4) -> here the id field
         v15.set_kind(kOrderPacketAttack);     // LOBYTE(v15[1]) = 2
-        v15.set_field4(attacker + 4);   // v15[4] = *(v19+4)
+        v15.set_field4(Plus4(attacker));   // v15[4] = *(v19+4)
     } else {
         switch (c) {
         case 350:
@@ -81,9 +89,9 @@ i32 BuildAttackPacket(CommandQueue& q, const CombatOrderHandle& h,
                 // VIBE_Hud_SetStatusBannerText(dword_8C6F20); return -1;
                 return -1;
             }
-            v15.set_targetId(target + 4);
+            v15.set_targetId(Plus4(target));
             v15.set_kind(kOrderPacketAttack);
-            v15.set_field4(attacker + 4);
+            v15.set_field4(Plus4(attacker));
             v15.set_field5(tileX);          // v15[5] = v16
             v15.set_field6(a5);             // v15[6] = a5
             break;
@@ -96,7 +104,7 @@ i32 BuildAttackPacket(CommandQueue& q, const CombatOrderHandle& h,
                 // VIBE_Hud_SetStatusBannerText(dword_8C6F24); return -1;
                 return -1;
             }
-            v15.set_targetId(target + 4);
+            v15.set_targetId(Plus4(target));
             v15.set_field4(0);              // v15[4] = 0
             v15.set_field5(tileX);          // v15[5] = v16
             v15.set_kind(kOrderPacketAttack);
@@ -111,7 +119,7 @@ i32 BuildAttackPacket(CommandQueue& q, const CombatOrderHandle& h,
                 // VIBE_Hud_SetStatusBannerText(dword_8C6F28); return -1;
                 return -1;
             }
-            v15.set_targetId(target + 4);
+            v15.set_targetId(Plus4(target));
             v15.set_kind(kOrderPacketAttack);
             v15.set_field5(tileX);          // v15[5] = v16
             v15.set_field4(0);              // v15[4] = 0
@@ -163,7 +171,7 @@ i32 BuildMoveToPacket(CommandQueue& q, const CombatOrderHandle& h,
         return -1;
 
     OrderStage v7{};
-    v7.set_targetId(target + 4);   // v7[0] = *(a2+4)
+    v7.set_targetId(Plus4(target));   // v7[0] = *(a2+4)
     v7.set_kind(kOrderPacketMove);       // LOBYTE(v7[1]) = 3
     v7.set_field4(tileX);          // v7[4] = v9[0]
     v7.set_field5(tileZ);          // v7[5] = v9[1]
@@ -199,7 +207,7 @@ i32 BuildTilePacket(CommandQueue& q, const CombatOrderHandle& h,
         return -1;
 
     OrderStage v6{};
-    v6.set_targetId(target + 4);   // v6 = *(a2+4)
+    v6.set_targetId(Plus4(target));   // v6 = *(a2+4)
     v6.set_kind(kOrderPacketTile);       // v7 = 7
     v6.set_field4(v10);            // v8 = v10  (safest tile X)
     v6.set_field5(v11);            // v9 = v11  (safest tile Z)
@@ -214,7 +222,7 @@ i32 BuildSimplePacket(CommandQueue& q, const CombatOrderHandle& h,
         return -1;
 
     OrderStage v6{};
-    v6.set_targetId(target + 4);   // v6[0] = *(a2+4)
+    v6.set_targetId(Plus4(target));   // v6[0] = *(a2+4)
     v6.set_kind(kOrderPacketSimple);     // LOBYTE(v6[1]) = 8
     return RequestBuildOp80(q, h.op80Owner, v6, -1);
 }

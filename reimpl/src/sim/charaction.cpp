@@ -282,28 +282,38 @@ int RegisterHandlers() {
     }
     g_poolReady = true;
 
-    DeclareAction(7,  &TurnStepActionUpdate,        "bewegung/dreh", 1, 2);
+    // Catalog transcribed 1:1 from VIBE_CharAction_RegisterHandlers @0x40be30.
+    // (type, step, animName, ready, argCount) tuples in the original's order.
+    // 0x40be6a loads ecx = aBewegungDreh90 "bewegung/dreh_90_rechts" (0x61070c)
+    // before the ecx-preserving SetGrayColorThunk; DeclareAction(7) @0x40be85
+    // takes animName from ecx. So type 7's animName is the FULL string, not "bewegung/dreh".
+    DeclareAction(7,  &TurnStepActionUpdate,        "bewegung/dreh_90_rechts", 1, 2);
     DeclareAction(0,  &RunActionOrFree,             "",              1, 0);
+    DeclareAction(23, &SoundActionUpdate,           "",              1, 0);  // 0x40beb8
+    // type 45 (0x40bed3): binary binds VIBE_CharAction_WalkUpdate @0x40a0b8
+    // (sig int(WalkState*,float), owned by charaction_walk) — registered there
+    // through the dispatch bridge; argCount 3 transcribed here.
     DeclareAction(45, &LoadAnimActionUpdate,        "bewegung/gehen",1, 3);
-    DeclareAction(49, &TakeObjectActionUpdate,      "",              1, 0);
-    DeclareAction(50, &DropObjectActionUpdate,      "",              1, 0);
-    DeclareAction(53, &TurnToTargetActionUpdate,    "",              1, 1);
-    DeclareAction(54, &LoadAnimActionUpdate,        "",              1, 0);
-    DeclareAction(55, &FinishSetVisible,            "",              1, 1);
-    DeclareAction(59, &CheckDurationExpiryStep,     "",              1, 1);
-    // Misc steps (charaction_misc.cpp): sound/sample/use-gate.
-    DeclareAction(46, &SoundActionUpdate,           "",              1, 1);
-    DeclareAction(47, &PlaySampleActionUpdate,      "",              1, 0);
-    DeclareAction(48, &SampleLoopActionUpdate,      "",              1, 0);
-    DeclareAction(52, &UseGateActionUpdate,         "",              1, 0);
-    // Chained follow-on types used by the use-gate sequence (51 relocate /
-    // 56 fade). The original registers a relocation step + a fade step here; the
-    // step bodies are render-entangled (Move2Universe / RotateInterpolate's
-    // sibling) so we register a benign base step to keep the type bytes faithful
-    // and the chain enqueues unmangled (InsertAction would otherwise coerce an
-    // unregistered type to 0).
-    DeclareAction(51, &RunActionOrFree,             "",              1, 1);
-    DeclareAction(56, &RunActionOrFree,             "",              1, 1);
+    // type 58 (Command_Dispatcher @0x40a4d4) and type 57 (QueueWalk2RndDummy
+    // @0x40b760) take non-ActionStepFn signatures (owned by charaction_walk /
+    // charaction_misc); their registration is deferred to those owners — see
+    // DEFERRED note. argCounts: 58 -> 3, 57 -> 1.
+    DeclareAction(46, &SoundActionUpdate,           "",              1, 1);  // 0x40bf24
+    DeclareAction(47, &PlaySampleActionUpdate,      "",              1, 0);  // 0x40bf3f
+    DeclareAction(48, &SampleLoopActionUpdate,      "",              1, 0);  // 0x40bf5a
+    DeclareAction(49, &TakeObjectActionUpdate,      "",              1, 0);  // 0x40bf75
+    DeclareAction(50, &DropObjectActionUpdate,      "",              1, 0);  // 0x40bf90
+    // type 51 (0x40bfab): VIBE_Character_Move2UniverseActionUpdate, argCount 3.
+    // The step body is render/scene-entangled (owned by character_universe /
+    // character_move) so we register a benign base step to keep the type byte
+    // faithful and the chain enqueues unmangled; argCount 3 transcribed exactly.
+    DeclareAction(51, &RunActionOrFree,             "",              1, 3);
+    DeclareAction(53, &TurnToTargetActionUpdate,    "",              1, 1);  // 0x40bfc6
+    DeclareAction(54, &LoadAnimActionUpdate,        "",              1, 0);  // 0x40bfe1
+    DeclareAction(55, &FinishSetVisible,            "",              1, 1);  // 0x40bffc
+    DeclareAction(56, &RotateInterpolate,           "",              1, 1);  // 0x40c017
+    DeclareAction(59, &CheckDurationExpiryStep,     "",              1, 1);  // 0x40c032
+    DeclareAction(52, &UseGateActionUpdate,         "",              1, 5);  // 0x40c04d
     return 1;
 }
 

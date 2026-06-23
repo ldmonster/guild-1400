@@ -107,6 +107,55 @@ struct VfsBytes {
 } // namespace
 
 // ===========================================================================
+// 0. RECOVERED-CONSTANT GOLDEN PINS (wave-13 1:1 fidelity audit).
+//
+// The table loaders' record strides / capacities / counter biases are the core
+// recovered 1:1 values of VIBE_Save_LoadGameFile @0x5a7604 and its callees. They
+// are otherwise only used IMPLICITLY by the round-trip tests; this test pins the
+// exact decompiled values so a drift in a constant fails loudly. Every value is
+// sourced from the provenance comments in save_world_load.h / save_person.h —
+// NOT invented.
+// ===========================================================================
+TEST(io_save_world, recovered_strides_and_constants_pinned) {
+    using namespace guild::io;
+    // VIBE_Save_LoadPersonIndexTable @0x5a7ffc — dword_13CE290, stride 67, 8192.
+    CHECK_EQ(kSceneTileStride, 67);
+    CHECK_EQ(kSceneTileCapacity, 8192);
+    CHECK_EQ((u32)kSceneTileScanBytes, (u32)(67u * 8192u)); // 548864
+    CHECK_EQ((u32)kSceneTileScanBytes, 548864u);
+
+    // VIBE_Save_LoadGlobalCounters @0x5a86d0 — word_13C3110, stride 164, 16 recs.
+    CHECK_EQ(kBuildCounterStride, 164);
+    CHECK_EQ(kBuildCounterCount, 16);
+
+    // VIBE_Save_LoadCityRecords @0x5a8d3c — word_12CE910, stride 536, 768 slots.
+    CHECK_EQ(kCityRecStride, 536);
+    CHECK_EQ(kCityRecCapacity, 768);
+    // Counter biases re-applied on load (+84 dword += 1342, +396 dword += 1468).
+    CHECK_EQ((i32)kCityCounterBiasA, 1342);
+    CHECK_EQ((i32)kCityCounterBiasB, 1468);
+
+    // VIBE_Save_LoadBuildingSlotTables @0x5aa058 — 5 slot tables (16-byte header +
+    // 62 sub-records of 128-byte stride = 7952), 4 city-info recs of 756 bytes.
+    CHECK_EQ(kCitySlotTableCount, 5);
+    CHECK_EQ(kCitySlotSubCount, 62);
+    CHECK_EQ(kCityInfoRecCount, 4);
+    CHECK_EQ(16 + kCitySlotSubCount * 128, 7952);   // the in-memory table stride
+
+    // VIBE_Save_LoadCharacterSlot @0x5a96c0 — 0x204 == 516-byte live-actor record.
+    CHECK_EQ(kLiveActorRecSize, 516);
+    CHECK_EQ(kLiveActorRecSize, 0x204);
+
+    // VIBE_Save_LoadPersonTable @0x5a8190 — object/building array, 169-stride x256.
+    CHECK_EQ(kObjStride, 169);
+    CHECK_EQ((u32)kObjScanBytes, (u32)(169u * 256u)); // 43264
+
+    // Version gate (VIBE_Save_LoadGameFile @0x5a775a): 0x10026 <= ver <= 0x10045.
+    CHECK_EQ((u32)kSaveVersionLoadMin, 0x10026u);
+    CHECK_EQ((u32)kSaveVersionLoadMax, 0x10045u);
+}
+
+// ===========================================================================
 // 1. LoadPersonIndexTable — map-tile / scene-node 67-stride records.
 // ===========================================================================
 TEST(io_save_world, person_index_table_roundtrip) {
@@ -371,4 +420,245 @@ TEST(io_save_world, character_slot_roundtrip_1003B) {
     u16 w140; std::memcpy(&w140, rec + 140, 2);
     u16 e140; std::memcpy(&e140, expect + 140, 2);
     CHECK_EQ((u32)w140, (u32)e140);
+}
+
+// ===========================================================================
+// Wave-11 hardening: malformed / truncated / oversized save streams. Each loader
+// must fail safely (return false) on a short read and never read/write OOB. The
+// in-bounds roundtrips above are unchanged.
+//
+// NOTE (BEHAVIORAL — needs MCP): LoadPersonIndexTable trusts the file `count` and
+// LoadCityRecords trusts each record's leading `marker` as a direct slot index
+// into fixed-capacity buffers (sceneTiles: 8192 entries; personBase: 768). A save
+// with count > 8192 or marker >= 768 would scatter past the buffer — exactly as
+// the original engine's unbounded write into dword_13CE290 / word_12CE910. Whether
+// the binary clamps the index is a 1:1 question; these tests deliberately stay at
+// or below capacity and exercise the truncation guards instead. Do NOT add a
+// clamp without confirming the original had one.
+// ===========================================================================
+
+// LoadPersonIndexTable: count of 0 reads nothing and succeeds (empty table).
+TEST(io_save_world, person_index_empty_count) {
+    Stream s; s.u32v(0);
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 tiles[guild::io::kSceneTileScanBytes];
+    std::memset(tiles, 0, sizeof tiles);
+    u32 count = 0xDEAD;
+    bool ok = LoadPersonIndexTable(h, tiles, &count);
+    VfsCloseStream(h);
+    CHECK(ok);
+    CHECK_EQ(count, 0u);
+}
+
+// LoadPersonIndexTable: count says 4 but the stream is truncated mid-record ->
+// the per-field RD fails and the loader returns false (no OOB read).
+TEST(io_save_world, person_index_truncated_midrecord) {
+    Stream s;
+    s.u32v(4);                 // claims 4 records...
+    // ...but supply only ~1.5 records of bytes (record is 51 wire bytes).
+    for (int k = 0; k < 51 + 20; ++k) s.u8v((u8)k);
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 tiles[guild::io::kSceneTileScanBytes];
+    std::memset(tiles, 0, sizeof tiles);
+    u32 count = 0;
+    bool ok = LoadPersonIndexTable(h, tiles, &count);
+    VfsCloseStream(h);
+    CHECK(!ok);                // short read -> safe failure
+}
+
+// LoadPersonIndexTable: 0-byte stream (cannot even read the count) -> false.
+TEST(io_save_world, person_index_zero_byte) {
+    Stream s;                  // empty
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 tiles[guild::io::kSceneTileScanBytes];
+    u32 count = 0;
+    bool ok = LoadPersonIndexTable(h, tiles, &count);
+    VfsCloseStream(h);
+    CHECK(!ok);
+}
+
+// LoadPersonIndexTable: capacity-boundary. Writing the very last in-range slot
+// (index kSceneTileCapacity-1) must stay inside sceneTiles[] (ASAN watches the
+// upper bound). We only build the header + that many records' worth of zero
+// bytes; success means the highest write landed at the last valid stride.
+TEST(io_save_world, person_index_capacity_boundary) {
+    const int cap = guild::io::kSceneTileCapacity;     // 8192
+    Stream s;
+    s.u32v(cap);                                        // exactly capacity records
+    s.zeros((u32)cap * 51u);                            // 51 wire bytes each
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 tiles[guild::io::kSceneTileScanBytes];
+    std::memset(tiles, 0, sizeof tiles);
+    u32 count = 0;
+    bool ok = LoadPersonIndexTable(h, tiles, &count);  // last slot == cap-1
+    VfsCloseStream(h);
+    CHECK(ok);
+    CHECK_EQ(count, (u32)cap);
+}
+
+// LoadGlobalCounters: truncated stream (fewer than 16 full records) -> false.
+TEST(io_save_world, global_counters_truncated) {
+    Stream s;
+    for (int k = 0; k < 100; ++k) s.u8v((u8)k);   // far short of 16*152
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 counters[guild::io::kBuildCounterStride * 16];
+    std::memset(counters, 0, sizeof counters);
+    bool ok = LoadGlobalCounters(h, counters, 0x1003B);
+    VfsCloseStream(h);
+    CHECK(!ok);
+}
+
+// LoadCityRecords: count=0 -> reads only the preamble, succeeds, no record writes.
+TEST(io_save_world, city_records_empty_count) {
+    const u32 ver = 0x1003B;
+    Stream s;
+    s.u16v(0x1234);   // word_63CC5C
+    s.i32v(0);        // count = 0
+    s.u32v(0); s.u32v(0);              // idA / idB
+    for (int i = 0; i < 8; ++i) s.u32v(0);  // handlers (>=0x10017)
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 persons[536 * guild::io::kCityRecCapacity];
+    std::memset(persons, 0, sizeof persons);
+    u16 marker = 0; u32 count = 0xDEAD, a = 0, b = 0, hh[8] = {};
+    bool ok = LoadCityRecords(h, persons, ver, &marker, &count, &a, &b, hh);
+    VfsCloseStream(h);
+    CHECK(ok);
+    CHECK_EQ(count, 0u);
+    CHECK_EQ((u32)marker, 0x1234u);
+}
+
+// LoadCityRecords: count=1 but the stream is truncated mid-record -> false.
+TEST(io_save_world, city_records_truncated_midrecord) {
+    const u32 ver = 0x1003B;
+    Stream s;
+    s.u16v(0); s.i32v(1);             // count = 1
+    s.u32v(0); s.u32v(0);
+    for (int i = 0; i < 8; ++i) s.u32v(0);
+    s.u16v(0);                         // record marker = slot 0 ...
+    for (int k = 0; k < 12; ++k) s.u8v(0);  // ...then truncate (record is 536-ish)
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 persons[536 * guild::io::kCityRecCapacity];
+    std::memset(persons, 0, sizeof persons);
+    u16 marker = 0; u32 count = 0, a = 0, b = 0, hh[8] = {};
+    bool ok = LoadCityRecords(h, persons, ver, &marker, &count, &a, &b, hh);
+    VfsCloseStream(h);
+    CHECK(!ok);
+}
+
+// LoadBuildingSlotTables: truncated stream -> false (a sub-record RD short-reads).
+TEST(io_save_world, building_slot_tables_truncated) {
+    Stream s;
+    for (int k = 0; k < 200; ++k) s.u8v((u8)k);   // far short of the full table
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 slotScratch[7952 * 5];
+    static u8 infoScratch[756 * 4];
+    std::memset(slotScratch, 0, sizeof slotScratch);
+    std::memset(infoScratch, 0, sizeof infoScratch);
+    bool ok = LoadBuildingSlotTables(h, slotScratch, infoScratch, 0x1003B);
+    VfsCloseStream(h);
+    CHECK(!ok);
+}
+
+// LoadCharacterSlot: header-only / truncated -> false; null args rejected.
+TEST(io_save_world, character_slot_truncated_and_null) {
+    Stream s; s.i32v(7);   // index only, no body
+    VfsBytes vb(s.b);
+    VfsHandle* h = vb.reader();
+    static u8 rec[516];
+    std::memset(rec, 0, sizeof rec);
+    i32 idx = 0; u32 pid = 0;
+    // null stream / null record rejected up front (before touching the stream).
+    CHECK(!LoadCharacterSlot(nullptr, rec, 0x1003B, &idx, &pid));
+    CHECK(!LoadCharacterSlot(h, nullptr, 0x1003B, &idx, &pid));
+    bool ok = LoadCharacterSlot(h, rec, 0x1003B, &idx, &pid);
+    VfsCloseStream(h);
+    CHECK(!ok);
+}
+
+// ===========================================================================
+// 7. RelinkPersonRecordColumns @0x5abb84 (the person-record column slice
+//    0x5abbe2..0x5abc4f) — the four-column transform, golden-pinned with
+//    constructed link ids (-1 / hit / miss / 0). Recovered from the live MCP
+//    decompile (wave-15):
+//      +364 (v7[91]) / +368 (v7[92]): id == -1 -> 0 (@0x5abc00/0x5abc15);
+//        else GameObject_ResolveEntityById(&col, 0, id, 0) @0x5abe22/0x5abe38,
+//        which scans the 169-stride OBJECT/BUILDING array dword_13CE298 (id @+1,
+//        == VIBE_Building_FindById's scan): hit keeps the id, miss -> 0. There
+//        is NO `id == 0` special case in the binary.
+//      +380 (v7[95]): id == -1 -> 0; else He_FindFirstHandlerByFilter(1,1,id)
+//        @0x5abe4f, which on the partial .cty path (no He records) returns 0.
+//      +388 (v7[97]): 0 unconditionally (@0x5abc3d).
+//    Gate (@0x5abb8e): dword_6498E4 (player id) must resolve via
+//    Person_FindRecordById, else nothing is relinked (returns false).
+// ===========================================================================
+TEST(io_save_world, relink_columns_resolve_clear_he_zero) {
+    guild::sim::ResetEntityArrays();
+
+    // Live object/building array: one record with id 0x4242 (BuildingFindById
+    // hit). The binary resolves any id != -1 against this 169-stride array.
+    guild::sim::g_objects[0].alive = 1;
+    guild::sim::g_objects[0].id    = 0x4242;
+    guild::sim::g_personArrayLoaded = true;
+
+    // Player record (the relink gate): marker live, id 0x77 in the parallel
+    // id column so PersonFindRecordById(0x77) resolves.
+    guild::sim::g_persons[0].marker = 1;
+    guild::sim::g_persons[0].id     = 0x77;
+    guild::sim::g_personIds[0]      = 0x77;
+
+    // Two more live person records carrying the link columns under test.
+    auto setCols = [](int slot, i32 c364, i32 c368, i32 c380, i32 c388) {
+        guild::sim::g_persons[slot].marker = 1;
+        guild::sim::g_persons[slot].id     = 0x100 + slot;
+        guild::sim::g_personIds[slot]      = 0x100 + slot;
+        u8* r = reinterpret_cast<u8*>(&guild::sim::g_persons[slot]);
+        std::memcpy(r + 364, &c364, 4);
+        std::memcpy(r + 368, &c368, 4);
+        std::memcpy(r + 380, &c380, 4);
+        std::memcpy(r + 388, &c388, 4);
+    };
+    // slot 1: +364 = -1 (->0), +368 = hit 0x4242 (kept), +380 = 9 (He miss ->0),
+    //         +388 = 5 (-> always 0).
+    setCols(1, -1, 0x4242, 9, 5);
+    // slot 2: +364 = miss 0xDEAD (->0), +368 = hit 0x4242 (kept), +380 = -1 (->0),
+    //         +388 = -1 (-> always 0).
+    setCols(2, 0xDEAD, 0x4242, -1, -1);
+
+    // A free slot (marker == -1) must be skipped entirely.
+    guild::sim::g_persons[3].marker = -1;
+    i32 untouched = 0x1234;
+    std::memcpy(reinterpret_cast<u8*>(&guild::sim::g_persons[3]) + 364, &untouched, 4);
+
+    const bool relinked = RelinkPersonRecordColumns(0x77);
+    CHECK(relinked);
+
+    auto col = [](int slot, int off) {
+        i32 v; std::memcpy(&v,
+            reinterpret_cast<u8*>(&guild::sim::g_persons[slot]) + off, 4);
+        return v;
+    };
+    // slot 1
+    CHECK_EQ(col(1, 364), 0);          // -1 -> 0
+    CHECK_EQ(col(1, 368), 0x4242);     // hit kept
+    CHECK_EQ(col(1, 380), 0);          // He miss -> 0
+    CHECK_EQ(col(1, 388), 0);          // always 0
+    // slot 2
+    CHECK_EQ(col(2, 364), 0);          // miss -> 0
+    CHECK_EQ(col(2, 368), 0x4242);     // hit kept
+    CHECK_EQ(col(2, 380), 0);          // -1 -> 0
+    CHECK_EQ(col(2, 388), 0);          // always 0
+    // free slot untouched
+    CHECK_EQ(col(3, 364), 0x1234);
+
+    // Gate: an unresolvable player id relinks nothing and returns false.
+    guild::sim::ResetEntityArrays();
+    CHECK(!RelinkPersonRecordColumns(0x999));
 }

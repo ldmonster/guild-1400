@@ -314,3 +314,70 @@ TEST(AiPlannerMethod, PrepareGroupMember) {
 TEST(AiPlannerMethod, AlwaysAllow) {
     CHECK_EQ(ai::AlwaysAllow(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Consume+restock pickers (PickRandomNeedAndClearGroup{,B}) — golden vs. the
+// binary's two-RandNext draw order, the unk_647728 {scale,cap} table and the
+// trunc(cap*0.5) / trunc(mag*scale) ConvertX truncation (gilde.exe 0x58aea8 /
+// 0x58b0cc). Goldens computed against the LCG (see header).
+// ---------------------------------------------------------------------------
+namespace {
+struct CapturingHook : ai::NeedsCommandHook {
+    u32 lastNeedWord = 0;
+    i32 lastDelta = 0;
+    int emits = 0, adjusts = 0;
+    void EmitNeedDelta(i32, u32 nw) override { lastNeedWord = nw; ++emits; }
+    void AdjustStock(i16, i32 d) override { lastDelta = d; ++adjusts; }
+};
+} // namespace
+
+TEST(AiPlannerNeeds, RestockGroupAGolden) {
+    // needWord=0 -> all four low-group slots eligible (bits clear). ids {2,3,4,5}.
+    //  seed=1     -> slot/idx -> id4, bound=trunc(4*0.5)=2, mag=0 -> zeromag, ret 0
+    //  seed=7     -> id2, mag=6, amount=trunc(6*15)=90
+    //  seed=42    -> id3, mag=1, amount=20
+    //  seed=1000  -> id4, mag=1, amount=10
+    //  seed=12345 -> id2, mag=4, amount=60
+    struct { u32 seed; u8 id; int amount; } g[] = {
+        {1, 0, 0}, {7, 2, 90}, {42, 3, 20}, {1000, 4, 10}, {12345, 2, 60},
+    };
+    for (auto& c : g) {
+        crt::Srand(c.seed);
+        ai::NeedAgent a; a.type = 7; a.id = 77; a.needWord = 0;
+        CapturingHook h;
+        u8 id = ai::PickRandomNeedAndClearGroup(a, &h);
+        CHECK_EQ((int)id, (int)c.id);
+        if (c.id) { CHECK_EQ(h.lastDelta, -c.amount); CHECK_EQ(h.adjusts, 1); }
+        else      { CHECK_EQ(h.adjusts, 0); }  // bailed before emit
+    }
+}
+
+TEST(AiPlannerNeeds, RestockGroupBGolden) {
+    // needWord=0 -> all four high-group slots eligible. ids {5,6,7,8}.
+    //  seed=1     -> id7, mag=2, amount=10,  needWord -> 0x200000
+    //  seed=7     -> id5, mag=2, amount=0 (scale 0), needWord -> 0x1000000 (still picks)
+    //  seed=42    -> id6, mag=1, amount=8,  needWord -> 0x20000
+    //  seed=1000  -> id7, mag=3, amount=15, needWord -> 0x300000
+    //  seed=12345 -> id5, mag=0 -> zeromag, ret 0
+    struct { u32 seed; u8 id; int amount; u32 nw; bool ok; } g[] = {
+        {1, 7, 10, 0x200000u, true},
+        {7, 5, 0,  0x1000000u, true},
+        {42, 6, 8, 0x20000u, true},
+        {1000, 7, 15, 0x300000u, true},
+        {12345, 0, 0, 0u, false},
+    };
+    for (auto& c : g) {
+        crt::Srand(c.seed);
+        ai::NeedAgent a; a.type = 3; a.id = 88; a.needWord = 0;
+        CapturingHook h;
+        u8 id = ai::PickRandomNeedAndClearGroupB(a, &h);
+        CHECK_EQ((int)id, (int)c.id);
+        if (c.ok) {
+            CHECK_EQ(h.lastDelta, -c.amount);
+            CHECK_EQ((unsigned)h.lastNeedWord, (unsigned)c.nw);
+            CHECK_EQ(h.adjusts, 1);
+        } else {
+            CHECK_EQ(h.adjusts, 0);
+        }
+    }
+}

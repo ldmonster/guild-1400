@@ -8,6 +8,7 @@
 #include "test.h"
 
 #include "render/texture_bin.h"
+#include "render/texture_palettize.h"
 #include "render/bmp.h"
 
 #include <cstdint>
@@ -150,4 +151,65 @@ TEST(TextureBin, NameStemAndResolve) {
     const render::DecodedBmp* viaName = bin.Decode("mytex");     // resolve+decode
     CHECK(viaName != nullptr);
     if (viaName) CHECK_EQ(viaName->width, 4);
+}
+
+// ---------------------------------------------------------------------------
+// W10-TEX hardening — malformed / truncated / empty BMP buffers must decode to
+// ok=false without OOB reads (the codec front-end is the archive's trust edge).
+// ---------------------------------------------------------------------------
+TEST(TextureBinEdge, MalformedBuffersRejected) {
+    // Empty buffer.
+    {
+        std::vector<u8> empty;
+        render::DecodedBmp d = render::DecodeBmpBuffer(empty);
+        CHECK(!d.ok);
+    }
+    // Too short for a header.
+    {
+        std::vector<u8> tiny = {'B', 'M', 0, 0};
+        render::DecodedBmp d = render::DecodeBmpBuffer(tiny);
+        CHECK(!d.ok);
+    }
+    // Valid header but TRUNCATED pixel data (24-bit, claims 4x4 but no rows).
+    {
+        std::vector<u8> bmp = Make24();
+        bmp.resize(54);                          // drop all pixel bytes
+        render::DecodedBmp d = render::DecodeBmpBuffer(bmp);
+        CHECK(!d.ok);                            // BmpLoadBuffer rejects short data
+    }
+    // Garbage (non-"BM") magic.
+    {
+        std::vector<u8> junk(128, 0xCD);
+        render::DecodedBmp d = render::DecodeBmpBuffer(junk);
+        CHECK(!d.ok);
+    }
+    // DecodeBuffer through the cache path with a malformed buffer: returns null,
+    // does not crash, and the synthetic name is still indexed by Resolve.
+    {
+        render::TextureBin bin;
+        std::vector<u8> bad(60, 0);
+        bad[0] = 'B'; bad[1] = 'M';
+        const render::DecodedBmp* d = bin.DecodeBuffer("Bad/X.BMP", bad);
+        CHECK(d == nullptr);
+    }
+}
+
+// A decoded 24-bit BMP fed straight to PalettizeDecodedBmp (the texture_asset
+// path) gains indices + palette; an 8-bit decode is left as indices already.
+TEST(TextureBinEdge, DecodeThenPalettizeWiring) {
+    std::vector<u8> bmp = Make24();
+    render::DecodedBmp d = render::DecodeBmpBuffer(bmp);
+    CHECK(d.ok);
+    CHECK_EQ(d.bpp, 24);
+    CHECK(d.indices.empty());                    // 24-bit decode has no indices yet
+    CHECK(render::PalettizeDecodedBmp(d));        // quantize in place
+    CHECK_EQ((int)d.indices.size(), 16);
+    CHECK_EQ((int)d.palette.size(), 768);
+    // 8-bit source already carries indices -> palettize is a no-op.
+    u8 pal[256 * 3];
+    std::vector<u8> b8 = Make8(pal);
+    render::DecodedBmp d8 = render::DecodeBmpBuffer(b8);
+    CHECK(d8.ok);
+    CHECK(!d8.indices.empty());
+    CHECK(!render::PalettizeDecodedBmp(d8));      // already has indices
 }

@@ -72,9 +72,11 @@ int FindNearestEntryToPoint(int* a1, int a2, int a3, float a4, float* a5, float 
                         double dy = (double)a3 - F(v11, 20);
                         double v14 = dx * dx + dy * dy;
                         if (v14 < (double)v27) {
-                            double scale = (kEntryScale != 0.0f) ? kEntryScale : 1.0f;
+                            // Binary: v15 = sqrt(v19) / a4 * (*(v11+8) / flt_13FCF3C)
+                            // — an UNCONDITIONAL divide by the runtime scale global
+                            // (kEntryScale mirrors flt_13FCF3C). No != 0 ? : 1.0 guard.
                             float v15 = (float)(std::sqrt((double)(float)v14) / a4 *
-                                                (F(v11, 8) / scale));
+                                                (F(v11, 8) / kEntryScale));
                             if (v15 < v32) {
                                 int v16 = v33 * (v10 / v8) + a1[1] * i;
                                 if (v16 < *a1) {
@@ -110,10 +112,12 @@ int BlendSubdivideTerrain(unsigned char* a1, int a2, int a3, int a4, int a5, int
     int result = a4;
     if (a6 == 1) return result;
 
+    // 0x5c39ab/0x5c3a13: if (cr < 0.0 || 255.0 >= cr) take max(cr,0); else 255.
+    // i.e. the 255 branch fires ONLY for cr > 255; negative cr clamps to 0.
     auto clampU8 = [](double v) -> unsigned char {
-        if (!(v < 0.0) && (double)kHeightMax >= v) {
+        if (v < 0.0 || (double)kHeightMax >= v) {
             double r = (v >= 0.0) ? v : 0.0;
-            return (unsigned char)(int)r;
+            return (unsigned char)(int)r;   // ConvertX truncates toward zero
         }
         return (unsigned char)(int)kHeightMax;
     };
@@ -260,15 +264,20 @@ double ProjectPointToView(int* a1, const float* a2, const float* a3) {
         v19 = (float)v32;
     }
 
-    // Scan the 4 box plane-normals (flt_13DCE00 table, 4 rows of 4) against the
-    // 4 escape distances (&v32 in the original; here {v32,v36,v40,v44}); pick the
-    // smallest positive parameter > v19. The plane table is a runtime global; the
-    // image initialises it to zero, so without it the loop finds no intersection
-    // and the function returns |v19| — which we reproduce faithfully.
+    // 0x5c448f..0x5c4539: the original then scans the active view-frustum plane
+    // table flt_13DCE00 (5 rows x 4 floats, terminated at &dword_13DCE50) against
+    // the 4 escape distances {v32,v36,v40,v44}: for each plane, v23 = dot(plane,
+    // faceDir); if (v23 < dbl_628B8C || bits(v23) > 869711765) then candidate =
+    // dist/v23 and keep the smallest candidate that is >0, >v19 and <v26 (init
+    // 1e10). flt_13DCE00 is NOT a static constant — VIBE_Render_BuildViewMatrix
+    // (0x5accd0) repopulates it every frame. It is owned by the view-matrix builder
+    // which is OUTSIDE this module's reconstruction scope, so it cannot be sourced
+    // faithfully here. BOUNDARY: we reproduce the image-default (table all-zero)
+    // path, where v23==0 fails both predicates for every plane, v26 stays 1e10, and
+    // the function returns fabs(v19). The box-face projection math above is 1:1.
     float v26 = (float)kBigDist;
-    // (plane table flt_13DCE00 is zero in the static image -> no update)
-    (void)kRayDot;
-    if ((double)v26 != 1.0e10) {
+    (void)kRayDot;        // dbl_628B8C predicate constant (used by the deferred loop)
+    if ((double)v26 != (double)kBigDist) {   // dbl_628B84 == 1e10
         return v26;
     }
     return (float)std::fabs(v19);

@@ -299,6 +299,7 @@ TEST(CutsceneMisc2, SetupSkyBuildsPair) {
     CutsceneSetupSky(nullptr);
     CHECK_EQ(CutsceneSkyState().sky, g_skyObj);
     CHECK_EQ(CutsceneSkyState().layer, g_layerObj);
+    CHECK_EQ(CutsceneSkyState().mirror, g_skyObj);   // dword_64A7C8 = dword_6315F0
     CHECK_EQ(g_configCalls, 1);
 }
 
@@ -322,11 +323,15 @@ TEST(CutsceneMisc2, DestroySkyRemovesLayerThenDestroys) {
     SetCutscene2Hooks(&h);
     CutsceneSkyState().sky = g_skyObj;
     CutsceneSkyState().layer = g_layerObj;
+    CutsceneSkyState().mirror = g_skyObj;          // SetupSky would have set this
     CutsceneDestroySky();
     CHECK_EQ(g_removeCalls, 1);
     CHECK_EQ(g_destroyCalls, 1);
-    CHECK_EQ(CutsceneSkyState().sky, (void*)nullptr);
-    CHECK_EQ(CutsceneSkyState().layer, (void*)nullptr);
+    // gilde.exe 0x4aa740: DestroySky zeroes ONLY the mirror (dword_64A7C8); it does
+    // NOT clear dword_6315F0 (sky) or dword_6315EC (layer). Verified vs disasm.
+    CHECK_EQ(CutsceneSkyState().mirror, (void*)nullptr);
+    CHECK_EQ(CutsceneSkyState().sky, g_skyObj);
+    CHECK_EQ(CutsceneSkyState().layer, g_layerObj);
 }
 
 TEST(CutsceneMisc2, DestroySkyNoLayerSkipsRemove) {

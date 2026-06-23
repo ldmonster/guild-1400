@@ -76,13 +76,17 @@ TEST(CharActionMiscE2E, IdleFindNeighbourSpawnsTalk) {
     CHECK_EQ(a.actions->args[3], 9);         // scene/slot id
 }
 
-TEST(CharActionMiscE2E, IdleNoNeighbourClearsDirtyMesh) {
+// gilde.exe 0x405148 (idle branch): the `&= ~8` clear at 0x4054a9 happens ONLY in
+// the NOT-eligible branch.  An eligible character whose neighbour scan finds nobody
+// (FindNearbyInRadius == 0, 0x405418) falls through WITHOUT clearing +140&8 — there
+// is no `&= ~8` on the eligible path.  So the dirty-mesh bit is PRESERVED here.
+TEST(CharActionMiscE2E, IdleEligibleNoNeighbourKeepsDirtyMesh) {
     RegisterHandlers();
     ResetCharacters();
     g_soc = SocRec{};
     SetSocialHooks(&kSoc);
 
-    // Lone character, far from anyone -> no talk action, dirty-mesh cleared.
+    // Lone character, far from anyone -> no talk action; dirty-mesh stays set.
     SocialAvatar av;
     MakeAvatar(av, 1, 1, 0.0f, 0.0f, 0.0f);
     Character a;
@@ -95,7 +99,29 @@ TEST(CharActionMiscE2E, IdleNoNeighbourClearsDirtyMesh) {
     g_gameTick = 1;
     CharacterUpdate();
     CHECK(a.actions == nullptr);             // no neighbour -> no talk
-    CHECK((a.flagsA & 0x08) == 0);           // dirty-mesh cleared
+    CHECK((a.flagsA & 0x08) != 0);           // eligible path does NOT clear +140&8
+}
+
+// The flag clear only fires when the character is INELIGIBLE (e.g. sitting, +140&0x20):
+// 0x4054a9  *(_BYTE *)(ch + 140) &= ~8u.
+TEST(CharActionMiscE2E, IdleIneligibleClearsDirtyMesh) {
+    RegisterHandlers();
+    ResetCharacters();
+    g_soc = SocRec{};
+    SetSocialHooks(&kSoc);
+
+    SocialAvatar av;
+    MakeAvatar(av, 1, 1, 0.0f, 0.0f, 0.0f);
+    Character a;
+    std::memset(&a, 0, sizeof(a));
+    a.social = &av;
+    a.scene = reinterpret_cast<void*>(1);
+    a.flagsA = 0x08 | 0x20;                  // dirty-mesh set + sitting -> ineligible
+    g_characters[0] = &a; g_characterCount = 1;
+
+    g_gameTick = 1;
+    CharacterUpdate();
+    CHECK((a.flagsA & 0x08) == 0);           // ineligible branch clears +140&8
 }
 
 TEST(CharActionMiscE2E, IdleIneligibleWhenSitting) {

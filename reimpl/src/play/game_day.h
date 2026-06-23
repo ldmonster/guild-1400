@@ -42,7 +42,7 @@
 //   [22] MeisterProcessBuildingNeeds-> RunAiTurn     (0x533510 building needs)
 //   [23] TurnEndCoord27Broadcast   -> RunAiTurn      (0x533523 coord-27 ring)
 //   [24] HistoryDisplayCurrentEvent-> RunEventsTurn  (0x5336b3 chronicle the day)
-//   [25] CharacterSyncAllTurnStates-> RunAiTurn      (0x5336e1 turn-state sync)
+//   [25] CharacterSyncAllTurnStates-> RunAiTurn      (0x5320f0 turn-state sync)
 //
 // The composition collapses to THREE sub-turn invocations driven at their correct
 // positions in the day (each sub-turn internally replays its own slice of the

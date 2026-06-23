@@ -302,3 +302,37 @@ TEST(GuiCore, GetChildObjectIdDirectWindow) {
     CHECK_EQ(Form_GetChildObjectId(-1, w, 1), c1);
     CHECK_EQ(Form_GetChildObjectId(-1, w, 5), -1); // out of range
 }
+
+// ===== Wave-11 hardening: out-of-range slots + pool exhaustion (ASAN/UBSAN) ==========
+
+TEST(GuiCoreHarden, WindowDestroyOutOfRangeSlot) {
+    Reset();
+    // kMaxWindows == 96; valid slots are 0..95. The old bound (slot > kMaxWindows) let
+    // slot==96 index g_windows[96] (OOB). Negatives must also be rejected.
+    CHECK_EQ(Window_Destroy(96), 0);   // == kMaxWindows: was OOB, now rejected
+    CHECK_EQ(Window_Destroy(95), 0);   // in range but free -> 0 (no crash)
+    CHECK_EQ(Window_Destroy(-1), 0);
+    CHECK_EQ(Window_Destroy(1000000), 0);
+}
+
+TEST(GuiCoreHarden, WindowCreateWhenWidgetPoolExhausted) {
+    Reset();
+    // Fill the entire widget pool, then create a window. Window_Create needs a backing
+    // widget; AllocSlot returns -1, and the old code dereferenced g_widgets[-1] (OOB
+    // write). The guard must make Window_Create fail cleanly instead.
+    for (int i = 0; i < kMaxWidgets; ++i)
+        CHECK(Widget_AllocSlot() >= 0);
+    CHECK_EQ(Widget_AllocSlot(), -1); // pool full
+    int s = Window_Create(0, 0, 10, 10, 0);
+    CHECK_EQ(s, -1);                   // no backing widget -> safe failure (no OOB)
+}
+
+TEST(GuiCoreHarden, AddToWindowWhenWidgetPoolExhausted) {
+    Reset();
+    int w = Window_Create(0, 0, 100, 100, 0); // consumes one widget (the backing widget)
+    CHECK(w >= 0);
+    // Exhaust the rest of the widget pool.
+    while (Widget_AllocSlot() >= 0) {}
+    // Adding a child now fails (AllocSlot -1) without writing g_widgets[-1].
+    CHECK_EQ(Object_AddToWindow(w, 0, 0, 0), -1);
+}

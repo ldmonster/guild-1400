@@ -67,8 +67,9 @@ std::string RunDailySupervision(int currentDay) {
     // 5) idle-staff flag pass (2 idle slots + 1 trailing probe slot).
     guild::ai::BuildingFlag bflag;
     std::vector<guild::ai::StaffSlot> slots(3);
-    slots[0].live = true; slots[0].employed = true; slots[0].gaugeA = 50; slots[0].gaugeB = 50;
-    slots[1].live = true; slots[1].employed = true; slots[1].gaugeA = 60; slots[1].gaugeB = 60;
+    // owner gate (0x45e09b): slot.ownerBuildId must match the building id (100).
+    slots[0].live = true; slots[0].ownerBuildId = 100; slots[0].employed = true; slots[0].gaugeA = 50; slots[0].gaugeB = 50;
+    slots[1].live = true; slots[1].ownerBuildId = 100; slots[1].employed = true; slots[1].gaugeA = 60; slots[1].gaugeB = 60;
     int flagged = guild::ai::FlagIdleStaff(&bflag, 100, slots.data(), 2, hk);
     Logf("IDLEFLAG", flagged, (slots[0].flags & 0x10) ? 1 : 0);
 
@@ -129,7 +130,8 @@ TEST(MeisterSupervisionItest, RunBuildingTasksDispatch) {
     emps[1].personId = 602; emps[1].trade = 7; emps[1].curHealth = 10; emps[1].maxHealth = 100;
     guild::ai::BuildingFlag bf;
     std::vector<guild::ai::StaffSlot> slots(3);
-    slots[0].live = true; slots[0].employed = true; slots[0].gaugeA = 50; slots[0].gaugeB = 50;
+    // owner gate: slot.ownerBuildId must match ctx.masterBuildId (500).
+    slots[0].live = true; slots[0].ownerBuildId = 500; slots[0].employed = true; slots[0].gaugeA = 50; slots[0].gaugeB = 50;
 
     guild::ai::SupervisionContext ctx;
     ctx.masterBuildId = 500; ctx.currentDay = 50;

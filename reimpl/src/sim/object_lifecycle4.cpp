@@ -406,6 +406,12 @@ int ObjectFreeSubMeshData(SubMeshEntry* entry) {
 //   *(node+460) = 0;
 //   return node;
 // ---------------------------------------------------------------------------
+// RETURN NOTE (disasm 0x5b0da0): the original returns eax = the input node on
+// the null-drawData path, and eax = VIBE_Memory_FreeDebug's return on the freed
+// path. FreeDebug is a void hook here, so its eax is unavailable; we return 1
+// (the header's documented stand-in). The node-side effects are 1:1. The sole
+// caller VIBE_Object_DisposeResources tail-returns this, and its own callers
+// likewise do not branch on the value.
 int ObjectFreeDrawData(ObjNode4* node) {
     if (node->drawData) {
         auto* dd = static_cast<DrawData*>(node->drawData);
@@ -435,7 +441,10 @@ int ObjectFreeDrawData(ObjNode4* node) {
 //   return result;
 // ---------------------------------------------------------------------------
 // Free+realloc polys (40 * pointCount) THEN points (80 * (polyCount+8)).
-// Returns the points block.
+// Returns the points block. (disasm 0x5b0c10: on the no-op path the original
+// returns eax = the input `entry` pointer; we return `entry->points` instead —
+// observationally dead, no caller uses the no-op return. Active-path return is
+// the freshly-alloc'd points block, faithful.)
 void* ObjectAllocPolysAndPoints(SubMeshEntry* entry) {
     void* result = entry->points;
     if (entry->polyCount && entry->pointCount) {
@@ -512,8 +521,19 @@ char ObjectApplyTransparencyTree(ObjNode4* node, int alpha) {
 //   return result;
 // ---------------------------------------------------------------------------
 // *(node+7281) lies outside the 540-byte ObjNode4 block, so the byte is passed
-// by pointer (the original reads/writes node+7281 directly). Returns the
-// resulting +7281 byte after a swap, else `newNibble` when unchanged.
+// by pointer (the original reads/writes node+7281 directly).
+//
+// RETURN-VALUE NOTE (disasm 0x5c4634, verified): the original's return is
+//   * unchanged path:  the new nibble `a2` (== `newNibble`);
+//   * changed path:    the *return value of the floor leaves* — eax from
+//     VIBE_Floor_AllocInflateBuffers (no rebuild) or VIBE_Floor_BuildTilePolys
+//     (rebuild). Those leaves (0x5bce10 / 0x5bc45c) are NOT reconstructed here;
+//     they are routed through the void floor hooks, so their eax is unavailable.
+//   Both live callers (VIBE_Cutscene_LoadScene 0x4aa2e8 and
+//   VIBE_Object_UpdateBuildingVisualState 0x506d26) DISCARD the return, so the
+//   value is observationally dead. We model the changed-path return as the
+//   resulting +7281 byte (a stable, testable stand-in for the unavailable
+//   leaf eax); the unchanged path returns `newNibble` faithfully.
 u8 ObjectSetLowNibbleFlag(u8* tileByte, u8 newNibble, bool rebuild,
                           ObjNode4* node) {
     u8 v5 = static_cast<u8>(*tileByte & 0x0Fu);
@@ -534,9 +554,12 @@ u8 ObjectSetLowNibbleFlag(u8* tileByte, u8 newNibble, bool rebuild,
 }
 
 // ===========================================================================
-// gilde.exe 0x567520 — VIBE_Object_MarkState2
+// gilde.exe 0x567520 — VIBE_Object_MarkState2  (__thiscall, ecx = this)
 // ===========================================================================
-//   VIBE_Command_RequestBuildOp90_Thunk(this, 2);  return 1;
+//   VIBE_Command_RequestBuildOp90_Thunk(*(this+4), 2);  return 1;
+// disasm: `mov edx,2; mov eax,[eax+4]; call thunk`. The thunk's first arg is
+// the pointer field at this+4 (a gameplay/command object, NOT an ObjNode4),
+// edx=2. The build-op thunk is a void hook; arg-1 is passed as `node` here.
 int ObjectMarkState2(ObjNode4* node) {
     if (g_hooks.requestBuildOp) g_hooks.requestBuildOp(node, 2);
     return 1;

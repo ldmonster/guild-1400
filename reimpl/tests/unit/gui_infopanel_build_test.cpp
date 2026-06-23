@@ -243,3 +243,57 @@ TEST(GuiInfoPanelBuild, ResetDetailSlots) {
     InfoPanel_SetHost(nullptr);
 }
 
+
+// ===== Wave-11 hardening: out-of-range widget ids + detail-slot count clamp ==========
+
+namespace {
+// A host that hands out deliberately out-of-range widget ids (negative and far past the
+// 511-slot widget array). SetWidgetFlag/SetWidgetRef736 must bounds-check before writing
+// g_widgets[id] (a tooltip/panel built from a bad entity record must not corrupt memory).
+struct BadIdHost : InfoPanelHost {
+    int LoadForm(const char*) override { return 7; }
+    void SelectWindow(int, int) override {}
+    int CurrentWindowHalfHeight() override { return 50; }
+    void RenderRichString(const char*) override {}
+    int AddObject(int, int, int) override { return 999999; } // way past kMaxWidgets
+    int AddSprite(int, int, int) override { return -42; }    // negative
+    int AddSlider(int, int, int, int, int, int, int) override { return -1; }
+    void SetColor(int, int) override {}
+    void SetTextColor(int, int) override {}
+    void SetValueOrText(int, int, int, int, int) override {}
+    void DestroyWidget(int) override {}
+    int BuildingUpgradeLevel(const void*) override { return 0; }
+};
+} // namespace
+
+TEST(GuiInfoPanelBuildHarden, OutOfRangeWidgetIdsDoNotCorruptMemory) {
+    ResetInfoPanelBuild();
+    BadIdHost h; InfoPanel_SetHost(&h);
+    // Build a building panel; the icon widget id (999999) and ref-736 write must be
+    // guarded. No OOB write -> ASAN clean.
+    InfoBuildingRecord bld{};
+    bld.code = 12;
+    bld.item = 5;
+    int form = InfoPanel_BuildBuilding(bld, 0, 0, false, true);
+    CHECK_EQ(form, 7);
+    // An object panel whose AddObject returns an out-of-range id.
+    ResetInfoPanelBuild();
+    InfoObjectRecord obj{};
+    obj.code = 30;
+    int f2 = InfoPanel_BuildObject(obj, nullptr, nullptr, false, false);
+    CHECK_EQ(f2, 7);
+    InfoPanel_SetHost(nullptr);
+}
+
+TEST(GuiInfoPanelBuildHarden, ResetDetailSlotsClampsCount) {
+    ResetInfoPanelBuild();
+    RecHost h; InfoPanel_SetHost(&h);
+    // detail[] has 4 slots; a caller-supplied count larger than 4 must be clamped so the
+    // teardown never walks past the array.
+    for (int i = 0; i < 4; ++i) g_infoPanel.detail[i] = 200 + i;
+    int cleared = InfoPanel_ResetDetailSlots(9999);
+    CHECK_EQ(cleared, 4);
+    int none = InfoPanel_ResetDetailSlots(-5); // negative -> no iterations, no OOB
+    CHECK_EQ(none, 0);
+    InfoPanel_SetHost(nullptr);
+}

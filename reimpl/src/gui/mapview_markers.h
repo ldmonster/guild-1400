@@ -73,11 +73,15 @@ struct MarkerRecord {
 };
 void CityMap_ApplyMarkerFlags(MarkerRecord& rec);
 
-// Mock sink for the 3D edges (bone-chain projection, universe attach, anim load).
+// Mock sink for the 3D edges (bone-chain projection, universe attach, light cache
+// rebuild, anim load) — in original call ORDER: ProjectThroughBoneChain (0x5194d4)
+// -> AttachToUniverse (0x5194e7) -> [flag writes] -> BuildLightCache (0x51952f) ->
+// LoadAnimation (0x51953b).
 struct CityMarkerSink {
     virtual ~CityMarkerSink() = default;
     virtual void ProjectThroughBoneChain() {}
     virtual void AttachToUniverse() {}
+    virtual void BuildLightCache() {} // VIBE_Light_BuildObjectCache @0x5c8218
     virtual void LoadAnimation(const char* /*baf*/) {}
 };
 void CityMap_SetMarkerSink(CityMarkerSink* sink);

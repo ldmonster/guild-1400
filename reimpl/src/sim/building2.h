@@ -77,9 +77,13 @@ TypeRecord* Building_LookupTypeRecordB(std::uint8_t code, TypeRecord* out);
 //   objectTypeBase   : dword_13CE27C (stride 65)  — object category table.
 //   charArrayBase    : dword_13CE298 (stride 169) — placed char/object slots.
 struct BuildingArrayBindings {
-    const std::uint8_t* buildingTypeBase = nullptr;  // dword_13CE294
-    const std::uint8_t* objectTypeBase   = nullptr;  // dword_13CE27C
-    const std::uint8_t* charArrayBase    = nullptr;  // dword_13CE298
+    const std::uint8_t* buildingTypeBase = nullptr;  // dword_13CE294 (stride 589)
+    const std::uint8_t* objectTypeBase   = nullptr;  // dword_13CE27C (stride 65)
+    const std::uint8_t* charArrayBase    = nullptr;  // dword_13CE298 (stride 169)
+    // gilde.exe word_12CE910 (stride 536) — the person/character "family" record
+    // array. MatchTypeCode/MatchProfessionCode read fields +356/+358/+361 of this
+    // array (NOT the 589-stride building-type table). Null base => no match.
+    const std::uint8_t* personFamilyBase = nullptr;  // word_12CE910 (stride 536)
 };
 void SetBuildingArrayBindings(const BuildingArrayBindings& b);
 const BuildingArrayBindings& BuildingArrays();
@@ -122,17 +126,20 @@ IBuilding2QueryHooks* Building2QueryHooks();
 // Type-record matchers (read the building-TYPE table at dword_13CE294).
 // ===========================================================================
 // gilde.exe 0x589960 — VIBE_Building_MatchTypeCode (__cdecl(u16 typeIndex, int n, ...))
-//   Reads the building-type record `typeIndex` (stride 589 from
-//   buildingTypeBase) and tests whether its byte at +356 (the high byte of the
-//   dword at +353) equals any of the `count` codes in `codes[]`. Returns 1 on
-//   the first match, else 0. (The original packs the codes as a 4-byte-stride
-//   varargs list; we take them as a plain byte array — codes[i] is the i-th.)
+//   Reads the person/family record `typeIndex` (word_12CE910, byte stride 536 —
+//   NOT the 589-stride building-type table) and tests whether its byte at +356
+//   (the high byte of the dword at +353) equals any of the `count` codes in
+//   `codes[]`. The +356 byte and each code are sign-extended before the compare
+//   (signed equality). Returns 1 on the first match, else 0. (The original packs
+//   the codes as a 4-byte-stride varargs list; we take them as a plain byte array
+//   — codes[i] is the i-th.)
 int Building_MatchTypeCode(std::uint16_t typeIndex, int count,
                            const std::uint8_t* codes);
 
 // gilde.exe 0x5898e8 — VIBE_Building_MatchProfessionCode (__cdecl(u16, int, ...))
-//   Same scan, but matches a code against EITHER profession byte +358 or +361
-//   of the type record. Returns 1 on first match else 0.
+//   Same scan over word_12CE910 (stride 536), but matches a code against EITHER
+//   profession byte +358 or +361 of the record (unsigned-byte equality). Returns
+//   1 on first match else 0.
 int Building_MatchProfessionCode(std::uint16_t typeIndex, int count,
                                  const std::uint8_t* codes);
 

@@ -9,6 +9,7 @@
 #include "audio/samplebank.h"
 #include "audio/music.h"
 
+#include <climits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -163,6 +164,94 @@ TEST(AudioVoice, VolumePanClampedToRange) {
     CHECK_EQ(v->volume, 64); // rejected, unchanged
 }
 
+// ---- WAVE-11 hardening: index-out-of-range / exhaustion / degenerate buffers -
+
+// slotAt must reject negative and past-the-end indices (no OOB vector access).
+TEST(AudioVoice, SlotAtIndexOutOfRange) {
+    MockAudio dev;
+    VoicePool pool(&dev);
+    pool.init(3, 2, 44100);
+    CHECK(pool.slotAt(0) != nullptr);
+    CHECK(pool.slotAt(2) != nullptr);
+    CHECK(pool.slotAt(3) == nullptr);     // == count, past the end
+    CHECK(pool.slotAt(99) == nullptr);    // far past the end
+    CHECK(pool.slotAt(-1) == nullptr);    // negative
+    CHECK(pool.slotAt(-1000) == nullptr);
+}
+
+// A 0-voice pool: init with zero (and a negative) voice count must produce an
+// empty pool whose allocator returns null without touching an empty vector.
+TEST(AudioVoice, ZeroVoicePoolIsSafe) {
+    MockAudio dev;
+    VoicePool pool(&dev);
+    CHECK(pool.init(0, 2, 44100));
+    CHECK_EQ(pool.voiceCount(), 0);
+    CHECK(pool.allocVoiceChannel() == nullptr); // slots_.empty() guard
+    CHECK(pool.slotAt(0) == nullptr);
+
+    MockAudio dev2;
+    VoicePool pool2(&dev2);
+    CHECK(pool2.init(-5, 2, 44100));            // negative -> clamped to 0 slots
+    CHECK_EQ(pool2.voiceCount(), 0);
+    CHECK(pool2.allocVoiceChannel() == nullptr);
+}
+
+// More concurrent "sounds" than channels: with every slot busy, repeated
+// allocation must keep returning null (channel-pool exhaustion) and never index
+// past the slot array.
+TEST(AudioVoice, ChannelPoolExhaustionRepeated) {
+    MockAudio dev;
+    VoicePool pool(&dev);
+    pool.init(2, 2, 44100);
+    VoiceSlot* a = pool.allocVoiceChannel();
+    dev.playing[a->handle] = true;
+    VoiceSlot* b = pool.allocVoiceChannel();
+    dev.playing[b->handle] = true;
+    VoicePool::setLoopFlag(b, true);
+    // Ask for many more voices than exist: every call sees all busy -> null.
+    for (int i = 0; i < 50; ++i)
+        CHECK(pool.allocVoiceChannel() == nullptr);
+}
+
+// Volume / pan at integer extremes go through the unsigned (<0x80) gate; INT_MIN
+// / INT_MAX / 0 / 127 must be handled without UB and the in-range edges stored.
+TEST(AudioVoice, VolumePanIntegerExtremes) {
+    MockAudio dev;
+    VoicePool pool(&dev);
+    pool.init(1, 2, 44100);
+    VoiceSlot* v = pool.allocVoiceChannel();
+
+    pool.setVoiceVolume(v, 0);    CHECK_EQ(v->pan, 0);    // min accepted
+    pool.setVoiceVolume(v, 127);  CHECK_EQ(v->pan, 127);  // max accepted
+    int kept = v->pan;
+    pool.setVoiceVolume(v, INT_MAX); CHECK_EQ(v->pan, kept); // rejected, unchanged
+    pool.setVoiceVolume(v, INT_MIN); CHECK_EQ(v->pan, kept); // rejected (wraps high)
+    pool.setVoiceVolume(v, 0x80);    CHECK_EQ(v->pan, kept); // exactly 128 rejected
+
+    pool.setVoicePan(v, 0);     CHECK_EQ(v->volume, 0);
+    pool.setVoicePan(v, 127);   CHECK_EQ(v->volume, 127);
+    int keptP = v->volume;
+    pool.setVoicePan(v, INT_MIN); CHECK_EQ(v->volume, keptP);
+    pool.setVoicePan(v, INT_MAX); CHECK_EQ(v->volume, keptP);
+}
+
+// startVoice with a 0-length / null PCM buffer must not read the buffer; it just
+// forwards (bytes==0) to the device. NULL-device-status voices report not-playing.
+TEST(AudioVoice, StartVoiceZeroLengthBuffer) {
+    MockAudio dev;
+    VoicePool pool(&dev);
+    pool.init(1, 2, 44100);
+    VoiceSlot* v = pool.allocVoiceChannel();
+    // 0-length buffer (malformed/empty sample): no read of pcm, no crash.
+    pool.startVoice(v, nullptr, 0, 44100, 0);
+    // A non-null pointer with 0 bytes: still must not deref the data.
+    static const unsigned char one = 0;
+    pool.startVoice(v, &one, 0, 44100, 0);
+    // Calling on a null voice is a no-op (guarded).
+    pool.startVoice(nullptr, &one, 1, 44100, 0);
+    CHECK(true); // reaching here without ASAN abort is the assertion
+}
+
 // ---- 3D position -> pan / volume math ---------------------------------------
 
 TEST(Audio3dMath, NearIsLoudAndCentered) {
@@ -189,6 +278,22 @@ TEST(Audio3dMath, FarIsQuieterAndPanned) {
     CHECK_EQ(Compute3dPan(Vec3{0, 0, 1}, Vec3{100, 0, 100}), 107);
     // Behind => sin(180)=0 => center again.
     CHECK_EQ(Compute3dPan(Vec3{0, 0, 1}, Vec3{0, 0, -100}), 63);
+}
+
+// VIBE_Math_VectorAngleBetween @0x5ca334 is a *signed* XZ-plane angle, so the +x and
+// -x sides of the listener pan to opposite extremes. Golden values from the binary
+// oracle (acos(0)-2*PI => sin=+1 => 126 on the right; -acos(0) => sin=-1 => -0.5
+// truncates to 0 on the left). A magnitude-only acos analogue would wrongly give 126
+// for both sides — this pins the faithful left/right asymmetry.
+TEST(Audio3dMath, PanIsSignedLeftRight) {
+    const Vec3 fwd{0, 0, 1};
+    CHECK_EQ(Compute3dPan(fwd, Vec3{100, 0, 0}), 126);  // right  => hard right
+    CHECK_EQ(Compute3dPan(fwd, Vec3{-100, 0, 0}), 0);   // left   => hard left
+    CHECK_EQ(Compute3dPan(fwd, Vec3{100, 0, 100}), 107);  // right-45
+    CHECK_EQ(Compute3dPan(fwd, Vec3{-100, 0, 100}), 18);  // left-45
+    // Y is ignored (vectors flattened to XZ before the angle).
+    CHECK_EQ(Compute3dPan(fwd, Vec3{100, 9999, 0}), 126);
+    CHECK_EQ(Compute3dPan(fwd, Vec3{-100, -9999, 0}), 0);
 }
 
 // ---- Sample bank indexing ---------------------------------------------------
@@ -227,9 +332,11 @@ TEST(AudioSampleBank, SizeFormulas) {
     // computeVariationSize = 12*3 + base
     CHECK_EQ(bank.computeVariationSize("v", 100), 12 * 3 + 100);
     CHECK_EQ(bank.computeVariationSize("missing", 100), 0);
-    // computeTotalSize = 12*sub + 12*samples + (nodes<<6) + 324 + base
-    // samples=2, variations=1 => nodes=3.
-    int expected = 12 * 5 + 12 * 2 + (3 << 6) + 324 + 1000;
+    // gilde.exe 0x447614 — disasm-exact formula (S=topSamples, V=variations,
+    // C=subSampleCount): 12*(S+C) + 12*V + (S+V)<<6 + 324 + base.  The earlier
+    // golden dropped the `+12*V` term (lea/sub/shl @0x44767c..0x447685); fixed to
+    // match the binary.  S=2, V=1, C=5 => nodes=S+V=3.
+    int expected = 12 * (5 + 2) + 12 * 1 + (3 << 6) + 324 + 1000;
     CHECK_EQ(bank.computeTotalSize(5, 1000), expected);
 }
 

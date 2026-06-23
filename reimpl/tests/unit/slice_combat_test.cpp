@@ -206,3 +206,65 @@ TEST(SliceCombatUnit, StepSequenceIsDeterministic) {
     for (int i = 0; i < 3; ++i)
         CHECK_EQ((long long)d[i].hashAfter, (long long)e[i].hashAfter);
 }
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-12): boundary / malformed crime ids must not read the
+// 768x768 g_relationMatrix out of bounds. world::RelationGet (gilde.exe
+// 0x5942fc) indexes g_relationMatrix[768*a + b] WITH NO internal bound, so a
+// degenerate (stale/garbage) victim/perpetrator id would over-read. The slice's
+// relation snapshots are bounded (RelationGetSafe); the apply already gated the
+// write on kRelationDim. These drive far-out-of-range ids and must not trip ASAN.
+// (The unguarded RelationGet/RelationSet themselves are DOCUMENTED for the
+// world/relation owner; only the slice-side reads are fixed here.)
+// ---------------------------------------------------------------------------
+TEST(SliceCombatUnit, CrimeOutOfRangeIdsNoOOB) {
+    CombatInteraction it;
+    it.action        = HostileAction::kCrime;
+    it.perpetratorId = 99999;       // >> kRelationDim (768)
+    it.victimId      = 88888;       // >> kRelationDim
+    it.crimeLocation = 1;
+    it.crimeType     = CrimeType::kSabotage;
+
+    CombatStepHash steps[3];
+    i32 before = -123, after = -123;
+    int n = RunCombatStepsSynthetic(0x4242, it, steps, 3, &before, &after);
+    CHECK_EQ(n, 3);
+    // Out-of-range pair has no stored relation -> the bounded read reports 0,
+    // and the apply's kRelationDim gate skips the matrix write entirely.
+    CHECK_EQ(before, 0);
+    CHECK_EQ(after, 0);
+}
+
+TEST(SliceCombatUnit, CrimeNegativeIdsNoOOB) {
+    CombatInteraction it;
+    it.action        = HostileAction::kCrime;
+    it.perpetratorId = -7;          // negative -> would index below the matrix
+    it.victimId      = -9;
+    it.crimeLocation = 0;
+    it.crimeType     = CrimeType::kTheft;
+
+    CombatStepHash steps[3];
+    i32 before = -1, after = -1;
+    int n = RunCombatStepsSynthetic(0x5151, it, steps, 3, &before, &after);
+    CHECK_EQ(n, 3);
+    CHECK_EQ(before, 0);
+    CHECK_EQ(after, 0);
+}
+
+TEST(SliceCombatUnit, CrimeBoundaryIdAtDimNoOOB) {
+    // victimId == kRelationDim is the first OOB row; must be treated as unbound.
+    CombatInteraction it;
+    it.action        = HostileAction::kCrime;
+    it.perpetratorId = kRelationDim;     // exactly out of range (valid is [0,767])
+    it.victimId      = kRelationDim - 1; // last valid row
+    it.crimeLocation = 2;
+    it.crimeType     = CrimeType::kSabotage;
+
+    CombatStepHash steps[3];
+    i32 before = -1, after = -1;
+    int n = RunCombatStepsSynthetic(0x6161, it, steps, 3, &before, &after);
+    CHECK_EQ(n, 3);
+    // perpetrator out of range -> apply's gate skips the write; snapshot reads 0.
+    CHECK_EQ(before, 0);
+    CHECK_EQ(after, 0);
+}

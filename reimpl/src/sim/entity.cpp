@@ -136,6 +136,12 @@ int GameObjectResolveEntityById(ObjectRec** outObject, SceneNode** outScene,
     int v13 = 0;
     int idx = 0;
     for (;;) {
+        // HARDENING (wave-11): the original walked raw heap (`while(!*v12) v12+=67`)
+        // bounded only by the examined-count v13; empty slots advance idx but not
+        // v13, so a sparse scene array can run idx past the flat-array capacity.
+        // The flat model has a fixed capacity, so fail safe (miss) at the bound
+        // rather than read OOB. In-bounds/valid scenes are unaffected.
+        if (idx >= kSceneNodeCapacity) { g_sceneNodeCount = sceneCount; return 0; }
         // while (!*(_WORD*)v12) v12 += 67 — skip empty slots
         if (g_sceneNodes[idx].type == 0) {
             ++idx;

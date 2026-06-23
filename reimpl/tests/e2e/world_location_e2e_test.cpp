@@ -75,10 +75,11 @@ TEST(WorldLocE2E, ThiefGuildBurglaryAndRansom) {
 
     // Ransom: hostage in captivity-state 2, wealth 500000, roll caps at wealth.
     // Reference: cut .04, base=500000, ransom = int(500000*0.04)=19999.
-    double roll = 1600000.0; // (rand*0.5+0.75)*1.6e6 with rand=0.5
+    double roll = 1600000.0; // (rand*0.5+0.75)*1.6e6 with rand=0.5 (first roll)
     auto rans = ThiefComputeRansom(/*hostage*/true, /*kidnapCmd*/true,
                                    /*pending*/false, /*state*/2,
-                                   /*wealth*/500000, roll, /*accept*/true);
+                                   /*wealth*/500000, /*firstRoll*/roll,
+                                   /*secondRoll*/9.0e9, /*accept*/true);
     CHECK_EQ(rans.ransom, 19999);
     if (rans.emit.cmd != ThiefCommand::None) log.thief.push_back(rans.emit);
 

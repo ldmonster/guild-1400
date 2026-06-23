@@ -103,9 +103,13 @@ double CaravanComputeCargoValue(const CaravanCargoTables& t, bool ownerIsMarket,
 // One resolved load line produced by the load core (per non-skipped slot).
 struct CaravanLoadLine {
     i32 goodId   = 0;   // HIWORD(packed) of the slot
-    i32 quantity = 0;   // free space / carry capacity moved (v58 / v57)
+    i32 quantity = 0;   // free space / carry capacity moved (v56 / v55)
     i32 toSlot   = 0;   // destination storage slot (storageSlot)
-    double unitPrice = 0.0; // resolved per-unit price (v59 / v56)
+    // gilde.exe 0x53fbb6/0x53fd91: the per-unit price QueueRequest17 receives is
+    //   v38 = (__int64)trunc(v57 / a6)   where v57 is the FLOAT unit price (factor
+    //   or contor-override applied in single precision) and a6 is the carrier cost
+    //   divisor. ConvertX truncates toward zero, so this is an integer.
+    i32 unitPrice = 0;
 };
 
 // gilde.exe 0x53f6bc — VIBE_TradeTransport_LoadFromStorage (deterministic core).
@@ -114,19 +118,28 @@ struct CaravanLoadLine {
 // deterministic decision/quantity/price math and return the resolved lines; the
 // command queue, audio, and HUD side effects are out of scope (GUI-coupled).
 //
-//   free = priceContext ? ComputeCarryCapacity(carrier, good, data)   // a5 path
-//                       : ComputeFreeSpaceForItem(dest, good, data)   // v46 path
-//   skip slot if free <= 0, or storageSlot < 0, or the resource check fails.
-//   if applyPricing (v51): unit = (ownerKind==10) ? price*1.1 : price*priceMul
-//                          if (mode&... 2/4) unit = price(good, sellCtx)
-//                   else: unit = 0
+//   free = a5 ? ComputeCarryCapacity(carrier, good, data)   // a5 path
+//             : ComputeFreeSpaceForItem(dest, good, data)   // v44 path
+//   skip slot if free <= 0, or storageSlot (dword_122Ex C0) < 0.
+//   if applyPricing (a3/v49): v57 = (ownerKind==10) ? price*1.1 : price*priceMul
+//                             if (a8==2 || a8==4) v57 = price(good, a4[101])
+//                      else:  v57 = 0
+//   emitted unit price = trunc(v57 / a6)   (ConvertX truncate; v57 is a float).
 // `freeSpace[k]` supplies the capacity result the originals get from the inventory
 // leaves (already translated in sim/inventory_capacity.cpp); injecting it keeps
 // this module free of the live object tables while preserving the exact branch
 // structure.
+//
+// BOUNDARY (gilde.exe 0x53f86a, 0x53f8d1..0x53fcf4): the original ALSO gates each
+// emit on VIBE_Dialog_CheckResourceAmount((int)(v57*amount/a6), ctx) and on the
+// VIBE_Interaction_InvokeHandlerSlot60 handler (which can skip the slot), and may
+// flip a6 to 1.0 when |delta| < VIBE_Money_MultiplyByRate(1, ctx). Those reach the
+// dialog / interaction / money subsystems and are out of this module; this core
+// reproduces the capacity/price/destination decision and the trunc(v57/a6) unit
+// price, and emits a line whenever free>0 and storageSlot>=0.
 std::vector<CaravanLoadLine> CaravanLoadFromStorage(
     const CaravanCargoTables& t, const std::vector<i32>& sellFree,
     const std::vector<i32>& buyFree, bool applyPricing, bool ownerIsMarket,
-    float priceMul, u8 priceCtx, u8 sellCtx, int mode);
+    float priceMul, u8 priceCtx, u8 sellCtx, int mode, float carrierCost = 1.0f);
 
 } // namespace guild::world

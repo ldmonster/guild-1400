@@ -113,12 +113,28 @@ int ExPatchObjectFieldsAdd(CommandPacket& pkt, AckEntry* /*ack*/) {
         return 1;
 
     const u8* p = pkt.bytes + kAfRecords;     // a1 + 21
+    const u8* pkt_end = pkt.bytes + kPacketStride; // 153-byte record limit
     u8 nFields = pkt.bytes[kAfFieldCount];    // *(a1 + 20)
     for (u8 f = 0; f < nFields; ++f) {
+        // 1:1 NOTE (wave-15, MCP-confirmed @0x497c18): the ORIGINAL has NO
+        // source-cursor bound and NO destination-offset bound. It walks exactly
+        // *(a1+20) records advancing v3 by width*count+4 and writes to
+        // v25 + (u16)off unconditionally. In the binary the 153-byte packet lives
+        // inside a contiguous pool (byte_B5FB60/the ring) so an over-read lands in
+        // adjacent valid packet memory; in our standalone u8[153] layout that
+        // would be a real heap OOB. Every packet on the live call tree is built by
+        // the codec (AppendDeltaField/AppendRawField, payload <= kMaxPayload=119),
+        // so neither guard below is EVER reached on any reachable input — they are
+        // a never-hit safety net, byte-identical to the unbounded original on the
+        // entire valid call tree. See progress/diff-cmd-wave15.md.
+        if (p + 4 > pkt_end)
+            break;
         u8  width  = p[0];
         u8  count  = p[1];
         u16 off    = static_cast<u16>(p[2] | (p[3] << 8));
         const u8* vals = p + 4;
+        if (vals + static_cast<u32>(width) * count > pkt_end)
+            break;
         u8* dst = base + off;
         if (width == 1) {
             for (u32 i = 0; i < count; ++i)
@@ -160,12 +176,22 @@ int ExWriteObjectFields(CommandPacket& pkt, AckEntry* /*ack*/) {
         return 1;
 
     const u8* p = pkt.bytes + kAfRecords;
+    const u8* pkt_end = pkt.bytes + kPacketStride; // 153-byte record limit
     u8 nFields = pkt.bytes[kAfFieldCount];
     for (u8 f = 0; f < nFields; ++f) {
+        // 1:1 NOTE (wave-15, MCP-confirmed @0x497da4): identical to
+        // ExPatchObjectFieldsAdd — the original has NO source-cursor bound and NO
+        // destination-offset bound (writes to v22 + (u16)off via memcpy). The two
+        // guards below are a never-hit safety net for our standalone packet layout;
+        // byte-identical to the unbounded original on the entire valid call tree.
+        if (p + 4 > pkt_end)
+            break;
         u8  width  = p[0];
         u8  count  = p[1];
         u16 off    = static_cast<u16>(p[2] | (p[3] << 8));
         const u8* vals = p + 4;
+        if (vals + static_cast<u32>(width) * count > pkt_end)
+            break;
         u8* dst = base + off;
         // Absolute write (memcpy-equivalent for widths 1/2/4).
         if (width == 1 || width == 2 || width == 4)
@@ -185,8 +211,21 @@ int ExApplyNeedDeltas(CommandPacket& pkt, AckEntry* /*ack*/) {
     u8* base = reinterpret_cast<u8*>(person);
 
     const u8* p = pkt.bytes + kAfRecords;      // a1 + 21
+    const u8* pkt_end = pkt.bytes + kPacketStride; // 153-byte record limit
     u8 nEntries = pkt.bytes[kAfFieldCount];    // *(a1 + 20)
     for (u8 e = 0; e < nEntries; ++e) {
+        // 1:1 NOTE (wave-15, MCP-confirmed @0x497ed0): the original walks exactly
+        // *(a1+20) 5-byte entries [statId:1][float:4] with NO source-cursor bound,
+        // and writes to &v14[6*statId+72] == base + 144 + 12*statId where statId is
+        // the raw wire byte (0..255) — NO statId destination bound either (the
+        // queued wave-11/13 question is answered: the original does NOT clamp it).
+        // base+144+12*255+4 = 3208 overruns a 536-byte Person into adjacent
+        // g_persons slots; in the binary that array is contiguous (the engine's
+        // envelope). Every live-tree packet is codec-built (AiMethodWriter, payload
+        // <= 119), so the source-cursor guard below is never reached on any
+        // reachable input. The statId is left UNBOUNDED to match the original.
+        if (p + 5 > pkt_end)
+            break;
         u8 statId = p[0];
         float add;
         std::memcpy(&add, p + 1, 4);
@@ -194,14 +233,22 @@ int ExApplyNeedDeltas(CommandPacket& pkt, AckEntry* /*ack*/) {
 
         // entity + 144 + 12*statId  (decompiler: &v14[6*statId+72], v14 __int16*).
         float* slot = reinterpret_cast<float*>(base + 144 + 12 * statId);
-        float v = *slot + add;
-        // clamp to [0, 1000]
-        if (v < 0.0f || v < 1000.0f) {
-            if (v < 0.0f) v = 0.0f;
+        *slot = *slot + add;
+        // gilde.exe 0x497f4d..0x497fa6 — the post-add clamp. The decompile reads
+        // v13 = (double)*slot, compares it against 0.0 and dbl_61BE74 (=1000.0,
+        // get_bytes @0x61BE74 = 00 00 00 00 00 40 8F 40), and on overflow stores
+        // the DOUBLE constant whose hi-dword is 1083129856 (=0x40900000) with a
+        // zero lo-dword: 0x4090000000000000 == 1024.0 — NOT 1000.0. So the lower
+        // bound is 0, but the THRESHOLD is 1000.0 while the clamped value is 1024.0
+        // (an asymmetry confirmed by the live decompile this wave).
+        const double v13 = static_cast<double>(*slot);
+        if (v13 < 0.0 || v13 < 1000.0) {       // dbl_61BE74
+            if (*slot < 0.0f)
+                *slot = 0.0f;
+            // else leave *slot unchanged (in-band)
         } else {
-            v = 1000.0f;
+            *slot = static_cast<float>(1024.0); // hi-dword 0x40900000, lo 0
         }
-        *slot = v;
     }
     return 0;
 }

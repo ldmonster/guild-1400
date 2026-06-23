@@ -286,24 +286,38 @@ i32 SetGameSpeed(CommandQueue& q, u32 level) {
     } else if (static_cast<i32>(level) == g_gameSpeed) {
         return static_cast<i32>(level);
     }
-    i32 blob = static_cast<i32>(level);      // v2[0] = result
-    QueueRequestFlagBlob32(q, 18, &blob);
+    // HARDENING (wave-11): QueueRequestFlagBlob32 copies 124 bytes from the blob
+    // (qmemcpy(v4, a2, 124)). The original passes a 4-byte stack local here, so it
+    // copies 120 bytes of adjacent (indeterminate, unread) stack into the unused
+    // payload tail. We pass a 124-byte buffer with the level in the first dword so
+    // the observable packet (first dword @+0x11) is byte-identical and there is no
+    // out-of-bounds read of the source.
+    u8 blob[124] = {0};
+    i32 lv = static_cast<i32>(level);        // v2[0] = result
+    std::memcpy(blob, &lv, sizeof(lv));
+    QueueRequestFlagBlob32(q, 18, blob);
     return static_cast<i32>(level);
 }
 
 // gilde.exe 0x493e2c — VIBE_Command_IncreaseGameSpeed.
 void IncreaseGameSpeed(CommandQueue& q) {
     if (static_cast<u32>(g_gameSpeed) < 4) {
-        i32 blob = g_gameSpeed + 1;          // v2[0] = dword_631284 + 1
-        QueueRequestFlagBlob32(q, 18, &blob);
+        // HARDENING (wave-11): 124-byte source (see SetGameSpeed) — level in dword 0.
+        u8 blob[124] = {0};
+        i32 lv = g_gameSpeed + 1;            // v2[0] = dword_631284 + 1
+        std::memcpy(blob, &lv, sizeof(lv));
+        QueueRequestFlagBlob32(q, 18, blob);
     }
 }
 
 // gilde.exe 0x493e58 — VIBE_Command_DecreaseGameSpeed.
 void DecreaseGameSpeed(CommandQueue& q) {
     if (g_gameSpeed) {
-        i32 blob = g_gameSpeed - 1;          // v2[0] = dword_631284 - 1
-        QueueRequestFlagBlob32(q, 18, &blob);
+        // HARDENING (wave-11): 124-byte source (see SetGameSpeed) — level in dword 0.
+        u8 blob[124] = {0};
+        i32 lv = g_gameSpeed - 1;            // v2[0] = dword_631284 - 1
+        std::memcpy(blob, &lv, sizeof(lv));
+        QueueRequestFlagBlob32(q, 18, blob);
     }
 }
 

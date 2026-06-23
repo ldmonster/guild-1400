@@ -147,6 +147,10 @@ struct MeshRenderStats {
     int appendedPolys = 0;   // draw-list entries projected+sorted (post-cull)
     int rasterTris    = 0;   // triangles RasterizeMeshList actually flushed
     int texturedPolys = 0;   // poly draw-list entries bound to a real texture
+    // Person-pass split-outs (persons are ALSO folded into meshObjects /
+    // quadFallbacks; these report how many of those entities were persons).
+    int personMeshes  = 0;   // persons drawn as a resolved mesh
+    int personQuads   = 0;   // persons that fell back to a quad
     int objects() const { return meshObjects + quadFallbacks; }
 };
 
@@ -162,6 +166,14 @@ public:
         bool scanObjects = true;                           // alive g_objects
         bool scanScene   = true;                           // g_sceneNodes (tree)
         int  maxObjects  = 64;                             // cap on entities drawn
+        // -- PERSON scan (default OFF -> behaviour unchanged) ----------------
+        // When set, live g_persons rows (marker != -1, kind byte < 10 — the
+        // "real person" part of VIBE_Person_IsValidActiveRecord @0x4f8e60) are
+        // placed through the SAME node/mesh resolvers and rasterized in the
+        // SAME sorted draw-list flush as the objects. `maxPersons` caps the
+        // person pass separately from `maxObjects` (neither starves the other).
+        bool scanPersons = false;
+        int  maxPersons  = 16;
         // -- fallback quad half-extent (model-space, pre-projection) --------
         float quadHalf = 6.0f;
         // -- TEXTURED raster (default OFF -> the legacy flat/shaded path) ----
@@ -172,6 +184,16 @@ public:
         // Polys with no resolvable texture (texId == -1) keep the flat/shaded path.
         bool                textured       = false;
         TexTableResolver    texTableResolver = &DefaultTexTableResolver;
+        // -- LIGHT-CACHE SHADE (default OFF -> behaviour unchanged) ----------
+        // When set, each projected vertex KEEPS the lightIdx the resolver's
+        // geometry carried (the VIBE_Light_BuildObjectCache @0x5c8218 shade,
+        // published into the packed +64 dword) instead of the Y-depth light
+        // term ProjectVerticesToScreen recomputes. This is the engine's
+        // universe-OBJECT shading: a lit object's per-vertex shade comes from
+        // the light cache, not the character Y-term (see universe_render's
+        // documented post-projection overwrite of the same byte). Used by the
+        // RealCityRenderer atmosRelight pass (the day/night rebuild consumer).
+        bool                cacheShade     = false;
     };
 
     ObjectMeshRenderer() = default;
@@ -203,6 +225,10 @@ private:
     std::unordered_map<const render::Polygon*, const render::DecodedBmp*> polyTex_;
 
     MeshRenderStats stats_{};
+    // Options::cacheShade for the current render() (read by projectMesh) and
+    // the per-mesh shade snapshot buffer it restores from.
+    bool cacheShade_ = false;
+    std::vector<u8> cacheShadeSave_;
 
     // Project one already-world-seated mesh into db_ (returns appended count).
     int projectMesh(render::MeshGeometry* geom, const render::ProjectParams& pp);

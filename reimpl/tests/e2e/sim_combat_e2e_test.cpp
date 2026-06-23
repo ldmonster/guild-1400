@@ -75,13 +75,20 @@ TEST(SimCombatE2E, MeleeFightToDeath) {
 // E2E #2 — a full pistol duel: choice round (taunt, aim) then shots to death.
 //
 // A (skill 0.9) duels B (skill 0.7). CutsceneRng seeded at state=777.
-//   1. A TAUNTS (B's rating-4 = 0.3): v41=1.172614, def=0.451459 -> A NOT rattled.
-//   2. A AIMS (rating-2 = 0.8): roll=0.286316 < 0.8 -> A gains aim.
-//   3. A SHOOTS B (worth 200, hp 100). chance=0.9*0.8=0.72, aim band 5..19:
-//        shot1 roll=0.563354 HIT dmg=19 hp=62 scoreA=19
-//        shot2 roll=0.577362 HIT dmg=12 hp=38 scoreA=31
-//        shot3 roll=0.418243 HIT dmg=12 hp=14 -> 14/100=0.14 < 0.2 -> FATAL
-//   WINNER = A, shots=3, scoreA=43, B final hp=14.
+// IMPORTANT (gilde.exe 0x4a4b68 / 0x4a4eb4, disasm-verified): the taunt/aim flags
+// are CROSS-WIRED. A's taunt sets byte_6315DE (rattledA) and A's aim sets
+// byte_6315E0 (aimA), but A's OWN shots read byte_6315DF (rattledB) and
+// byte_6315E1 (aimB). So A taunting/aiming does NOT affect A's own shots; A
+// shoots un-rattled with the WIDE damage band.
+//   1. A TAUNTS (B's rating-4 = 0.3): rf1=0.272622, rf2=0.151463 ->
+//      def(0.451463) < v36(1.172622) -> A LANDS the taunt -> rattledA set,
+//      outcome kTauntLanded. (Penalizes B's shots, not A's.)
+//   2. A AIMS (rating-2 = 0.8): roll=0.286325 < 0.8 -> A gains aim (aimA).
+//   3. A SHOOTS B (worth 200, hp 100). chance=0.9*0.8=0.72, aim OFF for A's
+//      shots (reads aimB=false), band 15..44:
+//        shot1 roll=0.563372 HIT dmg=29 hp=42  (score on TARGET B: scoreB=29)
+//        shot2 roll=0.577380 HIT dmg=37 hp=-32 -> ratio < 0.2 -> FATAL (scoreB=66)
+//   WINNER = A, shots=2, scoreB=66 (damage dealt TO B), B final hp=-32.
 // ===========================================================================
 TEST(SimCombatE2E, PistolDuelToDeath) {
     CutsceneRng rng;
@@ -102,17 +109,17 @@ TEST(SimCombatE2E, PistolDuelToDeath) {
                                                 /*attackerSkill=*/0.9f,
                                                 /*defenderRating4=*/0.3f, rng);
     CHECK(taunt == DuelChoiceOutcome::kTauntLanded);
-    CHECK(!s.rattledA);
+    CHECK(s.rattledA);   // A landed the taunt -> byte_6315DE set (penalizes B)
 
     DuelChoiceOutcome aim = Duel_ResolveAim(s, /*playerIsA=*/true,
                                             /*ownRating2=*/0.8f, rng);
     CHECK(aim == DuelChoiceOutcome::kAimGained);
-    CHECK(s.aimA);
+    CHECK(s.aimA);       // byte_6315E0 set (read by B's shots, not A's)
 
     // --- shots ---
     struct Shot { bool hit; int dmg; int hp; };
     const Shot ref[] = {
-        {true, 19, 62}, {true, 12, 38}, {true, 12, 14},
+        {true, 29, 42}, {true, 37, -32},
     };
 
     const double maxHp = 100.0;
@@ -132,24 +139,25 @@ TEST(SimCombatE2E, PistolDuelToDeath) {
 
     CHECK(fatal);
     CHECK(s.over);
-    CHECK_EQ(shot, 3);
-    CHECK_EQ(uB->hp, 14);
-    CHECK_EQ(static_cast<int>(s.scoreA), 43);  // 19+12+12
-    CHECK_EQ(static_cast<int>(s.scoreB), 0);   // B never shot
-    // A is the winner: B is below the fatal ratio, A untouched.
-    CHECK(s.scoreA > s.scoreB);
+    CHECK_EQ(shot, 2);
+    CHECK_EQ(uB->hp, -32);
+    // Score is keyed on the TARGET: A's hits accumulate into scoreB (damage to B).
+    CHECK_EQ(static_cast<int>(s.scoreB), 66);  // 29+37
+    CHECK_EQ(static_cast<int>(s.scoreA), 0);   // A took no damage
 }
 
 // ===========================================================================
 // E2E #3 — rattled penalty changes the shot outcome (determinism of flags).
-// Same seed, but A is rattled (chance *0.66): the first roll that hit at 0.72
-// now misses at 0.475, proving the flag feeds the math.
+// Same seed, but A's shot is rattled (chance *0.66): the first roll that hit at
+// 0.72 now misses at 0.475, proving the flag feeds the math. NOTE the rattle byte
+// is CROSS-WIRED: shooter A reads byte_6315DF (rattledB), so to rattle A's shot we
+// set rattledB (gilde.exe 0x4a4bcd..0x4a4be6, disasm-verified).
 // ===========================================================================
 TEST(SimCombatE2E, RattledPenaltyAltersShot) {
     CutsceneRng base;  base.state = 777;
     // Advance past the two choice rolls + aim roll to reach the shot rolls,
     // matching the duel-to-death scenario's RNG position.
-    base.RandFloat();  // taunt v41 component
+    base.RandFloat();  // taunt v36 component
     base.RandFloat();  // taunt def component
     base.RandFloat();  // aim roll
 
@@ -159,13 +167,14 @@ TEST(SimCombatE2E, RattledPenaltyAltersShot) {
     CombatUnit tClean{};   tClean.hp = 100;   tClean.worth = 200.0f;
     CombatUnit tRattled{}; tRattled.hp = 100; tRattled.worth = 200.0f;
 
-    DuelState clean;  clean.skillA = 0.9f; clean.aimA = true;
-    DuelState rat;    rat.skillA = 0.9f;   rat.aimA = true; rat.rattledA = true;
+    DuelState clean;  clean.skillA = 0.9f;
+    // Cross-wired: A's shot reads rattledB, so set rattledB to penalize A.
+    DuelState rat;    rat.skillA = 0.9f;   rat.rattledB = true;
 
     DuelShotResult rc = Duel_ResolveShot(clean, true, tClean, rngClean);
     DuelShotResult rr = Duel_ResolveShot(rat,   true, tRattled, rngRattled);
 
-    // The very first shot roll is 0.563354. chance clean=0.72 (hit), rattled=0.4752 (miss).
+    // The very first shot roll is 0.563372. chance clean=0.72 (hit), rattled=0.4752 (miss).
     CHECK(rc.hit);
     CHECK(!rr.hit);
     CHECK_EQ(tRattled.hp, 100);          // miss -> no HP change

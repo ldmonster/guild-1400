@@ -27,6 +27,10 @@ const char kDummyFahne[]    = "dummy_FAHNE";
 const char kSpWimpel[]      = "sp_WIMPEL";
 const char kWimpelAnim[]    = "sonstiges\\sp_WIMPEL.baf";
 constexpr float kPi         = 3.14159274f;            // 1078530011
+// flt_5CA2B0 (get_bytes 0x5CA2B0): {0.0, 0.0, 1.0} — the engine's +Z reference axis.
+// ShowWithScale rotates THIS through the hierarchy and measures the yaw to it; it is a
+// fixed global, NOT a caller-supplied vector.
+const float kRefAxisZ[3]    = {0.0f, 0.0f, 1.0f};
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -248,21 +252,23 @@ void ApplyVisibilityState(const VisibilityCtx& v, const float pos[3], bool refre
     (void)v.hasLowPoly;
 }
 
-// gilde.exe 0x401a24 — VIBE_Character_ShowWithScale.
-//   if (result) {                                  // result == mesh (a1)
-//     PointThroughBoneChain(a2, a2+19, v5);        // -> world pos v5
-//     v6 = 0; v7 = 0; v8 = 0;
-//     RotateVectorByHierarchy(mesh, &flt_5CA2B0, v9);
-//     v7 = VectorAngleBetween(&flt_5CA2B0, v9);    // world yaw
+// gilde.exe 0x401a24 — VIBE_Character_ShowWithScale.  (disasm-verified)
+//   if (result) {                                  // result == mesh (a1=eax)
+//     PointThroughBoneChain(a2, a2+19, v5);        // place (a2+19) -> world pos v5
+//     v6 = 0; v7 = 0.0; v8 = 0;
+//     RotateVectorByHierarchy(mesh, &flt_5CA2B0, v9);   // rotate the FIXED +Z axis
+//     v7 = VectorAngleBetween(&flt_5CA2B0, v9);    // yaw measured against the SAME axis
 //     SetWorldTranslation(*(a1+52), &v6);          // {0, yaw, 0}
 //     ApplyVisibilityState(a1, 1, v5);
 //   }
 //   return result;
-// flt_5CA2B0 is the reference forward axis (the engine's {1,0,0}/{0,0,1} basis vector;
-// reused from math.cpp's angle reference). We accept it via the placeRot path's
-// hierarchy rotation; the caller supplies the rotated reference and we measure the
-// angle exactly as the original.
+// FIX: flt_5CA2B0 == {0,0,1} is a fixed global, used for BOTH the rotation input and
+// the angle reference — NOT a caller-supplied `placeRot`. The earlier model wrongly
+// threaded placeRot through both; the binary never reads it. `placeRot` is retained in
+// the signature for the call site shape but is unused (matches a2+19 being the place,
+// and the rotation axis being the constant).
 bool ShowWithScale(const ShowScaleCtx& s, const float place[3], const float placeRot[3]) {
+    (void)placeRot;   // binary uses flt_5CA2B0, not a caller vector.
     if (!s.mesh)
         return false;
     const CharRender2Hooks& h = GetCharRender2Hooks();
@@ -270,8 +276,9 @@ bool ShowWithScale(const ShowScaleCtx& s, const float place[3], const float plac
     float worldPos[3] = {0.0f, 0.0f, 0.0f};
     h.pointThroughBoneChain(s.mesh, place, worldPos);
 
-    // RotateVectorByHierarchy(mesh, refAxis, rotated); yaw = VectorAngleBetween(refAxis, rotated)
-    float refAxis[3]  = {placeRot[0], placeRot[1], placeRot[2]};
+    // RotateVectorByHierarchy(mesh, &flt_5CA2B0, rotated);
+    // yaw = VectorAngleBetween(&flt_5CA2B0, rotated)
+    float refAxis[3]  = {kRefAxisZ[0], kRefAxisZ[1], kRefAxisZ[2]};
     float rotated[3]  = {0.0f, 0.0f, 0.0f};
     h.rotateVectorByHierarchy(s.mesh, refAxis, rotated);
     float yaw = static_cast<float>(guild::util::VectorAngleBetween(refAxis, rotated));

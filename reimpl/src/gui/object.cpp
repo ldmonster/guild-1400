@@ -1,6 +1,7 @@
 #include "gui/object.h"
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace guild::gui {
 
@@ -12,11 +13,26 @@ Widget  g_widgets[kMaxWidgets];
 Widget* g_widgetCache[kMaxWidgets + 1];
 int     g_widgetHighWater;
 void*   g_widgetData[kMaxWidgets];
+bool    g_widgetDataOwned[kMaxWidgets];
+
+void SetWidgetDataOwned(int idx, void* heapBlock) {
+    if (idx < 0 || idx >= kMaxWidgets) return;
+    // Replacing an existing owned block: free it first (no leak on overwrite).
+    if (g_widgetDataOwned[idx] && g_widgetData[idx])
+        std::free(g_widgetData[idx]);
+    g_widgetData[idx]      = heapBlock;
+    g_widgetDataOwned[idx] = (heapBlock != nullptr);
+}
 
 void ResetWidgets() {
-    for (auto& wgt : g_widgets) wgt = Widget{};
+    for (int i = 0; i < kMaxWidgets; ++i) {
+        if (g_widgetDataOwned[i] && g_widgetData[i])
+            std::free(g_widgetData[i]); // release heap-owned widget buffers
+        g_widgetData[i]      = nullptr;
+        g_widgetDataOwned[i] = false;
+        g_widgets[i]         = Widget{};
+    }
     for (auto& p : g_widgetCache) p = nullptr;
-    for (auto& d : g_widgetData) d = nullptr;
     g_widgetHighWater = 0;
 }
 
@@ -77,7 +93,12 @@ void Widget_FreeSlot(int idx) {
             c = nullptr;
     }
     g_widgets[idx] = Widget{}; // clears inUse(+4) so the next AllocSlot scan reuses it
-    g_widgetData[idx] = nullptr;
+    // Release the heap-owned data buffer (the original frees the widget's +116/+120
+    // buffer in VIBE_Widget_DestroyByType). Borrowed pointers are left untouched.
+    if (g_widgetDataOwned[idx] && g_widgetData[idx])
+        std::free(g_widgetData[idx]);
+    g_widgetData[idx]      = nullptr;
+    g_widgetDataOwned[idx] = false;
 }
 
 // gilde.exe 0x41db9c — VIBE_Object_GetDataPtr

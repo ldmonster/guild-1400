@@ -149,14 +149,30 @@ WagePair AmtComputeOfficeWages(int rankA, int rankB, float lawRate,
 }
 
 // ===========================================================================
-// Loan repayments.
-//   v3 = VIBE_Money_MultiplyByRate(4 - lawSlot + 10, currency);
-//   overdraftLimit = 2 * v3;
-//   if held < 0 && no lender && |held| > overdraftLimit -> foreclose
-//   else if held < 0 -> charge v3 interest
+// Loan repayments — gilde.exe 0x57b304 VIBE_Amt_ProcessLoanRepayments.
+//   v4 = VIBE_Money_MultiplyByRate(4 - lawSlot + 10, currency);   // base
+//   overdraftLimit = 2 * v4;
+//   result = VIBE_Person_SumCurrencyHeld(...);                    // held
+//   if (result < 0) {                                            // 0x57b3cb
+//       if (!dword_12CEA7C[i]              // no lender pointer  (0x57b411)
+//           && dword_12CE96C[i] == -1      // no creditor on record
+//           && abs(result) > 2*v4)         // |held| > overdraft
+//           QueueRequestPair33(...);       // foreclose, goto LABEL_3
+//       else if (dword_12CEA7C[i])         // lender present     (0x57b41b)
+//           QueueRequestCoord27(.. -10);   // dun the lender (relation penalty)
+//   }
+//   if (*officeStorage == 1)               // 0x57b3d1 (independent of held sign)
+//       QueueRequest16(.. v4 ..);          // charge base interest this turn
+//
+// W16: the binary foreclosure gate has THREE conditions — `!hasLender`,
+// `creditorId == -1` (dword_12CE96C; the "no creditor on record" marker), and
+// `|held| > 2*base`. The marker is exposed as `noCreditor` (defaults true: a
+// building with no creditor recorded). When a creditor IS on record
+// (noCreditor == false) the original skips the foreclosure goto and falls
+// through to the interest charge.
 // ===========================================================================
 LoanDecision AmtEvaluateLoan(int lawSlot, u8 currency, i32 heldCurrency,
-                             bool hasLender) {
+                             bool hasLender, bool noCreditor) {
     LoanDecision d;
     i32 base = AmtMoneyMultiplyByRate(4 - lawSlot + 10, currency);
     d.perTurnInterest = base;
@@ -164,9 +180,13 @@ LoanDecision AmtEvaluateLoan(int lawSlot, u8 currency, i32 heldCurrency,
 
     if (heldCurrency < 0) {
         i32 debt = heldCurrency < 0 ? -heldCurrency : heldCurrency; // abs32
-        if (!hasLender && debt > d.overdraftLimit) {
-            d.foreclose = true;
+        // 0x57b411: !lenderPtr && creditorId==-1 && |held| > 2*base.
+        if (!hasLender && noCreditor && debt > d.overdraftLimit) {
+            d.foreclose = true;  // 0x57b45d QueueRequestPair33; goto LABEL_3
         } else {
+            // 0x57b41b: lender present -> dun (relation penalty -10); either way
+            // the per-turn interest charge runs at 0x57b3d1 when officeStorage==1.
+            d.dunLender = hasLender;
             d.charge = true;
         }
     }

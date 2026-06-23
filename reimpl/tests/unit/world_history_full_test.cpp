@@ -13,6 +13,7 @@
 #include "crt/rand.h"
 
 #include <cstring>
+#include <string>
 
 using namespace guild;
 using namespace guild::world;
@@ -46,6 +47,33 @@ TEST(WorldHistoryFull, RoleNameTable) {
     CHECK_EQ(HistoryRoleNameIndex("GELD_extra"), 8);
 }
 
+// FULL byte-exact role-name table (aBuergermeister_3 @0x633FF8, 64-byte stride,
+// 15 rows). Pins every index so a single-row drift is caught; values are the
+// source's own recovery (history_full.cpp kHistoryRoleNames) and the dispatch-table
+// keyword column documented in progress/history-parse-context.md.
+TEST(WorldHistoryFull, RoleNameTableFullByteExact) {
+    static const char* const kExpect[15] = {
+        "BUERGERMEISTER", "BISCHOF", "RND_GILDENMEISTER", "RND_AMTSTRAEGERIN",
+        "RND_AMTSTRAEGER", "RND_AMTSPERSON", "REICHSTER_EINWOHNER",
+        "BESTES_WIRTSHAUS", "GELD", "STADTKASSE", "RND_KIRCHENBERUF", "RND_REICH",
+        "RND_NPC_EINWOHNER", "RND_HANDELSHERR", "RND_SPIELER",
+    };
+    CHECK_EQ(kHistoryRoleCount, 15);
+    CHECK_EQ(kHistoryRoleStride, 64);
+    for (int i = 0; i < 15; ++i) {
+        CHECK(std::string(kHistoryRoleNames[i]) == kExpect[i]);
+        CHECK_EQ(HistoryRoleNameIndex(kExpect[i]), i);
+    }
+}
+
+// Prefix table (dword_6343B8, 5-byte stride): "_NEW","_USE","_REL","_SET","_USE".
+TEST(WorldHistoryFull, PrefixTableFullByteExact) {
+    static const char* const kExpect[5] = {"_NEW", "_USE", "_REL", "_SET", "_USE"};
+    CHECK_EQ(kHistoryPrefixCount, 5);
+    for (int i = 0; i < 5; ++i)
+        CHECK(std::string(kHistoryPrefixTable[i]) == kExpect[i]);
+}
+
 TEST(WorldHistoryFull, TokenModeAndSlot) {
     CHECK(HistoryClassifyTokenMode("_NEW3") == HistoryTokenMode::kNew);
     CHECK(HistoryClassifyTokenMode("_USE0") == HistoryTokenMode::kUse);
@@ -53,10 +81,14 @@ TEST(WorldHistoryFull, TokenModeAndSlot) {
     CHECK(HistoryClassifyTokenMode("_SET5") == HistoryTokenMode::kLiteral);  // not in 3-scan
     CHECK(HistoryClassifyTokenMode("BISCHOF") == HistoryTokenMode::kLiteral);
 
-    CHECK_EQ(HistoryTokenSlot("_NEW3", HistoryTokenMode::kNew), 3);
-    CHECK_EQ(HistoryTokenSlot("_USE7", HistoryTokenMode::kUse), 7);
-    CHECK_EQ(HistoryTokenSlot("_REL9", HistoryTokenMode::kRel), -1);  // 9 >= 8
+    // gilde.exe 0x4fd44c reads the slot digit at token[5] (token[4] is a separator).
+    // Real token grammar: 4-char prefix, sep, slot digit at index 5.
+    CHECK_EQ(HistoryTokenSlot("_NEW_3", HistoryTokenMode::kNew), 3);
+    CHECK_EQ(HistoryTokenSlot("_USE_7", HistoryTokenMode::kUse), 7);
+    CHECK_EQ(HistoryTokenSlot("_REL_9", HistoryTokenMode::kRel), -1);  // 9 >= 8
     CHECK_EQ(HistoryTokenSlot("BISCHOF", HistoryTokenMode::kLiteral), -1);
+    // Binary edge: a 5-char token ("_NEW3") puts NUL at token[5] -> not a digit -> -1.
+    CHECK_EQ(HistoryTokenSlot("_NEW3", HistoryTokenMode::kNew), -1);
 }
 
 TEST(WorldHistoryFull, ScanStepCodes) {
@@ -115,6 +147,11 @@ TEST(WorldStatsFull, RecipientWalk) {
     CHECK_EQ(ReportEligibleRecipientCount(table, 5), 3);
     CHECK_EQ(kReportRecipientCount, 768);
     CHECK_EQ(kReportRecipientStride, 134);
+    // Loop bound (768 slots * 134 dwords) and the kind gate, pinned from the
+    // source's own recovery (statistics_full.h).
+    CHECK_EQ(kReportRecipientEnd, 102912);
+    CHECK_EQ((int)kReportRecipientKind, 6);
+    CHECK_EQ(kReportRecipientEnd / kReportRecipientStride, 768);
 }
 
 // ===========================================================================

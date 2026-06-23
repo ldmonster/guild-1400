@@ -5,6 +5,7 @@
 #include "sim/script_import4.h"
 #include "sim/script_import.h"   // real sibling: FindByHandle (0x442174)
 #include <cstring>
+#include <cstdio>
 
 namespace guild::sim {
 namespace {
@@ -473,6 +474,25 @@ i32 RunWithArgs(u8* ctx, int argc, const i32* firstArgs, i32* runRecord,
     ctx[kScRunFlags] |= 1;                               /*0x443bcd*/
     // scope base = ctx + 168.
     *reinterpret_cast<u8**>(ctx + kScScopeBase) = ctx + 168; /*0x443bda*/
+
+    // Log-ring entry: sprintf("Run script: %s", ctx) into logRing[132*idx + 4],
+    // clear logRing[132*idx + 0] = 0, advance the ring index (wrap when > 30).
+    // gilde.exe 0x443bf0..0x443c3c — dword_767950 ring, dword_62E8C0 cursor.
+    // (Reproduced guarded on a non-null ring; the original writes unconditionally
+    //  into the engine-allocated ring.)
+    ScriptEngineTables& T = ScriptTables();
+    if (T.logRing) {
+        u8* ring = static_cast<u8*>(T.logRing);
+        u8* rec = ring + 132 * T.logRingIdx;
+        std::snprintf(reinterpret_cast<char*>(rec + 4), 128, "Run script: %s",
+                      reinterpret_cast<const char*>(ctx));               /*0x443bf0*/
+        *reinterpret_cast<i32*>(rec) = 0;                                /*0x443c1a*/
+    }
+    ++T.logRingIdx;                                                      /*0x443c2c*/
+    if (T.logRingIdx > 30) T.logRingIdx = 0;                            /*0x443c32*/
+
+    // ctx + 2576 (kScSceneSlot) = dword_649D60 (current scene id).
+    *reinterpret_cast<i32*>(ctx + kScSceneSlot) = ScriptEngine().sceneId; /*0x443c45*/
     // ctx + 132 (owner) = dword_62E8D4 (ownerId).
     *reinterpret_cast<i32*>(ctx + kScOwner) = ScriptEngine().ownerId; /*0x443c50*/
     return 1;                                            /*0x443c56*/

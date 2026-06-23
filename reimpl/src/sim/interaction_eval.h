@@ -55,7 +55,7 @@ namespace guild::sim {
 //   byte[2]   (a2+2)          : record kind (3 == "in combat/jail" branch gate)
 //   dword[11] (a2+44)         : drink-state flag (Drink uses a2[11])
 //   dword[23] (a2+92)         : associated scene-node person id (-1 == none)
-//   byte[360] (a2+360)        : office/role byte (gesture office-rank gate)
+//   byte[358] (a2+0x166)      : office/role byte (gesture office-rank gate)
 //   word[242] (a2[242])       : flag word (bit 2 gate in combat branch)
 // ---------------------------------------------------------------------------
 struct EvalActor {
@@ -64,7 +64,7 @@ struct EvalActor {
     u8   kind       = 0;   // a2+2
     i32  drinkState = 0;   // a2+44  (dword index 11)
     i32  assocNode  = -1;  // a2+92  (dword index 23)
-    u8   office     = 0;   // a2+360
+    u8   office     = 0;   // a2+0x166 (byte 358) — EvalChooseGesture office gate input
     u16  flagWord242 = 0;  // a2[242]
 };
 
@@ -110,6 +110,12 @@ struct EvalLeafHooks {
     bool (*queryFind)(i32 nodeId, int a, int b, int c, int d) = nullptr;
     // VIBE_Building_LookupCachedMarketPrice @0x58f6b8 — cached price for an item.
     int (*marketPrice)(int itemId, u8 currencyIndex) = nullptr;
+    // VIBE_Office_GetDefinition @0x47f008 — EvalChooseGesture's acquire-branch slot
+    // start is office-rank-biased (NOT RNG): the function reads the actor's office
+    // byte (actor+0x166), looks it up, and on success branches on the rank byte
+    // (BYTE2 of the returned dword). This hook returns that rank, or -1 when the
+    // lookup fails (officeByte >= 0x25), reproducing the binary's v10 = 7 fallback.
+    int (*officeRank)(u8 officeByte) = nullptr;
 };
 extern EvalLeafHooks g_evalHooks;
 void ResetEvalLeafHooks();

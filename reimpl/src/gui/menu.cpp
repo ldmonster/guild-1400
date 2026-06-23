@@ -20,15 +20,28 @@ OptionsItem Menu_OptionsSelect(int buttonIndex) {
 }
 
 bool Menu_OptionEnabled(OptionsItem item, int sessionFlags) {
-    // Mission mode (0x80) disables Load and Save.
+    // gilde.exe 0x56dccc, exactly:
+    //   if (word_63C740 & 4) {                       // network
+    //       SetEnabled(Load, 0);                     //   Load  ALWAYS disabled
+    //       if ((word_63C740 & 0x10) == 0)
+    //           SetEnabled(Save, 0);                 //   Save  disabled unless 0x10 (host)
+    //   }
+    //   if (word_63C740 & 0x80) {                    // mission
+    //       SetEnabled(Load, 0);                     //   Load  disabled
+    //       SetEnabled(Save, 0);                     //   Save  disabled
+    //   }
+    // (the two blocks are independent; either disabling sticks.)
+
+    // Network (bit 0x4): Load is disabled unconditionally.
+    if ((sessionFlags & kFlagNetwork) != 0 && item == OptionsItem::kLoad)
+        return false;
+    // Network without host bit (0x10): Save is disabled too.
+    if ((sessionFlags & kFlagNetwork) != 0 && (sessionFlags & 0x10) == 0 &&
+        item == OptionsItem::kSave)
+        return false;
+    // Mission mode (0x80) disables both Load and Save.
     if ((sessionFlags & kFlagMission) != 0 &&
         (item == OptionsItem::kLoad || item == OptionsItem::kSave))
-        return false;
-    // Network mode (0x4): the original disables one of Load/Save unless flag 0x10 is
-    // also set; we model the common case where Save stays available (host) and Load is
-    // disabled for non-host network clients (0x4 without 0x10).
-    if ((sessionFlags & kFlagNetwork) != 0 && (sessionFlags & 0x10) == 0 &&
-        item == OptionsItem::kLoad)
         return false;
     return true;
 }

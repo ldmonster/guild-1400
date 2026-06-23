@@ -55,6 +55,22 @@ TEST(WorldMoneyFormat, RateRoundsHalfUp) {
     CHECK_EQ(Show(MoneyFormatWithSeparators(1234, 0)), "1.234<G>");
 }
 
+// HARDENING (wave-12): extreme magnitudes. abs(INT_MIN) overflows a 32-bit int
+// (UB) — the formatter widens to long long before std::abs, so INT_MIN is taken
+// as +2147483648 with no UB. Verify the boundary magnitudes group correctly.
+TEST(WorldMoneyFormat, ExtremeMagnitudes) {
+    // INT_MAX = 2147483647 -> "2.147.483.647".
+    CHECK_EQ(Show(MoneyFormatWithSeparators(2147483647)), "2.147.483.647<G>");
+    // INT_MIN = -2147483648 -> magnitude 2147483648, with a leading '-'.
+    CHECK_EQ(Show(MoneyFormatWithSeparators(-2147483648)), "-2.147.483.648<G>");
+    // INT_MIN with a rate divisor (rounds half-up after the divide).
+    //   2147483648 / 1000 = 2147483.648 -> 2147484 (half-up) -> "2.147.484".
+    CHECK_EQ(Show(MoneyFormatWithSeparators(-2147483648, 1000)), "-2.147.484<G>");
+    // The grouping core on the full 32-bit unsigned range.
+    CHECK_EQ(MoneyGroupThousands(4294967295u), std::string("4.294.967.295"));
+    CHECK_EQ(MoneyGroupThousands(2147483648u), std::string("2.147.483.648"));
+}
+
 TEST(WorldMoneyFormat, GroupCoreOnly) {
     // The exposed grouping core (no sign, no glyph).
     CHECK_EQ(MoneyGroupThousands(0u),       std::string("0"));

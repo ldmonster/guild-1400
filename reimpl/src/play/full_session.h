@@ -112,6 +112,12 @@ struct SessionTrace {
     int  frameAfterObjects   = 0;
     std::string frameBeforePath;      // dumped BMP (when a FileDumpGraphicsDevice)
     std::string frameAfterPath;
+    // FNV-1a over the device backbuffer of the last pre/post-action frame — a
+    // content-sensitive frame witness. (The nonClear COUNT alone is blind to a
+    // same-coverage layout change, e.g. the same number of uniform quads at
+    // different grid cells after a despawn — wave-3 level-shaded fill.)
+    std::uint64_t frameBeforeHash = 0;
+    std::uint64_t frameAfterHash  = 0;
 
     // -- the scripted P5 action ------------------------------------------------
     bool actionIssued   = false;      // IssueWorldClick issued an order

@@ -238,11 +238,15 @@ int ObjectMoveObject(SceneNode3* node, int x, int y, int z, int extra) {
 }
 
 // ===========================================================================
-// gilde.exe 0x43ea48 — VIBE_Object_ReplaceObject (eax=&handle, edi=prototype)
+// gilde.exe 0x43ea48 — VIBE_Object_ReplaceObject (eax=&handle, edi=prototype, edx=&meshName)
 // ===========================================================================
-int ObjectReplaceObject(SceneNode3* node, int prototype) {
+// if (*a1) RebindParentMesh(*a1, a2/*edi=prototype*/, *a3/*edx -> meshName*/);
+// else ReportError(...); return 1.
+int ObjectReplaceObject(SceneNode3* node, int prototype, const char* meshName) {
     if (node) {
-        if (g_hooks.rebindParentMesh) g_hooks.rebindParentMesh(node, prototype);
+        if (g_hooks.rebindParentMesh) {
+            g_hooks.rebindParentMesh(node, prototype, meshName);
+        }
     } else if (g_hooks.reportError) {
         g_hooks.reportError("ECMD_REPLACEOBJECT: could not find object");
     }

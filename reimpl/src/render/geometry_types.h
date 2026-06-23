@@ -66,6 +66,11 @@ struct Polygon {
     float   uvZ;      // +0x20  (+32) UV/offset z
     u8      flags36;  // +0x24  (+36) bit7 backface, 0x40/0xC0 = culled
     u8      flags38;  // +0x26  (+38) bit1 = no-cull, bit2 = ?, bit4 = ?
+    // Reconstruction helper (NOT a 32-bit-record field): the source BgfPolygon's
+    // material index (+0x28 on disk), carried through so the textured-raster path
+    // can bind the per-material texture. -1 == untextured (the engine resolved the
+    // per-poly texId on +36 from this; we keep the material index for binding).
+    i32     matIndex = -1;
 };
 
 // ---------------------------------------------------------------------------

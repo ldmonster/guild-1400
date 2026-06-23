@@ -79,7 +79,15 @@ public:
 
     void Clear() { count_ = 0; }
     int  Count() const { return count_; }
-    const ChronicleEntry& At(int i) const { return entries_[i]; }
+    // Bound the index to the populated range (the engine only ever reads loaded
+    // entries); an out-of-range index clamps to a valid slot rather than reading
+    // past the live entries. entries_[0] is always a valid object (the array is a
+    // fixed member), so a clamp to 0 on an empty/oob index is well-defined.
+    const ChronicleEntry& At(int i) const {
+        if (i < 0) i = 0;
+        else if (i >= count_) i = (count_ > 0) ? count_ - 1 : 0;
+        return entries_[i];
+    }
 
     // Appends an entry. Entries are kept in chronological (ascending day) order by
     // insertion-sort on the day key, matching the file's stored order the scanner

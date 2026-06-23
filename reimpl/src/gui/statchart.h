@@ -25,9 +25,11 @@
 //   The plot baseline is at y = (windowH - base); a sample value v scales to
 //   y = (windowH - base) - height * v   where height = (windowH - 30).
 //
-// VIBE_Coord_ConvertX @0x5c6b08 is an FPU `frndint` (round-to-nearest-even) applied
-// to st(0) before the `(int)` truncation in the originals.  We reproduce it as
-// RoundToNearestEven() so the integer pixel coordinates match bit-for-bit.
+// VIBE_Coord_ConvertX @0x5c6b08 sets the x87 control word's RC field to 0b11 (round
+// toward zero) and `frndint`s st(0) — i.e. it TRUNCATES toward zero (VERIFIED wave-17,
+// not round-to-nearest).  We reproduce it as ConvertX() == std::trunc so the integer
+// pixel coordinates / readouts match bit-for-bit.  Every float->int site in the city-
+// statistics window routes through ConvertX; there is no bare fistp.
 
 #include "guild/common/types.h"
 #include <array>
@@ -61,8 +63,8 @@ inline constexpr float kGraphLineBaselineBias = 10.0f;  // flt_624A9C
 inline constexpr int kChartHeightOffset = 30;
 
 // Gridline (vertical scale marks) layout (RenderChart):
-//   x_k = round( k * 0.25 * (windowW - 30) + 8.0 )         (the value-mark lines)
-//   label x_k = round( k * 0.25 * (windowW - 30) + 5.0 )   (the % text labels)
+//   x_k = trunc( k * 0.25 * (windowW - 30) + 8.0 )         (the value-mark lines)
+//   label x_k = trunc( k * 0.25 * (windowW - 30) + 5.0 )   (the % text labels)
 inline constexpr float kGridStep   = 0.25f;   // flt_624AA8
 inline constexpr float kGridWidthBias = -30.0f; // flt_624AAC
 inline constexpr float kGridLineBias  = 8.0f;   // flt_624AB0
@@ -70,9 +72,14 @@ inline constexpr float kGridLabelBias = 5.0f;   // flt_624AB4
 inline constexpr int   kGridCount = 4;          // four scale marks; labels 100,75,50,25
 
 // Bar-chart "nice maximum" tick ladder (dword_5526D0): the bar chart rounds its peak
-// up to the first entry >= peak so the y-axis tops out at a round number.
+// up to the first entry STRICTLY GREATER THAN the peak so the y-axis tops out at a
+// round number.  NOTE (DrawBarChart @0x55e408): the selection loop only scans the
+// first EIGHT entries (`cmp esi,20h`); the 9th entry (50000) is present in the table
+// but NEVER reached — if the peak is >= 20000 the axis max becomes the peak itself.
 inline constexpr std::array<i32, 9> kBarTickLadder = {
     500, 1000, 2000, 4000, 8000, 10000, 15000, 20000, 50000};
+// Entries actually scanned by the axis-max loop (idx 0..7 == 500..20000).
+inline constexpr int kBarTickLadderChecked = 8;
 
 // Minimum bar/line floor (flt_641DA8 == 0.0): values below this are clamped to it.
 inline constexpr float kChartFloor = 0.0f;
@@ -99,10 +106,10 @@ enum SeriesBit : i32 {
 };
 
 // ---------------------------------------------------------------------------
-// VIBE_Coord_ConvertX @0x5c6b08 — round st(0) to nearest integer (round-half-even),
-// the FPU `frndint` the originals apply before the `(int)` truncation.
+// VIBE_Coord_ConvertX @0x5c6b08 — TRUNCATE st(0) toward zero (RC=0b11 + frndint),
+// the FPU rounding the originals apply before the `(int)` cast.
 // ---------------------------------------------------------------------------
-double RoundToNearestEven(double x);
+double ConvertX(double x);
 
 // A computed plotted point: the integer screen (x,y) of one series sample.
 struct ChartPoint {
@@ -121,7 +128,9 @@ int ChartColumnStep(int windowW);
 //   x_k    = 45 + k*step                              (k = 0..15)
 //   height = (float)(windowH - 30)
 //   v_k    = max(series[k], 0.0f)                     (floor at flt_641DA8 == 0)
-//   y_k    = (int) round( (windowH - 22) - height * v_k )
+//   y_k    = (int) trunc( (windowH - 22) - (double)v_k * (double)height )
+// The series*height product is widened to double to match the x87 80-bit intermediate
+// (a float32 product diverges on e.g. 320*0.1f); ConvertX truncates toward zero.
 // The 16th (closing) sample uses series[15] (== flt_12350xx) and baseline windowH-22.
 //
 // `series` must hold kChartSamples floats.  Returns kChartSamples points.
@@ -136,7 +145,7 @@ std::array<ChartPoint, kChartSamples> ComputeLineSeriesPoints(
 //   topVal = first kBarTickLadder entry >= peak (the rounded y-axis maximum)
 //   scale  = (float)(windowH - 30) / (float)topVal
 //   x_k    = 45 + k*step
-//   y_k    = (int) round( (windowH - 22) - series[k] * scale )
+//   y_k    = (int) trunc( (windowH - 22) - series[k] * scale )   (scale stored float)
 //
 // Returns the rounded axis maximum in *axisMax (if non-null) and the points.
 // ---------------------------------------------------------------------------

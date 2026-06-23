@@ -64,10 +64,13 @@ TEST(WaterVerticesUnit, WaveGridGolden) {
 
 // ---------------------------------------------------------------------------
 // Full driver: one mesh. dt>0 path runs texture, accumulators, phase prop, grid.
-//   texRateA=0.3, texAccumA=0.8, dt=3 -> accumA=0.7, accumB=0.3.
-//   phase prop overlap: phase[0..2]<-prop[1..3], phase[3] untouched.
-//     speed=[0.5,1,1.5,2], phase0=[0.1,0.2,0.3,0.4]:
-//     prop=[1.6,3.2,4.8,0.1168147]; phase -> [3.2,4.8,0.1168147,0.4(unchanged)].
+//   texRateA=0.3, texAccumA=0.8, dt=3 -> accumA=(0.9+0.8)%1=0.7.
+//   texRateB=0.4, texAccumB=0.5, dt=3 -> accumB=(1.2+0.5)%1=0.7.
+//   (Both accumulators share the structure Fmod(rate*dt + accum, 1.0); the
+//    second is NOT Fmod(1.0, accumA) — see water_vertices.cpp / 0x5be4d7.)
+//   phase prop IN PLACE (0x5be428 verified): phase[k]=Fmod(speed[k]*dt+phase[k],2π).
+//     speed=[0.5,1,1.5,2], phase0=[0.1,0.2,0.3,0.4], dt=3:
+//     phase -> [1.6, 3.2, 4.8, 0.1168147].
 // ---------------------------------------------------------------------------
 TEST(WaterVerticesUnit, DriverDtPositive) {
     render::WaterMesh m;
@@ -79,7 +82,8 @@ TEST(WaterVerticesUnit, DriverDtPositive) {
     m.activeMember = 0;
     m.texRateA = 0.3f;
     m.texAccumA = 0.8f;
-    m.texRateB = 0.0f;
+    m.texRateB = 0.4f;
+    m.texAccumB = 0.5f;
     for (int k = 0; k < 4; ++k) {
         m.waveSpeed[k] = 0.5f + 0.5f * k;
         m.amp[k] = 1.0f + k;
@@ -93,17 +97,42 @@ TEST(WaterVerticesUnit, DriverDtPositive) {
     CHECK_EQ(m.activeMember, (u32)0x700);
     // accumulators:
     CHECK(nearF(m.texAccumA, 0.7f));
-    CHECK(nearF(m.texAccumB, 0.3f));
-    // phase propagation overlap:
-    CHECK(nearF(m.phase[0], 3.2f));
-    CHECK(nearF(m.phase[1], 4.8f));
-    CHECK(nearF(m.phase[2], 0.1168147f));
-    CHECK(nearF(m.phase[3], 0.4f));   // untouched (+0x144 never written)
-    // wave grid was filled (c=0 x uses the propagated phase[0]=3.2):
-    float expX = std::sin(std::cos(0.0) * kTwoPi + 0.0 + 3.2);
+    CHECK(nearF(m.texAccumB, 0.7f));
+    // phase propagation (in place, all four advanced):
+    CHECK(nearF(m.phase[0], 1.6f));
+    CHECK(nearF(m.phase[1], 3.2f));
+    CHECK(nearF(m.phase[2], 4.8f));
+    CHECK(nearF(m.phase[3], 0.1168147f));   // Fmod(6.4, 2π)
+    // wave grid was filled (c=0 x uses the propagated phase[0]=1.6):
+    float expX = std::sin(std::cos(0.0) * kTwoPi + 0.0 + 1.6);
     CHECK(nearF(m.waveOut[0], (float)expX));
     // latch:
     CHECK_EQ(m.lastTime, 3);
+}
+
+// Golden: the two texture-coord accumulators are INDEPENDENT, each
+//   accum = Fmod(rate*dt + accum, 1.0)   (0x5be4b9 / 0x5be4d7, fprem = st0 mod st1)
+// NOT the misrendered Fmod(1.0, accumA). Distinct rates/seeds + wraparound.
+TEST(WaterVerticesUnit, DriverTexAccumIndependentGolden) {
+    render::WaterMesh m;
+    std::memset(&m, 0, sizeof(m));
+    m.hasTexture = false;            // isolate the accumulator math
+    m.texRateA = 0.25f; m.texAccumA = 0.9f;   // (0.25*5 + 0.9) % 1 = 2.15 % 1 = 0.15
+    m.texRateB = 0.7f;  m.texAccumB = 0.2f;   // (0.7*5  + 0.2) % 1 = 3.7  % 1 = 0.7
+    for (int k = 0; k < 4; ++k) { m.amp[k] = 1.0f; m.waveSpeed[k] = 0.0f; m.phase[k] = 0.0f; }
+    m.lastTime = 0;
+    render::AnimateWaterVertices(&m, 1, 5, TestFindMember, nullptr);   // dt = 5
+    CHECK(nearF(m.texAccumA, 0.15f));
+    CHECK(nearF(m.texAccumB, 0.7f));
+    // Independence: a zero-rate-B accumulator with a nonzero seed stays put (mod 1).
+    render::WaterMesh m2; std::memset(&m2, 0, sizeof(m2));
+    m2.texRateA = 0.0f; m2.texAccumA = 0.4f;
+    m2.texRateB = 0.0f; m2.texAccumB = 0.6f;
+    for (int k = 0; k < 4; ++k) m2.amp[k] = 1.0f;
+    m2.lastTime = 0;
+    render::AnimateWaterVertices(&m2, 1, 9, TestFindMember, nullptr);
+    CHECK(nearF(m2.texAccumA, 0.4f));   // Fmod(0.4, 1.0) == 0.4
+    CHECK(nearF(m2.texAccumB, 0.6f));   // Fmod(0.6, 1.0) == 0.6 (NOT Fmod(1.0,0.4)=0.2)
 }
 
 // dt<=0: only texture advance runs; grid/accum/latch untouched.
@@ -185,6 +214,90 @@ TEST(FloorWaterUnit, FindRegionOffsetGolden) {
     // first span type<0 (no regions) -> 0:
     render::WaterRegionSpan none[1] = { mk(0, -1, 0, 0, 0xFF) };
     CHECK_EQ(render::FindRegionOffset(none, 1, 1000, 15, 0x55, 2), 0);
+}
+
+// ===========================================================================
+// wave-10 HARDENING (ASAN+UBSAN): degenerate driver inputs.
+// ===========================================================================
+
+// count == 0: the driver must touch nothing (no OOB on an empty mesh array).
+TEST(WaterVerticesUnit, DriverZeroCount) {
+    render::WaterMesh sentinel;
+    std::memset(&sentinel, 0, sizeof(sentinel));
+    sentinel.activeMember = 0xABCD;
+    // count==0 -> the loop body never runs; pass a valid pointer to one record.
+    render::AnimateWaterVertices(&sentinel, 0, 123, TestFindMember, nullptr);
+    CHECK_EQ(sentinel.activeMember, (u32)0xABCD);   // untouched
+}
+
+// dt == 0 exactly (time == lastTime): wave half is skipped, only texture runs.
+// Pinned here as the boundary of the `dt <= 0` gate.
+TEST(WaterVerticesUnit, DriverDtExactlyZero) {
+    render::WaterMesh m; std::memset(&m, 0, sizeof(m));
+    m.hasTexture = false;
+    m.phase[0] = 0.5f; m.amp[0] = 1.0f; m.waveSpeed[0] = 1.0f;
+    m.lastTime = 77;
+    render::AnimateWaterVertices(&m, 1, 77, TestFindMember, nullptr);   // dt == 0
+    CHECK(nearF(m.phase[0], 0.5f));        // unchanged
+    CHECK(nearF(m.waveOut[0], 0.0f));      // never written
+    CHECK_EQ(m.lastTime, 77);              // latch unchanged
+}
+
+// dt huge (time near INT_MAX, lastTime negative): the (float)dt conversion and the
+// Fmod reductions must not produce NaN/UB; the wave grid stays finite/bounded by
+// the amplitudes. Exercises the large-dt arithmetic path.
+TEST(WaterVerticesUnit, DriverHugeDt) {
+    render::WaterMesh m; std::memset(&m, 0, sizeof(m));
+    m.hasTexture = false;
+    for (int k = 0; k < 4; ++k) { m.amp[k] = 1.0f + k; m.waveSpeed[k] = 0.001f * (k + 1); m.phase[k] = 0.0f; }
+    m.texRateA = 0.0001f; m.texAccumA = 0.0f;
+    m.lastTime = -2000000000;     // dt = time - lastTime ~ 2.1e9 (positive, huge)
+    render::AnimateWaterVertices(&m, 1, 100000000, TestFindMember, nullptr);
+    // phases reduced into [0, 2π); accumulators into [0,1); grid bounded by amp.
+    for (int k = 0; k < 4; ++k) {
+        CHECK(std::isfinite(m.phase[k]));
+        CHECK(m.phase[k] >= -1e-3f && m.phase[k] <= (float)kTwoPi + 1e-3f);
+    }
+    CHECK(m.texAccumA >= 0.0f && m.texAccumA < 1.0f + 1e-4f);
+    for (int i = 0; i < 64; ++i) {
+        CHECK(std::isfinite(m.waveOut[i]));
+        CHECK(std::fabs(m.waveOut[i]) <= 4.0f + 1e-3f);   // |amp[k]| <= 4
+    }
+    CHECK_EQ(m.lastTime, 100000000);
+}
+
+// PropagatePhases with dt=0 and a huge dt: results stay finite and reduced.
+TEST(WaterVerticesUnit, PropagatePhasesEdge) {
+    float speed[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float phase[4] = {0.1f, 0.2f, 0.3f, 0.4f};
+    float out[4] = {0, 0, 0, 0};
+    render::PropagatePhases(speed, phase, 0.0, out);   // dt==0 -> Fmod(phase, 2π)
+    for (int k = 0; k < 4; ++k) CHECK(nearF(out[k], phase[k]));
+    render::PropagatePhases(speed, phase, 1e9, out);   // huge dt
+    for (int k = 0; k < 4; ++k) {
+        CHECK(std::isfinite(out[k]));
+        CHECK(out[k] >= 0.0f && out[k] <= (float)kTwoPi + 1e-3f);
+    }
+}
+
+// The 344-byte (86-float) WaterMesh record bounds: AnimateWaterVertices reads/
+// writes waveOut[0..63], phase[0..3], texAccumA/B, lastTime — all within the
+// record. Drive a 3-record array (the per-region mesh array shape) so ASAN covers
+// the per-record stride with mixed dt and a populated grid.
+TEST(WaterVerticesUnit, MeshArrayRecordBounds) {
+    const u32 cnt = 3;
+    std::vector<render::WaterMesh> ms(cnt);
+    std::memset(ms.data(), 0, ms.size() * sizeof(render::WaterMesh));
+    for (u32 i = 0; i < cnt; ++i) {
+        ms[i].amp[0] = 1.0f; ms[i].waveSpeed[0] = 0.5f; ms[i].phase[0] = 0.1f * i;
+        ms[i].lastTime = (i32)(i * 10);   // mixed dt across records
+    }
+    render::AnimateWaterVertices(ms.data(), cnt, 100,
+                                 [](i32, u8, void*) -> u32 { return 0u; }, nullptr);
+    for (u32 i = 0; i < cnt; ++i) {
+        CHECK_EQ(ms[i].lastTime, 100);                // all advanced (dt>0)
+        for (int k = 0; k < 64; ++k) CHECK(std::isfinite(ms[i].waveOut[k]));
+    }
 }
 
 // ---------------------------------------------------------------------------

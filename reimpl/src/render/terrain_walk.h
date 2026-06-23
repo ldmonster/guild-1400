@@ -4,6 +4,7 @@
 #include "render/mesh.h"            // DrawList sink
 #include "render/terrain_render.h"  // SelectTileMeshLod / TileSubdivCount / Floor LOD core
 #include "render/tile_geometry.h"   // BuildTileVertex / ClampLightByte / TileLightParams
+#include "render/terrain_uvtable.h" // BuildTerrainUvTable / TerrainQuadUv* / seam blend
 
 // =============================================================================
 // guild::render — the COMPLETE terrain whole-walk. Faithful 1:1 reconstruction of:
@@ -34,8 +35,13 @@
 //            UpdateTileVisibility reports a change, build the tile's quad poly array
 //            (TextureCache_GetOrBuildTile per cell + the two-triangle split).
 //     Pass B (lines 813..1736): the 2:1 LOD-seam STITCH — for each tile that borders a
-//            lower-LOD neighbour (right/up/left/down edges) emit the extra stitch
-//            triangles so the seam has no T-junction crack.
+//            FINER neighbour (right/up/left/down edges, *(neighbour+318) < lod) split
+//            each boundary edge at its midpoint (half-step lod>>1): emit one midpoint
+//            Vertex, re-point the boundary poly's far seam-vertex to it, and append one
+//            poly (copy of the boundary tri, v1 := midpoint, uvX stamped 16.0f) so the
+//            seam has no T-junction crack. RECONSTRUCTED 1:1 in terrain_walk.cpp (wave
+//            17); the seam-UV midpoint-blend sub-step is a named boundary (the repo's
+//            terrain pipeline has no flt_13FE540 UV table / per-tile UV scratch).
 //     Pass C (lines 1737..1844): ComputeVertexClipFlags per tile, perspective-project
 //            each clipped vertex (flt_13FCD0C/D10/D18 + flt_13FCAF8 scalars + the
 //            byte_649DD8 fog-shade branch), then signed-area backface cull per poly.
@@ -112,6 +118,16 @@ struct TerrainRenderState {
     u32 frameStamp = 0;             // dword_649D58 (stamped into each used texture +84)
     u32 texBaseStride = 0x80;       // dword_1406A84 stride for ((tex-base)>>7)+1 key
 
+    // ---- terrain UV emission (the flt_13FE540 subsystem, wave-18) -----------
+    // The 24-float corner-inset UV table (flt_13FE540), built by BuildTerrainUvTable
+    // (@0x5b94cc). Null -> the walk does not emit per-poly UVs (geometry only). When
+    // set, Pass A stamps each quad poly's UV record (tri0 = floats 0..5, tri1 = 6..11
+    // at subTexId*0x60) and Pass B applies the seam-UV midpoint blend.
+    const float* uvTable = nullptr; // flt_13FE540 (24 floats)
+    // The runtime per-cell sub-texture id table (byte_13DCE58 + base). All-zero in
+    // the shipped image (get_bytes verified) -> subTexId == 0. Null -> 0.
+    const u8* subTexSrc = nullptr;  // byte_13DCE58 + base
+
     // ---- floor bbox accumulators (Phase-2) ---------------------------------
     float bboxMinX = 1e30f;         // flt_13FD168[0]: min over visible tiles' +80
     float bboxMaxY = -1e30f;        // flt_13FCF3C:    max over visible tiles' +84
@@ -133,8 +149,13 @@ struct TerrainTile;  // fwd
 struct TerrainFloor {
     i32   size;        // +0x00 (v377) grid edge length (power of two)
     i32   tileSpan;    // +0x04 (v376) samples per tile edge before LOD subdivision
-    i32   mask;        // +0x08 (v378) wrap mask == size-1 (torus)
-    // +0x0C
+    i32   mask;        // +0x08 (v378) LINEAR cell-index wrap mask == N*N-1.
+                       // VIBE_Floor_LoadFromHeightmap @0x5bd544..0x5bd55e:
+                       //   edx=N; imul edx,edx; dec edx (=N*N-1); dec eax (=N-1);
+                       //   or edx,eax (=N*N-1); [+8]=edx, [+12]=eax. The walk masks
+                       //   LINEAR indices (v373 = (col + N*row) & v378), so this is
+                       //   N*N-1, NOT size-1. (+12 = N-1 is the per-axis mask.)
+    // +0x0C  N-1 (per-axis mask, [ebp+0Ch])
     const u8* heights; // +0x10 (v381) size*size elevation bytes
     // (+0x14 v382 == the texture source the cache reads; modelled as texSrc below)
     const u8* texSrc;  // +0x14 (v382) per-cell texture source buffer
@@ -145,8 +166,13 @@ struct TerrainFloor {
     // The 8x8 array of 100-byte tile records, based at +0x0E0 (224):
     TerrainTile* tiles; // +0xE0 logical base of the 64-entry tile grid (row stride 800)
     // edge-LOD neighbour table the stitch pass reads at +318+: modelled in Tile.edgeLod
-    // mip-level texture-source pointers indexed *(Floor + 4*(lod>>1) + 36) — v379:
-    const u8* mipTexSrc[4]; // (v379) per-LOD texture-source base (lod>>1 selects)
+    // Per-LOD slope/visibility flag buffer v379 = *(Floor + 4*(lod>>1) + 36) — the
+    // BuildTilePolys @0x5bc45c OUTPUT, one buffer per LOD layer (lod>>1 -> 0/1/2,
+    // built at cell-stride dword_5B8CEC = {1,2,4}). Each byte carries the 0x80
+    // slope/visibility bit (its SIGN is the per-quad diagonal-split selector v494 in
+    // Pass A) and the 0x40 sub-texture marker (the byte_13DCE58 gate). NOT a raw
+    // texture source — the same buffer is sampled for both the split and the sub-id.
+    const u8* mipTexSrc[4]; // (v379) per-LOD BuildTilePolys slope/flag buffer (lod>>1)
     u8    flatLit;     // +0x1C70 (+7280) bit1 = flat-lit, bit0 = build-geometry
     u8    minLodNibble;// +0x1C71 (+7281) low nibble => minimum LOD (1<<nibble)
     // water anim hookup (+6624 mesh ptr table, +7277 mesh count) is driven by caller
@@ -164,6 +190,25 @@ struct TerrainTile {
     void*   clipList;     // +0x30 (+48) tri-vertex-ptr scratch list (v483, stride 3)
     i32     vertCount;    // +0x38 (+56) emitted vertex count (cleared on rebuild)
     void*   drawData;     // +0x3C (+60) per-tile 24-byte UV/draw record base (v19/v379)
+    // ---- PER-POLY / PER-TILE UV EMISSION (wave-18, the flt_13FE540 subsystem) ----
+    // The engine carried, per poly, two UV-table POINTERS: poly+0x10 = &flt_13FE540[
+    // subTexId*0x60] (tri0's 6 floats) and poly+0x38 = that+0x18 (tri1's 6 floats),
+    // written by Pass A (@0x5c1ff5/0x5c2015). The stitch (Pass B) then COPIES a
+    // boundary tri's 6-float record into a per-tile 24-byte UV SCRATCH (tile+60 ==
+    // drawData, indexed 24*counter) and midpoint-blends the seam-edge UVs into it
+    // (flt_628B48 = 0.5), re-pointing the boundary poly +0x10 at the scratch.
+    //   This repo's Polygon has only a UV triple, so the per-poly UV record (the 6
+    // floats poly+16/+56 addressed) is modelled as a parallel array the walk fills:
+    //   polyUv      : kTriUvFloats (6) per poly, the tri's corner UVs.
+    //   uvScratch   : the per-tile 24-byte UV scratch (== drawData); the seam blend
+    //                 writes its midpoint-averaged record here (2 records per seam
+    //                 poly, indexed by an internal cursor) and the boundary/appended
+    //                 poly's polyUv is re-pointed at it.
+    // Both are bound by the GroundFrame alongside vertexBuf/polyBuf (handoff doc'd in
+    // terrain_walk.cpp). When null the walk skips UV emission (geometry unchanged).
+    float*  polyUv = nullptr;     // [6 * polyCap] tri-UV records (poly+16/+56 image)
+    float*  uvScratch = nullptr;  // [6 * scratchCap] per-tile UV scratch (tile+60)
+    i32     uvScratchCount = 0;   // seam-blend scratch cursor (records consumed)
     // +0x48..0x5D bound/LOD bookkeeping (tile_visibility owns the writes):
     float   bboxMinX;     // +0x50 (+80) bbox-min x (Phase-2 bound accum)
     float   bboxMinY;     // +0x54 (+84) bbox-min y

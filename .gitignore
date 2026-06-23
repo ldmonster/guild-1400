@@ -3,12 +3,13 @@ gilde_dll/*.dll
 gildestp_dll/*.dll
 reimpl/europe_guild_1400_original/
 reimpl/*.md
-reimpl/build/
+reimpl/build*/
 reimpl/build-vk/
 reimpl/Testing
 reimpl/vcpkg_installed/
 reimpl/tools/
 reimpl/scripts/
+reimpl/unpacked_resources/
 server_dll/*.dll
 vibe_progress/
 gilde.exe

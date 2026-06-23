@@ -20,9 +20,38 @@
 #include "sim/gametime.h"   // GameTimeAdvance, GameTimeCompare, GameTimeDiffMinutes
 #include "sim/npcaction.h"  // NpcClock(), GetNpcLeafHooks()
 
-#include <cmath>   // sqrt
+#include <cmath>    // sqrt
+#include <cstring>  // std::memcpy
 
 namespace guild::sim {
+
+// Byte-exact, alignment-safe loads/stores of values at arbitrary byte offsets. The
+// x86 binary uses unaligned `*(int*)(rec+N)` / `*(WORD*)(rec+N)` reads off He/person/
+// object records whose fields are not naturally aligned (e.g. +1, +2, +37, +93, and
+// the +82/+86/+90 GameTime-image stores). Binding an i32&/u16& reference to those
+// addresses is UB in portable C++ (UBSAN). These read/write the identical little-
+// endian bytes without forming a misaligned reference.
+namespace {
+inline i32 LoadI32At(const void* p, int off) {
+    i32 v; std::memcpy(&v, reinterpret_cast<const u8*>(p) + off, sizeof(v)); return v;
+}
+inline u16 LoadU16At(const void* p, int off) {
+    u16 v; std::memcpy(&v, reinterpret_cast<const u8*>(p) + off, sizeof(v)); return v;
+}
+inline void StoreI32At(void* p, int off, i32 v) {
+    std::memcpy(reinterpret_cast<u8*>(p) + off, &v, sizeof(v));
+}
+// The original 32-bit layout stores record pointers in 4-byte slots; on a 64-bit
+// host those host-width pointers land at offsets that are not 8-aligned (e.g. +20,
+// +97, +388, +52), so binding a `void*&`/`u8*&` to them is UB. Load/store the host
+// pointer through memcpy. (The test/host build the records with the same layout.)
+inline void* LoadPtrAt(const void* p, int off) {
+    void* v; std::memcpy(&v, reinterpret_cast<const u8*>(p) + off, sizeof(v)); return v;
+}
+inline void StorePtrAt(void* p, int off, void* v) {
+    std::memcpy(reinterpret_cast<u8*>(p) + off, &v, sizeof(v));
+}
+} // namespace
 
 // Owned globals (gilde .data) — the four walk-target slots.
 i32 g_walkTargetA = -1;  // dword_62D080
@@ -164,8 +193,11 @@ int MorphMovementInit(HeRecord* self, void* anim) {
     // Pointer slots are stored host-width at the dword indices the original uses; the
     // test record is built with the same layout, so index by 4-byte stride into a
     // host pointer slot.
-    auto ptrAt = [&](int dwordIdx) -> void*& {
-        return *reinterpret_cast<void**>(base + dwordIdx * 4);
+    auto ptrAt = [&](int dwordIdx) -> void* {
+        return LoadPtrAt(base, dwordIdx * 4);
+    };
+    auto setPtrAt = [&](int dwordIdx, void* v) {
+        StorePtrAt(base, dwordIdx * 4, v);
     };
     u8* cr = reinterpret_cast<u8*>(ptrAt(5));         // v4 = (int*)a1[5]
     if (!cr) return 0;                               // guard the deref chain
@@ -203,7 +235,9 @@ int MorphMovementInit(HeRecord* self, void* anim) {
         // v20 = dbl_610804 / *(float*)(anim+16); v19 = (v20 <= dbl_61080C) ? v20 : 2.0
         // then *(float*)(e+92) *= v19. dbl_610804 / dbl_61080C are speed-clamp terms
         // whose .rdata values flow into an opaque play-rate field (not asserted).
-        const double kDbl610804 = 1.0;   // dbl_610804
+        // Verified via get_bytes: dbl_610804 = 4049000000000000 = 50.0,
+        // dbl_61080C = 4000000000000000 = 2.0 (the earlier 1.0 was WRONG).
+        const double kDbl610804 = 50.0;  // dbl_610804
         const double kDbl61080C = 2.0;   // dbl_61080C
         float animScale = (anim ? *reinterpret_cast<float*>(static_cast<u8*>(anim) + 16) : 1.0f);
         double v20 = (animScale != 0.0f) ? (kDbl610804 / animScale) : kDbl610804;
@@ -223,7 +257,7 @@ int MorphMovementInit(HeRecord* self, void* anim) {
     void* v11 = ptrAt(61);
     if (v11) {
         // VIBE_Memory_FreeDebug(a1[61], ...) — release the scratch buffer.
-        ptrAt(61) = nullptr;
+        setPtrAt(61, nullptr);
     }
     // VIBE_ActionQueue_UnlinkEntry((int)a1) — opaque queue unlink.
     return 0;
@@ -239,10 +273,11 @@ int FindGestureTarget(GestureCtx* a1) {
     float radius = a1->radius;                            // ctx[1]
 
     u8* found = nullptr;                                  // v13 = 0
+    HeRecord* v2 = nullptr;        // the matched-partner record from the scan (v2)
     u8* selfPtr = a1->self;                               // *(_DWORD*)a1
     if (!selfPtr) return 0;
     // selfChar = *(selfPtr + 97) — a record pointer stored at byte 97 (host-width).
-    u8* selfChar = *reinterpret_cast<u8**>(selfPtr + 97);  // *(*a1 + 97)
+    u8* selfChar = reinterpret_cast<u8*>(LoadPtrAt(selfPtr, 97));  // *(*a1 + 97)
     if (!selfChar) return 0;
     u8* goalPtr = a1->goal;                               // a1[2]
     if (!goalPtr) return 0;
@@ -262,10 +297,11 @@ int FindGestureTarget(GestureCtx* a1) {
                 i32 partnerId = *reinterpret_cast<i32*>(ib + 196 + 4 * s);
                 if (partnerId != -1) {                    // *(v4+49) != -1
                     HeRecord* rec = k.personFindRecordById(partnerId);
+                    v2 = rec;                              // v2 = RecordById (0x4dc3ff)
                     if (rec) {
                         // partner character = rec[97(dword)==byte388] -> +52 -> +76/80/84.
-                        u8* rrec97 = *reinterpret_cast<u8**>(reinterpret_cast<u8*>(rec) + 388);
-                        u8* rchar = rrec97 ? *reinterpret_cast<u8**>(rrec97 + 52) : nullptr;
+                        u8* rrec97 = reinterpret_cast<u8*>(LoadPtrAt(rec, 388));
+                        u8* rchar = rrec97 ? reinterpret_cast<u8*>(LoadPtrAt(rrec97, 52)) : nullptr;
                         if (rchar) {
                             float dx = *reinterpret_cast<float*>(selfChar + 76)
                                      - *reinterpret_cast<float*>(rchar + 76);
@@ -296,12 +332,14 @@ int FindGestureTarget(GestureCtx* a1) {
         i32 pid = *reinterpret_cast<i32*>(found + 196 + 4 * slot);
         if (pid != -1 && k.personFindRecordById(pid)) {
             k.cmdRequestSingle49(pid);                    // QueueRequestSingle49(pid)
-            // if the found handler's primary partner id matches, flag it.
-            HeRecord* primary = k.personFindRecordById(*reinterpret_cast<i32*>(found + 196));
-            i32 primaryId = primary ? He_Id(primary) : -1;
-            if (primaryId == pid)
-                k.cmdRequestFlag55(primaryId, 2);
-            k.cmdRequestNamedObject53(pid, *reinterpret_cast<i32*>(selfPtr + 1),
+            // gilde.exe 0x4dc4ca: v8 = *((_DWORD*)v2 + 1) — the matched-partner record's
+            // id at +4 (NOT a fresh FindRecordById(found+196), and NOT begin+1). If the
+            // current slot id (pid) equals it, flag55(v8, 2). The earlier code looked up
+            // found+196 and read He_Id (+1) — WRONG record and WRONG offset.
+            i32 v8 = v2 ? LoadI32At(v2, 4) : 0;
+            if (v8 == pid)
+                k.cmdRequestFlag55(v8, 2);
+            k.cmdRequestNamedObject53(pid, LoadI32At(selfPtr, 1),
                                       0, -1, 1, kDetected);
             int roll = k.randomModulo(2);                 // RandomModulo(2)
             k.cmdRequestFlag55(pid, roll + 1);
@@ -338,17 +376,25 @@ HeRecord* InitArrestPerson(HeRecord* h) {
     if (classByte == 13 || classByte == 12 || classByte == 11)
         return reinterpret_cast<HeRecord*>(static_cast<intptr_t>(FreeHandler(h)));
 
-    k.cmdRequestArgs25(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(begin) + 1),
+    k.cmdRequestArgs25(LoadI32At(begin, 1),
                        90, 2, 2, 0);                    // arm the arrest cmd
     Cas8_Iter(h) = 0;                                   // *(h+184) = 0
 
-    // notify the guild masters (skip the target's own master) when not a player city.
-    u16 cityIdx = *reinterpret_cast<u16*>(reinterpret_cast<u8*>(begin) + 37);
+    // notify the guild masters (skip the target's own master) when a guild target.
+    // gilde.exe: v3 = &word_12CE910[268*cityIdx] is the target's guild record; the
+    // skip compares each guild's recipient (dword_12CE914[i]) against v3+4 = the
+    // target guild's recipient (== dword_12CE914[134*cityIdx] == cityRecipientId of
+    // the target's own city). The earlier code compared against begin->id — WRONG.
+    u16 cityIdx = LoadU16At(begin, 37);
     bool haveCity = (cityIdx != 0xFFFF);
+    // 134-dword stride slot of the target's own guild record (v3+4 in the binary).
+    const int selfSlot = 134 * static_cast<int>(cityIdx);
     if (haveCity && (He_Flags(h) & 2) != 0 && cls != 39) {
-        for (int idx = 0; idx != 102912; idx += 134) {  // i over the 768 person stride
+        for (int idx = 0; idx != 102912; idx += 134) {  // i over the 768 guild stride
             u8 c = k.cityCategory(static_cast<u16>(idx));  // byte_12CE912[i*4]
-            if ((c == 6 || c == 7) && k.cityRecipientId(static_cast<u16>(idx)) != begin->id) {
+            if ((c == 6 || c == 7)
+                && k.cityRecipientId(static_cast<u16>(idx))
+                       != k.cityRecipientId(static_cast<u16>(selfSlot))) {  // != v3+4
                 char body[2048];
                 k.renderFormatted(body, 5127, cityIdx, 0, 0);
                 k.sendQuickjump(k.cityRecipientId(static_cast<u16>(idx)), -1, 0, body, 1418);
@@ -356,12 +402,20 @@ HeRecord* InitArrestPerson(HeRecord* h) {
         }
     }
 
-    // class 5 + non-guild target -> seize money.
+    // class 5 + non-guild guild-master target -> seize money. gilde.exe 0x4e4183:
+    // requires *v14==5 (class table), v3!=0 (haveCity), and *(v3+2) (== category of
+    // the target's own guild == cityCategory(target)) is NEITHER 6 NOR 7; then
+    // SumChildMoney(begin+93) and EnqueueCmd15(v3+4, begin+1, money, byte_6477A1).
+    // The earlier code dropped the v3+2 category guard and passed cityIdx as the
+    // recipient instead of v3+4 — both WRONG.
     if (classByte == 5 && haveCity) {
-        i32 money = k.sumChildMoney(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(begin) + 93));
-        if (money)
-            k.cmdEnqueue15(cityIdx, *reinterpret_cast<i32*>(reinterpret_cast<u8*>(begin) + 1),
-                           money, 0);
+        u8 selfCat = k.cityCategory(static_cast<u16>(selfSlot));  // *(v3+2)
+        if (selfCat != 6 && selfCat != 7) {
+            i32 money = k.sumChildMoney(LoadI32At(begin, 93));
+            if (money)
+                k.cmdEnqueue15(k.cityRecipientId(static_cast<u16>(selfSlot)),  // v3+4
+                               LoadI32At(begin, 1), money, 0);
+        }
     }
 
     He_ReqHandle(h) = -1;                               // *(h+132) = -1
@@ -391,7 +445,7 @@ LABEL_finish:
         {
             HeRecord* begin = k.personQueryBegin(Tok(target), 1, 1, He_Counter172(h));
             if (begin)
-                k.cmdRequestArgs25(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(begin) + 1),
+                k.cmdRequestArgs25(LoadI32At(begin, 1),
                                    90, 0, 2, 2);
             return FreeHandler(h);
         }
@@ -406,8 +460,12 @@ LABEL_finish:
             if ((He_Flags(h) & 2) != 0 && cls != 39) {
                 // bribe/escape: ratio = budget / (roomWorth + bias); escape if
                 // ratio*scale < RandomModulo(100).
-                int worth = k.computeRoomWorth(v5, Cas8_FieldSelDword(v5) >> 24,
-                                               reinterpret_cast<HeRecord*>(target) ? 0 : 0);
+                // gilde.exe 0x4e42dd: mov edx,[ecx+59h]; sar edx,18h — the field
+                // selector is read from the *resolved person record* at +0x59 (+89),
+                // arithmetic-shifted right 24 (signed), and the third arg is `a3`
+                // (the target/esi). The earlier code read +169 (Cas8_FieldSelDword)
+                // and passed 0 — both WRONG.
+                int worth = k.computeRoomWorth(v5, LoadI32At(v5, 89) >> 24, Tok(target));
                 double ratio = static_cast<double>(Cas8_CountA(h))
                              / (static_cast<double>(worth) + kArrestWorthBias);
                 int v25 = static_cast<u16>(k.randomModulo(100));
@@ -440,8 +498,8 @@ i32 InitEscortPrisoner(HeRecord* h, int edi, HeRecord* target) {
     if (!begin)
         return FreeHandler(h);
 
-    Cas8_Misc16(h) = *reinterpret_cast<i32*>(reinterpret_cast<u8*>(begin) + 1);  // *(h+16)
-    k.cmdRequestArgs25(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(begin) + 1),
+    Cas8_Misc16(h) = LoadI32At(begin, 1);  // *(h+16)
+    k.cmdRequestArgs25(LoadI32At(begin, 1),
                        90, 4, 2, 0);
 
     StampClock(h, 96);   // appointment scratch (+96)
@@ -450,9 +508,9 @@ i32 InitEscortPrisoner(HeRecord* h, int edi, HeRecord* target) {
     GameTimeAdvance(PoseAt(h, 82), 0, 0, 10);            // +10 minutes
 
     // copy the appointment GameTime into +184..+196 (14 bytes).
-    *reinterpret_cast<i32*>(HeBytes(h) + 184) = *reinterpret_cast<i32*>(HeBytes(h) + 82);
-    *reinterpret_cast<i32*>(HeBytes(h) + 188) = *reinterpret_cast<i32*>(HeBytes(h) + 86);
-    *reinterpret_cast<i32*>(HeBytes(h) + 192) = *reinterpret_cast<i32*>(HeBytes(h) + 90);
+    StoreI32At(HeBytes(h), 184, LoadI32At(HeBytes(h), 82));
+    StoreI32At(HeBytes(h), 188, LoadI32At(HeBytes(h), 86));
+    StoreI32At(HeBytes(h), 192, LoadI32At(HeBytes(h), 90));
     *reinterpret_cast<u16*>(HeBytes(h) + 196) = *reinterpret_cast<u16*>(HeBytes(h) + 94);
 
     // v6 = (double)count * 0.5 ; advance the saved pose by that many MINUTES (the
@@ -476,7 +534,7 @@ i32 RunLagerFuellen(HeRecord* h, int edi, int esi) {
         case 1: {
             k.resolveEntityById(0, &obj, He_Counter172(h), 0);
             if (obj)
-                k.cmdRequestArgs25(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(obj) + 1),
+                k.cmdRequestArgs25(LoadI32At(obj, 1),
                                    19, 0, 1, 32);
             result = FreeHandler(h);
             break;
@@ -514,18 +572,18 @@ i32 RunLagerFuellen(HeRecord* h, int edi, int esi) {
                 if (wp)
                     k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)),
                                     Cas8_Misc16(h),
-                                    *reinterpret_cast<i32*>(reinterpret_cast<u8*>(wp) + 1),
+                                    LoadI32At(wp, 1),
                                     body, 1421);
                 else
                     k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)),
                                     Cas8_Misc16(h), -1, body, 1421);
             }
             if (obj) {
-                k.cmdRequestArgs25(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(obj) + 1),
+                k.cmdRequestArgs25(LoadI32At(obj, 1),
                                    19, 0, 1, 32);
                 u8 v13 = *reinterpret_cast<u8*>(HeBytes(h) + 180);
                 k.cmdBeginDeltaPacket(Tok(obj),
-                                      *reinterpret_cast<i32*>(reinterpret_cast<u8*>(obj) + 1));
+                                      LoadI32At(obj, 1));
                 k.cmdAppendDeltaField(1u, 1u, &v13, 0x12u);
                 k.cmdRequestState22();
             }
@@ -562,8 +620,12 @@ i32 RunLagerErweitern(HeRecord* h, int edi) {
                 v13 = 1;
                 k.resolveEntityById(0, &obj, He_Counter172(h), 0);
                 if (obj) {
-                    k.cmdBeginDeltaPacket(Tok(obj), *reinterpret_cast<i32*>(reinterpret_cast<u8*>(obj) + 2));
-                    k.cmdAppendRawField(4u, 1u, &v13, 0);  // off opaque (LOWORD-14-dword_11AA474)
+                    k.cmdBeginDeltaPacket(Tok(obj), LoadI32At(obj, 2));
+                    // gilde.exe 0x4e0e47: AppendRawField(4,1,&v13, LOWORD(obj)+14-dword_11AA474).
+                    // dword_11AA474==0; LOWORD(obj) is the object-base normalization the
+                    // cmd-delta system applies (dropped, as in RunAdjust which passes the
+                    // bare 28/29). Field-relative offset is 14; the earlier code passed 0.
+                    k.cmdAppendRawField(4u, 1u, &v13, 14);
                     k.cmdRequestState22();
                     i32 v5 = Cas8_CountA(h) - 1;
                     Cas8_CountA(h) = v5;
@@ -580,7 +642,7 @@ i32 RunLagerErweitern(HeRecord* h, int edi) {
                                 k.renderFormatted(body, 6088, 0, 0, 0);
                                 if (wp)
                                     k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)), -1,
-                                                    *reinterpret_cast<i32*>(reinterpret_cast<u8*>(wp) + 1),
+                                                    LoadI32At(wp, 1),
                                                     body, 1429);
                                 else
                                     k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)), -1, -1,
@@ -649,7 +711,7 @@ i32 RunAdjustObjectField(HeRecord* h, int edi, int esi) {
             if (budA > 0) {
                 Cas8_CountA(h) = budA - 1;
                 if (*reinterpret_cast<u8*>(objb + 28) < limA) {
-                    k.cmdBeginDeltaPacket(Tok(obj), *reinterpret_cast<i32*>(objb + 2));
+                    k.cmdBeginDeltaPacket(Tok(obj), LoadI32At(objb, 2));
                     k.cmdAppendRawField(1u, 1u, &v22, 28);
                     k.cmdRequestState22();
                 }
@@ -659,7 +721,7 @@ i32 RunAdjustObjectField(HeRecord* h, int edi, int esi) {
                 if (budB > 0) {
                     Cas8_CountB(h) = budB - 1;
                     if (*reinterpret_cast<u8*>(objb + 29) < limB) {
-                        k.cmdBeginDeltaPacket(Tok(obj), *reinterpret_cast<i32*>(objb + 2));
+                        k.cmdBeginDeltaPacket(Tok(obj), LoadI32At(objb, 2));
                         k.cmdAppendRawField(1u, 1u, &v22, 29);
                         k.cmdRequestState22();
                     }
@@ -681,7 +743,7 @@ i32 RunAdjustObjectField(HeRecord* h, int edi, int esi) {
                         k.renderFormatted(body, 6087, 0, 0, 0);
                         if (wp)
                             k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)), -1,
-                                            *reinterpret_cast<i32*>(reinterpret_cast<u8*>(wp) + 1),
+                                            LoadI32At(wp, 1),
                                             body, 1429);
                         else
                             k.sendQuickjump(k.cityRecipientId(He_CityIndex(h)), -1, -1, body, 1429);
@@ -740,8 +802,12 @@ i32 RunPickFromGround(HeRecord* h, u16* edi, char* esi) {
             k.changePlayerAction(Tok(begin), 0, 0, *reinterpret_cast<u16*>(rec2));
             return FreeHandler(h);
         }
-        // produce: amount = output * 0.1 * 1.0 * (workCount*0.1 + 1), then divide by
-        // (fieldVal*0.1 + 1), clamp so total field <= ceiling, emit one raw delta.
+        // produce: amount = output * (1/30) * 8 * (workCount*0.01 + 1), then divide by
+        // (fieldVal*(1/252) + 1), clamp so total field <= 252, emit one raw delta.
+        // gilde.exe 0x4e1e92..: each fp result is truncated by ConvertX (fistp after the
+        // ConvertX call rounds-to-zero); critically the divide uses the *byte-truncated*
+        // amount: var_1C[0] = (u8)amount is reloaded as the numerator (0x4e1ed6). The
+        // earlier code divided the full int amount — WRONG.
         HeRecord* worker = k.personQueryBegin(Tok(esi), 1, 1, Cas8_Misc16(h));
         if (!worker) return FreeHandler(h);
         int workCount = k.sumWorkstation(worker, 12, 1);
@@ -749,20 +815,28 @@ i32 RunPickFromGround(HeRecord* h, u16* edi, char* esi) {
                                           reinterpret_cast<const GameTime*>(&NpcClock()));
         double v17 = static_cast<double>(produced) * kPickMulA * kPickMulB
                    * (static_cast<double>(workCount) * kPickWorkBonus + 1.0);
-        int amount = static_cast<int>(v17);
+        u8 amountByte = static_cast<u8>(static_cast<int>(v17));  // var_1C[0] = (u8)amount
         // divisor from the current field fill.
         u8 fieldVal = static_cast<u8>(esi ? esi[fieldSel + 128] : 0);
         double v18 = static_cast<double>(fieldVal) * kPickFieldDiv + 1.0;
-        amount = static_cast<int>(static_cast<double>(amount) / v18);
+        // numerator is the byte-truncated amount (loaded as a word at 0x4e1ee8).
+        int amount = static_cast<int>(static_cast<double>(amountByte) / v18);
         int total = static_cast<u8>(amount) + fieldVal;
         if (static_cast<double>(total) > kPickCeiling) {
             double v20 = kPickFieldCeil - static_cast<double>(static_cast<i16>(fieldVal));
             amount = static_cast<int>(v20);
         }
-        int deltaSrc = amount;
+        int deltaSrc = amount;  // AppendRawField size=1 reads only the low byte == (u8)amount
         k.cmdBeginDeltaPacket(Tok(edi),
                               edi ? *reinterpret_cast<i32*>(reinterpret_cast<u8*>(edi) + 4) : 0);
-        k.cmdAppendRawField(1u, 1u, &deltaSrc, *reinterpret_cast<u8*>(HeBytes(h) + 172) + fieldSel + 128);
+        // gilde.exe: offset = *(char*)(h+172) + (WORD)edi + 128 - dword_11AA474, with
+        // dword_11AA474 == 0 and (WORD)edi the object-base normalization the cmd-delta
+        // system applies (dropped here, matching the RunAdjust/RunLagerErweitern leaves
+        // that pass the bare field-relative offset). The field selector is a SIGNED i8
+        // of h+172; the earlier code added `fieldSel` (the +169>>24 selector) here —
+        // that term is NOT in the binary, removed.
+        int rawOff = static_cast<int>(*reinterpret_cast<i8*>(HeBytes(h) + 172)) + 128;
+        k.cmdAppendRawField(1u, 1u, &deltaSrc, rawOff);
         k.cmdRequestState22();
         StampClock(h, 82);
         StampClock(h, 96);
@@ -810,18 +884,23 @@ i32 RunHerdAnimals(HeRecord* h, int esi) {
             if (result < 0) {
                 HeRecord* worker = k.personQueryBegin(esi, 1, 1, Cas8_Misc16(h));
                 if (worker) {
-                    HeRecord* wp = k.objectQueryFind(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(worker) + 93),
+                    HeRecord* wp = k.objectQueryFind(LoadI32At(worker, 93),
                                                      1, 0, 221, 0);
                     if (!wp) wp = k.findWorkProduct(worker);
-                    HeRecord* pen = k.objectQueryFind(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(worker) + 93),
+                    HeRecord* pen = k.objectQueryFind(LoadI32At(worker, 93),
                                                       2, 6, 0, 42);
                     if (pen) {
                         int work = k.sumWorkstation(worker, 0, 1);
                         double v27 = static_cast<double>(work) * kHerdWorkBonus + 1.0;
                         int v32 = static_cast<u16>(k.randomModulo(5)) + 5;
                         int amount = static_cast<int>(static_cast<double>(v32) * v27);
-                        k.cmdRequest17(*reinterpret_cast<i32*>(reinterpret_cast<u8*>(pen) + 2),
-                                       0, amount, 0, 0, 0);
+                        // gilde.exe 0x4e1a01: QueueRequest17(pen+2, <garbage>, amount,
+                        //   v17, byte_6477A1, 0) with v17 = *(int*)(h+172) >> 16 (sar,
+                        //   signed; 0x4e19db) and byte_6477A1 == 0 at default. The earlier
+                        //   code passed 0 for the 4th arg (v17) — corrected.
+                        int v17 = LoadI32At(h, 172) >> 16;
+                        k.cmdRequest17(LoadI32At(pen, 2),
+                                       0, amount, v17, 0, 0);
                         // render the combined 5144/5145 narrative (opaque interleave).
                         char body[256];
                         k.renderFormatted(body, 5144, 5140, 0, 0);

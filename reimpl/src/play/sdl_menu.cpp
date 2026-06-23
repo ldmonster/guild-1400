@@ -14,6 +14,7 @@
 #include "play/menu_assets.h"  // MenuAssets — real gilde.gfx background + buttons
 #include "render/text_raster.h"
 #include "render/font.h"
+#include "render/perf_overlay.h"
 #include "render/types.h"
 #include "shim/IFileSystem.h"
 #include "shim_impl/disk_filesystem.h"
@@ -148,6 +149,7 @@ SdlMenuResult RunSdlMenu(shim::IGraphicsDevice& device, shim::IPlatform& plat,
 
     int frame = 0;
     bool prevLeft = false;
+    bool prevF11 = false;
 
     for (;;) {
         if (cfg.maxFrames >= 0 && frame >= cfg.maxFrames) break;
@@ -184,6 +186,10 @@ SdlMenuResult RunSdlMenu(shim::IGraphicsDevice& device, shim::IPlatform& plat,
                     gui::MainMenu_ButtonY(hov) - 3, kBtnHitW + 6, kBtnHitH + 6,
                     0x00FFFF00u);
 
+        // In-game performance overlay (Steam-style); off unless GUILD_PERF_OVERLAY / F11.
+        render::GlobalPerfOverlay().Frame(plat.timeMs());
+        render::GlobalPerfOverlay().Draw(scratch.data(), W, H);
+
         BlitToDevice(scratch.data(), W, H, device);
         device.present();
         ++res.framesPresented;
@@ -193,6 +199,10 @@ SdlMenuResult RunSdlMenu(shim::IGraphicsDevice& device, shim::IPlatform& plat,
         plat.getMouse(ms);
         const bool leftEdge = ms.left && !prevLeft;
         prevLeft = ms.left;
+
+        const bool f11 = plat.keyDown(0x7A);   // F11 cycles the performance overlay
+        if (f11 && !prevF11) render::GlobalPerfOverlay().CycleDetail();
+        prevF11 = f11;
 
         if (plat.keyDown(kVkEscape)) { res.quitByEsc = true; res.choice = SdlMenuChoice::kQuit; break; }
         bool decided = false;

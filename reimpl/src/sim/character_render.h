@@ -56,6 +56,8 @@ struct RenderActor {
     int   id;            // +4
     u8    alive;         // +8
     void* mesh;          // +52
+    void* handle112;     // +112  (ToggleAniPlayback gate: result[28], esi); a
+                         //        distinct handle from the +52 mesh used in the body.
     void* universe;      // +136
     u8    flagsA;        // +140
     u8    flagsB;        // +141

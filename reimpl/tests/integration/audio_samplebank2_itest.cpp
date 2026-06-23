@@ -83,11 +83,14 @@ TEST(Sb2Itest, ValidateSampleFileHookFlow) {
 }
 
 TEST(Sb2Itest, ClassifyDrivesFormatPipeline) {
-    // ExtractFileExtension -> ClassifyAudioFormat is the load-time format probe.
+    // gilde.exe 0x447770 extracts the BASE FILENAME (between the last '\\' and the
+    // trailing '.'), copying from v7+1 for v8-v7-1 bytes — verified against the
+    // disasm (sub ebx,edx @0x4477b1).  For "C:\\voices\\hi.mp3" -> "hi".
     char ext[16];
     CHECK_EQ(ExtractFileExtension("C:\\voices\\hi.mp3", ext, 16), 0);
-    CHECK_EQ(std::strncmp(ext, "mp3", 3), 0);
-    // The classifier matches on the dotted form, as the original does on the path.
+    CHECK_EQ(std::strncmp(ext, "hi", 2), 0);
+    // ClassifyAudioFormat (0x4477c8) matches a .wav/.mp3 substring on the full
+    // dotted name (case-sensitive), as the original does on the path token.
     CHECK_EQ(ClassifyAudioFormat("hi.mp3"), 2);
     CHECK_EQ(ClassifyAudioFormat("hi.wav"), 1);
 }

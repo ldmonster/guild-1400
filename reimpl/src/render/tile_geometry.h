@@ -80,4 +80,17 @@ i32 AppendTilePolysToDrawList(const Polygon* polys, i32 polyCount,
 // (the engine never clamped the low end — negative values wrap as the cast does).
 u8 ClampLightByte(float x);
 
+// NOTE: PER-QUAD UV EMISSION (the @0x5bf22c poly+16/+56 UV pointers + the
+// flt_13FE540 24-float corner-inset table) lives in render/terrain_uvtable.{h,cpp}
+// (TerrainQuadUvT0/T1 + TerrainSubTexId + the flt_628B48=0.5 seam blend), driven by
+// the terrain walk (terrain_walk.cpp Pass A stamps each quad's tri0/tri1 UV record,
+// Pass B blends the seam midpoint). It is NOT a per-vertex build step, so it is not
+// folded into BuildTileVertex here — the vertex build owns world xyz + RGB light only.
+
+// NOTE: VIBE_Heightmap_FloodFillTileType @0x5c5530 (the single-pass 4-neighbour
+// terrain-type fill, xref'd only from VIBE_Heightmap_BuildTerrainMesh @0x5c5610)
+// is ALREADY reconstructed 1:1 over the 24-byte cell grid in render/heightmap.cpp
+// (FloodFillTileType(Heightmap*, u8, u8)); it is NOT re-defined here (ODR / reuse).
+// Verified against the decompile in wave-5 (see progress/tile-textures-wave5.md).
+
 } // namespace guild::render

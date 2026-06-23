@@ -91,10 +91,11 @@ bool CityMap_CreateCityPointMarker(const std::string& cityName, bool resolved,
     if (!resolved)
         return false; // FindByHandle returned 0 -> early return
 
-    g_markerSink->ProjectThroughBoneChain(); // VIBE_Transform_PointThroughBoneChain
-    g_markerSink->AttachToUniverse();         // VIBE_Object_AttachToUniverseNode
-    CityMap_ApplyMarkerFlags(rec);
-    g_markerSink->LoadAnimation(kCityMarkerAnim); // VIBE_Character_LoadObjectAnimation
+    g_markerSink->ProjectThroughBoneChain(); // VIBE_Transform_PointThroughBoneChain @0x5194d4
+    g_markerSink->AttachToUniverse();         // VIBE_Object_AttachToUniverseNode @0x5194e7
+    CityMap_ApplyMarkerFlags(rec);            // flag writes @0x5194f3..0x519529
+    g_markerSink->BuildLightCache();          // VIBE_Light_BuildObjectCache @0x51952f
+    g_markerSink->LoadAnimation(kCityMarkerAnim); // VIBE_Character_LoadObjectAnimation @0x51953b
     return true;
 }
 

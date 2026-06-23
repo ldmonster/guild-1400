@@ -78,25 +78,28 @@ int ContactDispatch(const std::vector<ContactMenuItem>& items,
 
 // ===========================================================================
 // City contact dispatch (the City/Location entry point that decides WHICH
-// contact loop a building/NPC opens). gilde.exe routes by building object type
-// (*object == kind) and panel flags. This recovers the routing table the world
-// uses to pick a loop. The kinds are the object-type bytes the dispatcher and
-// the trade panel switch on (see VIBE_TradeTransport_PanelDispatcher's title
-// switch: 8/14 dwelling, 6 market, 22 guild, 11/12/13 office, 2/7 special,
-// 19/4/16 production, 10 contor/market-stall).
+// contact loop a building/NPC opens). gilde.exe 0x51defc
+// VIBE_Building_EnterAndDispatch reads the building object's 16-bit type code
+// (`mov ax,[esi]` at 0x51e267) and runs a binary-search switch (0x51e26a..) to
+// pick a contact loop. This recovers the subset of that routing relevant to the
+// loops modeled below. The codes are the REAL object-type values from the switch
+// (NOT the trade-panel title bytes): ThiefGuild=84, Church=229/230,
+// Production=247, Tavern=288. The full switch routes ~30 codes to ~30 distinct
+// loops; only the four with a kind here are classified, everything else -> Idle.
 // ===========================================================================
 enum class LocationKind {
-    Production = 0,   // craft/production building -> ProductionContactLoop
-    Church,           // -> ChurchContactLoop
-    ThiefGuild,       // -> ThiefGuildContactLoop
-    Tavern,           // -> Tavern* loops
-    Residence,        // -> Residence* loops
-    Idle,             // no interactive contact -> IdleContactLoop
+    Production = 0,   // type 247 (0xF7)        -> VIBE_Location_ProductionContactLoop
+    Church,           // type 229/230 (0xE5/E6) -> VIBE_Location_ChurchContactLoop
+    ThiefGuild,       // type 84 (0x54)         -> VIBE_Location_ThiefGuildContactLoop
+    Tavern,           // type 288 (0x120)       -> VIBE_ContactMenu_Tavern
+    Residence,        // (unreachable: no residence loop exists in the dispatcher)
+    Idle,             // any other code -> a non-modeled loop / default spin
 };
 
-// gilde.exe contact-loop title/kind classifier (the `switch (v11)` on *object in
-// the PanelDispatcher, reused by the City contact router). Maps an object-type
-// byte to a contact-loop kind. Unknown types -> Idle.
+// gilde.exe 0x51defc contact-loop selector (the binary-search switch on the
+// object's 16-bit type code in VIBE_Building_EnterAndDispatch). Maps an
+// object-type code to one of the modeled contact-loop kinds. Codes that route to
+// loops not modeled by LocationKind (and unknown codes) -> Idle.
 LocationKind ClassifyLocationKind(int objectType);
 
 // ===========================================================================

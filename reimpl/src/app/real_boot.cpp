@@ -34,8 +34,16 @@ bool SlurpText(shim::IFileSystem* fs, const char* path, std::string& out) {
 } // namespace
 
 const std::vector<std::string>& DefaultResourceArchives() {
-    // The real Resources/*.BIN PKZIP archive set shipped with "Die Gilde —
-    // Europe 1400". Order matches a directory listing of Resources/.
+    // NOTE (wave-15 binary diff): this list is NOT a binary constant. The
+    // original does NOT carry a hardcoded archive list — VIBE_App_InitSubsystems-
+    // AndMovieDll (0x527de0) only calls VIBE_Vfs_Init(0x451f98); the VFS then
+    // DISCOVERS archives by scanning the game directory (VIBE_Vfs_ScanDirectory
+    // 0x450234) and probing the split-volume extension suffixes ".BIN", ".BIN0"
+    // .. ".BIN5" (string table @0x44e8f0..0x44e914, used by Vfs_ScanDirectory /
+    // Vfs_OpenFile / Vfs_AddFileSorted). The list below is therefore an
+    // install-specific CONVENIENCE for the host/test mount layer (the shipped
+    // Resources/*.BIN set), not a reconstructed 1:1 table. Order matches a
+    // directory listing of Resources/.
     static const std::vector<std::string> kArchives = {
         "Resources/animations.BIN",
         "Resources/forms.BIN",

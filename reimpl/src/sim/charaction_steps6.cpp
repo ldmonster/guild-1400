@@ -11,7 +11,23 @@
 #include "sim/gametime.h"   // GameTimeAdvance, GameTimeCompare
 #include "sim/npcaction.h"  // NpcClock(), GetNpcLeafHooks()
 
+#include <cstring>          // std::memcpy
+
 namespace guild::sim {
+
+// Byte-exact, alignment-safe loads of values at arbitrary byte offsets. The x86
+// binary uses unaligned `*(int*)(rec+N)` / `*(WORD*)(rec+N)` reads off He-records
+// whose fields are not naturally aligned (e.g. +39, +93); binding an i32&/u16&
+// reference to those addresses is UB in portable C++ (UBSAN). These read the
+// identical little-endian bytes without forming a misaligned reference.
+namespace {
+inline i32 LoadI32At(const HeRecord* h, int off) {
+    i32 v; std::memcpy(&v, reinterpret_cast<const u8*>(h) + off, sizeof(v)); return v;
+}
+inline u16 LoadU16At(const HeRecord* h, int off) {
+    u16 v; std::memcpy(&v, reinterpret_cast<const u8*>(h) + off, sizeof(v)); return v;
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Hook table plumbing (inert default — every leaf reports "absent"/no-op).
@@ -79,6 +95,9 @@ const CharActionStep6Hooks& GetCharActionStep6Hooks() { return *g_hooks; }
 // ===========================================================================
 // Recovered handler-registration table (66 entries, registration order).
 // ===========================================================================
+// Authoritative (type, init=edx, step=ebx) recovered from the disassembly of
+// VIBE_CharAction_RegisterHandlerTable @0x4db940 (each block: edx=init handler,
+// ebx=step handler, eax=type byte). Verified byte-for-byte against the binary.
 const HandlerReg kCharActionHandlerTable[kCharActionHandlerCount] = {
     { 0x22, 0x4c9d38, 0x4c9d38 }, // NullHandler / NullHandler
     { 0x29, 0x4c9d3c, 0x4c9d50 }, // InitOriginFromGlobal / Free_Thunk
@@ -113,39 +132,39 @@ const HandlerReg kCharActionHandlerTable[kCharActionHandlerCount] = {
     { 0x5B, 0x4d1844, 0x4d1870 }, // StateReset0 / RepeatCommandStep
     { 0x5C, 0x4d1904, 0x4d1930 }, // StateReset0Alt / RepeatTalkStep
     { 0x5D, 0x4d19ac, 0x4d19c0 }, // ClearStateAndTimer / GroupInteractStep
-    { 0x5E, 0x4d1cf0, 0x4d1d40 }, // BindMatchingTargetAndQueue / GuildJoinStep
+    { 0x5E, 0x4d1ccc, 0x4d1d40 }, // BindMatchingTargetAndQueue / GuildJoinStep
     { 0x5F, 0x4d1fb8, 0x4d201c }, // FindInteractionPartner / BrawlStep
     { 0x60, 0x4d21ec, 0x4d2314 }, // DrinkInit / GoToTavernStep
     { 0x59, 0x4d286c, 0x4d2900 }, // FindBeggarTarget / PlagueSpreadStep
     { 0x61, 0x4d30f4, 0x4d3188 }, // GroupGatherInit / PickpocketStep
     { 0x63, 0x4d38ec, 0x4d3918 }, // StateReset0Alt2 / ProtectionMoneyStep
-    { 0x62, 0x4d3bdc, 0x4d49b8 }, // ExtortInit / NpcEvent_ProtectionMoneyStep
-    { 0x64, 0x4d4b00, 0x4d4d24 }, // NpcEvent_ProtectionMoneyInit / ExtortionStep
-    { 0x65, 0x4d4e40, 0x4d49b8 }, // NpcEvent_ResetAndQueueEntity / NpcEvent_PatrolStep
-    { 0x66, 0x4d5180, 0x4d54b0 }, // InitActionType10 / RunSimAccident
-    { 0x67, 0x4d56c0, 0x4d5900 }, // QueueState9Entity / GatherGuildMembersStep
-    { 0x68, 0x4d5b40, 0x4d5d80 }, // InitActionType22 / TavernSimStep
-    { 0x69, 0x4d5fa0, 0x4d61c0 }, // RestorePoseReset / AwardTitleStep
-    { 0x6A, 0x4d63e0, 0x4d6600 }, // RestorePoseSetRandom / TalentLevelUpStep
-    { 0x6B, 0x4d6820, 0x4d6a40 }, // InitRandomDurationEntity / BardCreateScriptStep
-    { 0x6D, 0x4d6c60, 0x4d6e80 }, // QueueOriginUnlessFlag4 / ObjectInteractionStep
-    { 0x6F, 0x4d70a0, 0x4d72c0 }, // AllocLoverStep / PushObjectStep
-    { 0x70, 0x4d74e0, 0x4d7700 }, // SetupDuration10Reset / RunSimDiseases
-    { 0x74, 0x4d7920, 0x4d7b40 }, // DarkCornerInit / DarkCornerStep
-    { 0x76, 0x4d7d60, 0x4d7f80 }, // ResolveTargetAndReset / SmokeEffectStep
-    { 0x77, 0x4d81a0, 0x4d83c0 }, // SetupTargetTimestamp / UnkendunkStep
-    { 0x78, 0x4d85e0, 0x4d8800 }, // ReaperPickNextTarget / ReaperPlagueStep
-    { 0x79, 0x4d8a20, 0x4d8c40 }, // InitActionType7 / BroadcastWinnerPointsStep
-    { 0x7A, 0x4d8e60, 0x4d9080 }, // InitSlotsAndQueueType11 / SimPoliticiansStep
+    { 0x62, 0x4d3bdc, 0x4d3c50 }, // ExtortInit / NpcEvent_ProtectionMoneyStep
+    { 0x64, 0x4d43f8, 0x4d4460 }, // NpcEvent_ProtectionMoneyInit / NpcEvent_ExtortionStep
+    { 0x65, 0x4d493c, 0x4d49b8 }, // NpcEvent_ResetAndQueueEntity / NpcEvent_PatrolStep
+    { 0x66, 0x4d4f34, 0x4d4fcc }, // InitActionType10 / RunSimAccident
+    { 0x67, 0x4d52b4, 0x4d5308 }, // QueueState9Entity / GatherGuildMembersStep
+    { 0x68, 0x4d5c24, 0x4d5cdc }, // InitActionType22 / TavernSimStep
+    { 0x69, 0x4d577c, 0x4d57a0 }, // RestorePoseReset / AwardTitleStep
+    { 0x6A, 0x4d63bc, 0x4d63e8 }, // RestorePoseSetRandom / TalentLevelUpStep
+    { 0x6B, 0x4d665c, 0x4d66b4 }, // InitRandomDurationEntity / BardCreateScriptStep
+    { 0x6D, 0x4d6a28, 0x4d6a8c }, // QueueOriginUnlessFlag4 / ObjectInteractionStep
+    { 0x6F, 0x4d71d8, 0x4d72ec }, // AllocLoverStep / PushObjectStep
+    { 0x70, 0x4d75e8, 0x4d766c }, // SetupDuration10Reset / RunSimDiseases
+    { 0x74, 0x4d79e8, 0x4d7bd0 }, // DarkCornerInit / DarkCornerStep
+    { 0x76, 0x4d877c, 0x4d8900 }, // ResolveTargetAndReset / SmokeEffectStep
+    { 0x77, 0x4d8a94, 0x4d8af4 }, // SetupTargetTimestamp / UnkendunkStep
+    { 0x78, 0x4d9600, 0x4d96f8 }, // ReaperPickNextTarget / ReaperPlagueStep
+    { 0x79, 0x4d9a38, 0x4d9a60 }, // InitActionType7 / BroadcastWinnerPointsStep
+    { 0x7A, 0x4d9f1c, 0x4da7c0 }, // InitSlotsAndQueueType11 / SimPoliticiansStep
     { 0x7B, 0x4c9d50, 0x4c9d50 }, // Free_Thunk / Free_Thunk
-    { 0x7D, 0x4d94c0, 0x4d96e0 }, // InitTargetSlotsState12 / OfficeMatchmakingStep
-    { 0x7E, 0x4d9900, 0x4d9b20 }, // SetupAnim2Reset / MasterExamDialogStep
-    { 0x7F, 0x4d9d40, 0x4d9f60 }, // SetupRandomDurationReset / GamblingStep
-    { 0x80, 0x4da180, 0x4da3a0 }, // CopyTargetAndQueueUnlessFlag4 / CountdownTickEntity
-    { 0x81, 0x4da5c0, 0x4db2e4 }, // CopyTargetAndQueueUnlessFlag4Alt / RunOfficeGuardAssign
+    { 0x7D, 0x4da920, 0x4da978 }, // InitTargetSlotsState12 / OfficeMatchmakingStep
+    { 0x7E, 0x4dada0, 0x4dadd4 }, // SetupAnim2Reset / MasterExamDialogStep
+    { 0x7F, 0x4daf28, 0x4daf88 }, // SetupRandomDurationReset / GamblingStep
+    { 0x80, 0x4db218, 0x4db248 }, // CopyTargetAndQueueUnlessFlag4 / CountdownTickEntity
+    { 0x81, 0x4db2b4, 0x4db2e4 }, // CopyTargetAndQueueUnlessFlag4Alt / RunOfficeGuardAssign
     { 0x82, 0x4db514, 0x4db558 }, // RequestEntityFinish / RequestEntityIfValid
     { 0x86, 0x4db5a4, 0x4db624 }, // InitOfficeGuardState / RunOfficeCandidacy
-    { 0x87, 0x4dab00, 0x4dad20 }, // Tutorial_AdvanceChapterOrFree / TutorialEventHandler
+    { 0x87, 0x4db8ac, 0x4db8c8 }, // Tutorial_AdvanceChapterOrFree / TutorialEventHandler
 };
 
 // gilde.exe 0x4db940 — VIBE_CharAction_RegisterHandlerTable
@@ -195,7 +214,8 @@ i32 InitPruegel(HeRecord* h) {
     if (victim)
         escort = *reinterpret_cast<HeRecord**>(HeBytes(victim) + 368);   // *(victim+92)
     if (!escort && victim)
-        escort = k.personQueryBegin(0, 1, 4, He_Id(victim));   // (unsigned __int16)*victim
+        // 4th arg is the WORD at victim+0 ((unsigned __int16)*RecordById), NOT +4.
+        escort = k.personQueryBegin(0, 1, 4, *reinterpret_cast<u16*>(HeBytes(victim)));
     i32 result;
     i32 nearestId = 0;
     if (escort || !k.findNearestEntity(He_CityIndex(h), 6, &nearestId)) {
@@ -255,7 +275,7 @@ u32 RunPruegel(HeRecord* h) {
             He_F204(h) = k.queueNamedObject53(He_F200(h), He_Id(p), 0, 1);
             ++He_State(h);
         } else {
-            He_State(h) = 4 - 2;   // sets state so switch value becomes 4 next pass
+            He_State(h) = 4;   // disasm @0x4e39e5: *(a1+112) = 4 (literal state 4)
         }
         return static_cast<u32>(He_State(h));
     }
@@ -269,9 +289,9 @@ u32 RunPruegel(HeRecord* h) {
         if (anim && anim[74]) {
             StampClock(He_ApptTime(h));
             GameTimeAdvance(&He_ApptTime(h), 0, 0, 4);   // +4 minutes
-            He_State(h) = 2 - 2;   // -> state 0 next pass (switch 2)
+            He_State(h) = 2;   // disasm @0x4e3aa0: *(a1+112) = 2 (literal state 2)
         } else {
-            He_State(h) = 7 - 2;   // -> state 5 (switch 7)
+            He_State(h) = 7;   // disasm @0x4e3a5a: *(a1+112) = 7 (literal state 7)
         }
         return static_cast<u32>(He_State(h));
     }
@@ -310,11 +330,16 @@ u32 RunPruegel(HeRecord* h) {
                     He_F204(h) = k.evaluateViolation(20, 1, He_F180(h),
                                                      k.cityPersonId(He_CityIndex(h)),
                                                      He_F172(h));
-                    u8 vcat = k.cityCategory(He_CityIndex(h));
+                    // Final branch is gated on the VICTIM record category (*(victim+2)),
+                    // NOT cityCategory (disasm @0x4e3e97 `mov dh,[edi+2]`, edi=victim).
+                    u8 vcat = *reinterpret_cast<u8*>(HeBytes(victim) + 2);
                     if (vcat == 6 || vcat == 7) {
                         ++He_State(h);
                     } else {
-                        k.queueCoord27(He_Id(victim), He_Id(victim), -25);
+                        // coord27(eax=*(word_12CE910[city*268]+4), edx=victim id, ebx=-25).
+                        // The first arg reads the city-row +4 field; no hook exposes that
+                        // table, so it is modelled via cityPersonId (the city recipient id).
+                        k.queueCoord27(k.cityPersonId(He_CityIndex(h)), He_Id(victim), -25);
                         ++He_State(h);
                     }
                 }
@@ -339,34 +364,42 @@ u32 RunPruegel(HeRecord* h) {
         }
         return static_cast<u32>(He_State(h));
     }
-    case 8u: { // state 6: evaluate the violation + arm the gesture target.
-        i32 viol = k.evaluateViolation(20, 1, He_F180(h),
-                                       k.cityPersonId(He_CityIndex(h)), He_F172(h));
+    // switch value 8 (state 6) → jump table entry [8] == def_4E38C9: pure return.
+    // (The original has no case body for state 6; it falls through to `return sw`.)
+    case 9u: { // state 7: resolve the gesture partner, evaluate the violation, arm state 8.
+        // QueryBegin(self, 1, 1, *(a1+208))  — its result feeds EvaluateViolation+FindGesture.
+        HeRecord* partner = k.personQueryBegin(0, 1, 1, He_F208(h));
+        HeRecord* victim  = k.findPersonById(He_F180(h));
+        if (!partner || !victim) { He_State(h) = 4; return static_cast<u32>(He_State(h)); }
+        // FindGestureTarget(buf{partner, 4000.0f, a1, 0}); gate on its eax return.
         HeRecord* gest = k.findGestureTarget();
-        if (gest) {
-            He_F204(h) = viol;
-            He_F212(h) = *reinterpret_cast<i32*>(HeBytes(gest) + 4);  // *(gst+1)
-            He_State(h) = 8 - 2;   // -> state 6 -> switch 8? original sets state 8
-            He_State(h) = 8;
-            StampClock(He_ApptTime(h));
-        } else {
-            He_State(h) = 4 - 2;   // -> state 2
-        }
-        return static_cast<u32>(He_State(h));
+        if (!gest) { He_State(h) = 4; return static_cast<u32>(He_State(h)); }
+        // EvaluateViolation(20, 1, *(partner+4), cityPersonId, *(victim+4)).
+        He_F204(h) = k.evaluateViolation(20, 1, He_Id(partner),
+                                         k.cityPersonId(He_CityIndex(h)), He_Id(victim));
+        He_F212(h) = *reinterpret_cast<i32*>(HeBytes(gest) + 4);  // *(gestOut+4)
+        He_State(h) = 8;
+        StampClock(He_ApptTime(h));
+        return static_cast<u32>(He_F212(h));
     }
     case 10u: { // state 8: confirm the gesture partner, then queue the pair.
         i32 v15 = He_F204(h);
         if (v15 == -1 || GetNpcLeafHooks().packetStatus(v15) != 0) {
-            k.personQueryBegin(0, 1, 1, He_F172(h));
+            // QueryBegin(self,1,1,*(a1+172)) must be non-null (disasm `if(!v16) ->state=-1`).
+            HeRecord* who = k.personQueryBegin(0, 1, 1, He_F172(h));
             HeRecord* found = k.findFirstByFilter(1, 1, He_F212(h));
-            if (!found || He_F204(h) == -1) { He_State(h) = -1; return static_cast<u32>(He_State(h)); }
-            // *(found+53) must equal our id (+4).
+            if (!who) { He_State(h) = -1; return static_cast<u32>(He_State(h)); }
+            if (!found) { He_State(h) = -1; return static_cast<u32>(He_State(h)); }
+            // *(found+53) must equal our id (+4) and +204 must still be armed.
             i32 mirror = *reinterpret_cast<i32*>(HeBytes(found) + 212);  // *(found+53)
-            if (mirror != He_Id(h)) { He_State(h) = -1; return static_cast<u32>(He_State(h)); }
-            k.findPersonById(He_F212(h));
+            if (mirror != He_Id(h) || He_F204(h) == -1) {
+                He_State(h) = -1; return static_cast<u32>(He_State(h));
+            }
+            HeRecord* tgt = k.findPersonById(He_F212(h));
             HeRecord* seq = k.packetSeqBase(He_F204(h));
-            if (seq)
-                k.queuePair36(*reinterpret_cast<i32*>(HeBytes(seq)), He_F212(h));
+            if (seq && tgt)
+                k.queuePair36(*reinterpret_cast<i32*>(HeBytes(seq)),
+                              *reinterpret_cast<i32*>(HeBytes(tgt) + 4));  // (*seq, *(tgt+4))
             He_State(h) = 9;
             return static_cast<u32>(GameTimeAdvance(&He_ApptTime(h), 0, 0, 10));
         }
@@ -400,19 +433,21 @@ u32 RunPruegel(HeRecord* h) {
 // The 16-entry stride table the spy scan picks a coprime-to-256 stride from
 // (dword_478450). The values are not load-bearing for the control-flow golden
 // tests (they only seed the modular scan), so the helper exposes index 0 == 1.
+// dword_478450 @0x478450 — recovered byte-for-byte from the binary (coprime-to-256
+// strides). NOT a simple odd-number ramp; the upper half are 256-k mirrors.
 namespace { const i32 kSpyStrideTable[16] = {
-    1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31 }; }
+    1, 3, 5, 7, 11, 13, 17, 19, 237, 239, 243, 245, 249, 251, 253, 255 }; }
 
 // gilde.exe 0x4e2e58 — VIBE_CharAction_InitSpionage
 i32 InitSpionage(HeRecord* h) {
     const CharActionStep6Hooks& k = GetCharActionStep6Hooks();
-    // flag byte (+120) tested against 0x400 — i.e. a higher bit recovered as
-    // BYTE1(result) & 4 == (flags>>8)&... ; the original reads byte at +120 into
-    // BYTE1 and masks 0x400, i.e. the +121 byte's bit 2. Model via flags+1.
-    u8 hiFlag = *reinterpret_cast<u8*>(HeBytes(h) + 121);
+    // Disasm @0x4e2e68: BYTE1(result) = *(a1+120); then `if ((result & 0x400)==0)`.
+    // 0x400 is bit 10 == bit 2 of BYTE1 == bit 2 of the +120 flag byte. So the gate
+    // is (*(a1+120) & 0x04), i.e. He_Flags(h) & 0x04 (NOT the +121 byte).
+    u8 hiFlag = He_Flags(h);
     int matchCount = 0;
     if ((hiFlag & 0x04) != 0)
-        return He_ReqHandle(h);  // (flags & 0x400) set -> already spawned: no-op return
+        return He_ReqHandle(h);  // (flags & 0x04) set -> already spawned: no-op return
 
     i32 spyId = He_F196(h);
     He_F216(h) = -1;
@@ -453,11 +488,17 @@ i32 InitSpionage(HeRecord* h) {
                 // an opaque AI-method query; we model it as 72h (the common path).
                 StampClock(He_ApptTime(h));
                 StampClock(He_ScratchTimeC(h));
-                GameTimeAdvance(&He_ScratchTimeC(h), 72 / 24, 0, 0);  // +72 hours == +3 days
-                // success gate: any of the category bytes 6/7 or a low match count.
-                u8 objCat = *reinterpret_cast<u8*>(HeBytes(obj) + 2);
+                // Disasm @0x4e3054: Advance(+200, v9, 0, 0) with v9 = addDays = 72 or 96.
+                // v9 = (DispatchByType(38)==2) ? 96 : 72. DispatchByType is an opaque
+                // out-of-tree AI-method query (Rule 8); modelled as the 72-day path.
+                GameTimeAdvance(&He_ScratchTimeC(h), 72, 0, 0);  // +72 days (addDays=72)
+                // success gate (disasm @0x4e3060/0x4e312b):
+                //   *(cityrow+2)==6 || *(spy+2)==6 || *(spy+2)==7 || matchCount<8.
+                // The first byte is the CITY-row category (word_12CE910[city*268]+2),
+                // NOT the resolved object's category.
+                u8 cityCat = k.cityCategory(He_CityIndex(h));
                 u8 spyCat = *reinterpret_cast<u8*>(HeBytes(spy) + 2);
-                bool success = (objCat == 6) || (spyCat == 6) || (spyCat == 7) || (matchCount < 8);
+                bool success = (cityCat == 6) || (spyCat == 6) || (spyCat == 7) || (matchCount < 8);
                 i32 arg;
                 if (success) {
                     He_F216(h) = k.requestBuildOp73(17, He_Id(obj), 0, -1, 0, 0);
@@ -479,9 +520,19 @@ i32 InitSpionage(HeRecord* h) {
 // gilde.exe 0x4e3164 — VIBE_CharAction_RunSpionage
 u32 RunSpionage(HeRecord* h) {
     const CharActionStep6Hooks& k = GetCharActionStep6Hooks();
-    // Outer guards.
-    if (static_cast<u32>(He_State(h)) >= 0xFFFFFFFEu)
-        return static_cast<u32>(He_State(h));
+    // Terminal states (-1 or -2, disasm @0x4e3172/0x4e31c1): take the free path with
+    // an optional Single49/Pair33 cleanup gated on flag bit 1 (*(a1+120) & 2).
+    if (static_cast<u32>(He_State(h)) >= 0xFFFFFFFEu) {
+        i32 a3 = He_F216(h);
+        if ((He_Flags(h) & 0x02) != 0 && a3 != -1) {
+            HeRecord* rec = k.findPersonById(He_F216(h));
+            if (rec) {
+                k.queueSingle49(He_Id(rec));            // QueueSingle49(*(rec+4))
+                k.queuePair33(He_Id(rec), 1);           // Pair33(*(rec+4), 1)
+            }
+        }
+        return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
+    }
     if ((He_Flags(h) & 0x04) != 0)
         return static_cast<u32>(He_State(h));
     // If an entity request is armed (+132 != -1), gate on its packet status first.
@@ -574,7 +625,7 @@ u32 RunSpionage(HeRecord* h) {
         if (k.isNearDoor(spy, He_F180(h))) {
             HeRecord* obj2 = nullptr;
             k.resolveEntityById(&obj2, He_F172(h));
-            if (!obj2 || *reinterpret_cast<u16*>(HeBytes(obj2) + 39) == 0xFFFF) {
+            if (!obj2 || LoadU16At(obj2, 39) == 0xFFFF) {
                 He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(-1, h);
                 return static_cast<u32>(He_ReqHandle(h));
             }
@@ -598,7 +649,7 @@ u32 RunSpionage(HeRecord* h) {
         GameTimeAdvance(&He_ApptTime(h), 0, 0, 5);
         HeRecord* obj = nullptr;
         k.resolveEntityById(&obj, He_F172(h));
-        if (!obj || *reinterpret_cast<u16*>(HeBytes(obj) + 39) == 0xFFFF) {
+        if (!obj || LoadU16At(obj, 39) == 0xFFFF) {
             He_ReqHandle(h) = GetNpcLeafHooks().queueRequestEntity29(-1, h);
             return static_cast<u32>(He_ReqHandle(h));
         }
@@ -647,20 +698,22 @@ u32 RunMeisterEinstellen(HeRecord* h) {
         HeRecord* self = k.personQueryBegin(0, 1, 1, He_CityId(h));  // *(a1+16)
         if (!self)
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
-        u16 selfCity = *reinterpret_cast<u16*>(HeBytes(self) + 39);
-        int wage = k.computeWage(selfCity, *reinterpret_cast<u16*>(self), -1);
+        u16 selfCity = LoadU16At(self, 39);
+        // class arg is a SIGNED byte at self+0 (disasm `movsx edx, byte ptr [esi]`).
+        int selfClass = static_cast<i8>(*reinterpret_cast<u8*>(HeBytes(self)));
+        int wage = k.computeWage(selfCity, selfClass, -1);  // wage->int via fistp (round-nearest)
         if (k.sumCurrencyHeld(He_CityIndex(h)) < wage) {
             k.sendQuickjumpMessage(k.cityPersonId(selfCity), He_CityId(h), 5709);
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
         }
-        // scan the 12-slot member array (+176, stride 4) for a free recruit slot.
+        // scan the 12-slot member array (+176, stride 4) for the first slot > 0.
         bool slot = false;
         for (int i = 0; i < 12; ++i) {
             if (*reinterpret_cast<i32*>(HeBytes(h) + 176 + 4 * i) > 0) { slot = true; break; }
         }
         if (!slot)
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
-        He_F228(h) = k.queueGuardTarget61(self, 0, 0, (He_SubMethodByte(h)));
+        He_F228(h) = k.queueGuardTarget61(self, 0, 0, He_SubMethodByte(h));
         StampClock(He_ApptTime(h));
         u32 r = static_cast<u32>(GameTimeAdvance(&He_ApptTime(h), 0, 1, 0));  // +1 second
         ++He_State(h);
@@ -696,26 +749,37 @@ u32 RunMeisterEinstellen(HeRecord* h) {
         if (!self)
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
         HeRecord* recruit = k.findPersonById(He_F232(h));
-        // scan the 12-slot member array for an occupied slot.
-        bool slot = false; int idx = 0;
+        // First scan: find an occupied slot only if the recruit resolved. If RecordById
+        // is null OR no slot found within 12, skip the payout (goto LABEL_33).
+        int idx = 0; bool slot = false;
         for (idx = 0; idx < 12; ++idx) {
             if (recruit && *reinterpret_cast<i32*>(HeBytes(h) + 176 + 4 * idx) > 0) { slot = true; break; }
         }
-        if (!slot)
+        if (slot) {
+            u16 selfCity = LoadU16At(self, 39);
+            int selfClass = static_cast<i8>(*reinterpret_cast<u8*>(HeBytes(self)));
+            int wage = k.computeWage(selfCity, selfClass, -1);
+            --*reinterpret_cast<i32*>(HeBytes(h) + 176 + 4 * idx);
+            u8 cat = k.cityCategory(selfCity);
+            if (cat == 6 || cat == 7)
+                k.sendQuickjumpMessage(k.cityPersonId(He_CityIndex(h)), He_Id(self), 6072);
+            k.queueRequest16(*reinterpret_cast<i32*>(HeBytes(recruit) + 4),
+                             k.cityPersonId(He_CityIndex(h)), wage, 0);
+            HeRecord* fam = k.familyRecord(He_CityIndex(h));
+            if (fam)
+                *reinterpret_cast<i32*>(HeBytes(fam) + 76) += wage;   // +19 dword
+        }
+        // LABEL_33: fresh full member scan; if no slot remains, finish, else reschedule.
+        bool any = false;
+        for (int i = 0; i < 12; ++i) {
+            if (*reinterpret_cast<i32*>(HeBytes(h) + 176 + 4 * i) > 0) { any = true; break; }
+        }
+        if (!any)
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
-        u16 selfCity = *reinterpret_cast<u16*>(HeBytes(self) + 39);
-        int wage = k.computeWage(selfCity, *reinterpret_cast<u16*>(self), -1);
-        --*reinterpret_cast<i32*>(HeBytes(h) + 176 + 4 * idx);
-        u8 cat = k.cityCategory(selfCity);
-        if (cat == 6 || cat == 7)
-            k.sendQuickjumpMessage(k.cityPersonId(He_CityIndex(h)), He_Id(self), 6072);
-        k.queueRequest16(recruit ? *reinterpret_cast<i32*>(HeBytes(recruit) + 4) : -1,
-                         k.cityPersonId(He_CityIndex(h)), wage, 0);
-        HeRecord* fam = k.familyRecord(He_CityIndex(h));
-        if (fam)
-            *reinterpret_cast<i32*>(HeBytes(fam) + 76) += wage;   // +19 dword
-        // final member scan + reschedule.
-        return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
+        StampClock(He_ApptTime(h));
+        u32 r = static_cast<u32>(GameTimeAdvance(&He_ApptTime(h), 0, 0, k.randomModulo(10) + 30));
+        He_State(h) = 1;
+        return r;
     }
     default:
         return static_cast<u32>(He_State(h));
@@ -740,9 +804,10 @@ u32 RunMeisterEntlassen(HeRecord* h) {
         HeRecord* self = k.personQueryBegin(He_CityId(h), 1, 1, He_CityId(h));
         if (!self)
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
-        int sub = He_SubMethodByte(h);   // *(a1+169) >> 24
-        u16 selfCity = *reinterpret_cast<u16*>(HeBytes(self) + 39);
-        int wage = k.computeWage(selfCity, *reinterpret_cast<u16*>(self), sub);
+        int sub = He_SubMethodByte(h);   // (i32)*(a1+169) >> 24 (signed sar)
+        u16 selfCity = LoadU16At(self, 39);
+        int selfClass = static_cast<i8>(*reinterpret_cast<u8*>(HeBytes(self)));  // movsx byte[self]
+        int wage = k.computeWage(selfCity, selfClass, sub);
         if (k.sumCurrencyHeld(He_CityIndex(h)) < wage) {
             k.sendQuickjumpMessage(k.cityPersonId(selfCity), He_CityId(h), 5710);
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
@@ -771,8 +836,9 @@ u32 RunMeisterEntlassen(HeRecord* h) {
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
         // single-slot member scan, pay severance.
         if (*reinterpret_cast<i32*>(HeBytes(h) + 176) > 0) {
-            u16 selfCity = *reinterpret_cast<u16*>(HeBytes(self) + 39);
-            int wage = k.computeWage(selfCity, *reinterpret_cast<u16*>(self), He_SubMethodByte(h));
+            u16 selfCity = LoadU16At(self, 39);
+            int selfClass = static_cast<i8>(*reinterpret_cast<u8*>(HeBytes(self)));
+            int wage = k.computeWage(selfCity, selfClass, He_SubMethodByte(h));
             --*reinterpret_cast<i32*>(HeBytes(h) + 176);
             u8 cat = k.cityCategory(selfCity);
             if (cat == 6 || cat == 7)
@@ -783,15 +849,17 @@ u32 RunMeisterEntlassen(HeRecord* h) {
         // resolve the move-back destination (+180), issue the move.
         i32 dest = He_F180(h);
         if (dest == 0 || dest == -1) {
-            i32 selfScene = *reinterpret_cast<i32*>(HeBytes(self) + 93);
+            i32 selfScene = LoadI32At(self, 93);
             HeRecord* obj = (dest == -1)
                 ? k.objectQueryFind(selfScene, 1, 0, 253)
-                : k.objectQueryFind(selfScene, 1, 0, *reinterpret_cast<i32*>(HeBytes(self) + 39) >> 16);
+                : k.objectQueryFind(selfScene, 1, 0, LoadI32At(self, 39) >> 16);
             dest = obj ? *reinterpret_cast<i32*>(HeBytes(obj) + 4) : -1;
         }
         k.requestChrMove(He_F188(h), He_CityId(h), dest);
-        // final member scan; reschedule +10..+19 minutes.
-        if (*reinterpret_cast<i32*>(HeBytes(h) + 176) > 0)
+        // final single-slot scan (count 1, disasm @0x4ddeb1): if NO slot remains
+        // (*(a1+176) <= 0) → free; else reschedule +10..+19 minutes, state=1.
+        // (The original frees when the slot is EMPTY, not when it is occupied.)
+        if (*reinterpret_cast<i32*>(HeBytes(h) + 176) <= 0)
             return static_cast<u32>(GetNpcLeafHooks().freeHandlerEntry(h));
         int delta = k.randomModulo(10) + 10;
         u32 r = static_cast<u32>(GameTimeAdvance(&He_ApptTime(h), 0, 0, delta));
@@ -902,7 +970,7 @@ u32 RunMoveCrowdToObject(HeRecord* h) {
             if (m)
                 k.changePlayerAction(nullptr, nullptr, nullptr, *reinterpret_cast<u16*>(m));
         }
-        i32 scene = *reinterpret_cast<i32*>(HeBytes(leader) + 93);
+        i32 scene = LoadI32At(leader, 93);
         HeRecord* obj = k.objectQueryFind(scene, 2, 6, 42);
         if (obj) {
             // economy/payout step (the building/inventory/coord math and the result

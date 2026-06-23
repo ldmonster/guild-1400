@@ -278,9 +278,10 @@ TEST(FileOps4, ValidateHandleModeWriteMismatch) {
     LowioTable lt;
     lt.count = 4;
     lt.info[1] = 0x02;   // byte0: writable only, not readable
-    // want must-be-readable (0x01) while actual lacks it -> EINVAL
+    // want must-be-readable (0x01) while actual lacks it -> error. The original
+    // (0x5fea42) enters SetErrnoEinval with eax==6, so errno is set to 6, not 22.
     CHECK_EQ(ValidateHandleMode(lt, 1, 0x01), -1);
-    CHECK_EQ(guild::crt::Errno(), 22);
+    CHECK_EQ(guild::crt::Errno(), 6);
 }
 
 TEST(FileOps4, SetDescriptorEntry) {

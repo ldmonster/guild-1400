@@ -143,7 +143,11 @@ TEST(SimCombatLoopE2E, SetupResolveTeardownLifecycle) {
     SetCombatCommandSink(&sink);
 
     BattleDescriptor b;
-    b.modeFlags = kBattleAttack;
+    // gilde.exe 0x489bcc: the scenario switch tests (modeFlags & 1) [raid] then
+    // (modeFlags & 4) [defend] -> BERGPASS. Bit 0x02 (kBattleAttack) has NO
+    // scenario branch (verified: 0x48a253 `test dl, 4`, NOT 2), so the Bergpass
+    // case is selected by kBattleDefend (0x04), not kBattleAttack (0x02).
+    b.modeFlags = kBattleDefend;
     b.attackerOwnerId = 100;
     b.defenderOwnerId = 200;
     b.attackerRoster[0] = 1;
@@ -165,7 +169,8 @@ TEST(SimCombatLoopE2E, SetupResolveTeardownLifecycle) {
     CHECK_EQ(rt.attackers.size(), static_cast<size_t>(2));
     CHECK_EQ(rt.defenders.size(), static_cast<size_t>(1));
 
-    // Scenario pick for an open attack -> Bergpass.
+    // Scenario pick for a defend mission (modeFlags & 4) -> Bergpass
+    // (gilde.exe 0x48a253 `test dl, 4` -> aKampfszenarioB "BERGPASS").
     ScenarioPick sp = PickScenario(b.modeFlags, false, 0, 0, 0);
     CHECK_EQ(static_cast<int>(sp.scenario), static_cast<int>(CombatScenario::Bergpass));
 

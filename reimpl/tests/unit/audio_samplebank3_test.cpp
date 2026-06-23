@@ -3,6 +3,7 @@
 // mock installed via Sb3Hooks (no OS/Miles/VFS call escapes).
 #include "test.h"
 #include "audio/audio_samplebank3.h"
+#include "crt/rand.h"
 
 #include <cstring>
 #include <string>
@@ -233,7 +234,7 @@ TEST(Sb3Unit, ResolveSamplePathsRecomputesSizes) {
     g_sizes = nullptr;
 }
 
-TEST(Sb3Unit, PlaySampleVariationPicksIndex) {
+TEST(Sb3Unit, PlaySampleVariationPicksRandom) {
     ResetAll();
     g_activeBank = new SbRecord();
     std::strcpy(g_activeBank->name, "B");
@@ -256,16 +257,105 @@ TEST(Sb3Unit, PlaySampleVariationPicksIndex) {
     CHECK_EQ(AddSampleToVariation("footsteps", "f1.wav"), 0);
     CHECK_EQ(AddSampleToVariation("footsteps", "f2.wav"), 0);
 
-    // index 0 -> first sample "f0.wav" (a dotted name -> concrete play).
+    // gilde.exe 0x4490e4 picks the sample via crt::RandNext() % CountSamples
+    // (one RNG draw); the second `index` arg is vestigial and ignored.  Whichever
+    // of the three equal-size samples is chosen, the dotted recursion resolves
+    // (size 5, openable) -> 0.  Seeding makes the draw deterministic; the LCG
+    // state must advance by exactly one step per call.
+    guild::crt::Srand(1);
+    guild::u32 before = *guild::crt::RandStatePtr();
     CHECK_EQ(PlaySample("footsteps", 0), 0);
-    // index 2 -> third sample.
-    CHECK_EQ(PlaySample("footsteps", 2), 0);
-    // Unknown variation -> -1.
+    guild::u32 after = *guild::crt::RandStatePtr();
+    // Exactly one RandNext draw advanced the state.
+    CHECK(after == 1103515245u * before + 12345u);
+    CHECK_EQ(PlaySample("footsteps", 0), 0); // another draw, still resolves
+    // Unknown variation -> -1 (binary would div-by-zero; we return -1 safely).
     CHECK_EQ(PlaySample("ghost", 0), -1);
     // A concrete missing sample -> -1.
     sizes.clear();
     CHECK_EQ(PlaySample("missing.wav", 0), -1);
     g_sizes = nullptr;
+}
+
+// --- WAVE-11 hardening: malformed / oversized-input edge tests ---------------
+
+// LoadFromText with a "%lang" token and a long `root` substitution must not
+// overrun the 256-byte resolved-path stack buffer in RewritePath. The guard
+// bounds the rewrite to the destination capacity; ASAN would flag a stack
+// overflow without it. The parsed token name is stored verbatim regardless.
+TEST(Sb3Unit, LoadFromTextLongRootRewriteStaysInBounds) {
+    ResetAll();
+    // A sample token that embeds "%lang"; with a 400-char root the naive splice
+    // (prefix + root + tail) exceeds 256 bytes.
+    std::string longRoot(400, 'r');
+    const char* body =
+        "Bank "
+        "%lang\\snd.wav {EndOfSamples} "
+        "{EndOfSampleBank}";
+    TextStream rs; rs.tokens = Tokenize(body);
+    InstallTextHooks(&rs, nullptr);
+    // The default strStr clone finds "%lang"; sampleFileSize default returns 0.
+    CHECK_EQ(LoadFromText(longRoot.c_str(), "b.txt"), 0);
+    // The stored token is the original (StrNCopyPad of the token, not the rewrite).
+    CHECK(g_activeBank != nullptr);
+    if (g_activeBank && g_activeBank->sampleHead)
+        CHECK_EQ(std::strcmp(g_activeBank->sampleHead->name, "%lang\\snd.wav"), 0);
+}
+
+// A maximal-length token (255 chars, the tokenizer cap) carrying "%lang" with a
+// long root: the rewrite must stay inside the destination buffer (no read off
+// the scratch buffer, no write off the resolved buffer).
+TEST(Sb3Unit, LoadFromTextMaxTokenRewriteStaysInBounds) {
+    ResetAll();
+    std::string tok = "%lang";
+    tok += std::string(250, 'x'); // 255-char token total
+    std::string body = "Bank " + tok + " {EndOfSamples} {EndOfSampleBank}";
+    TextStream rs; rs.tokens = Tokenize(body.c_str());
+    InstallTextHooks(&rs, nullptr);
+    std::string longRoot(300, 'R');
+    CHECK_EQ(LoadFromText(longRoot.c_str(), "b.txt"), 0);
+    CHECK(g_activeBank != nullptr);
+}
+
+// ResolveSamplePaths over a record whose name embeds "%lang" with a long root
+// drives the same RewritePath; exercise it with the bounds guard in place.
+TEST(Sb3Unit, ResolveSamplePathsLongRootStaysInBounds) {
+    ResetAll();
+    g_activeBank = new SbRecord();
+    std::strcpy(g_activeBank->name, "B");
+    g_hooks.sampleFileSize = [](const char*) -> int { return 1; }; // resolve OK
+    CHECK_EQ(AddSample("%lang\\a.wav"), 0);
+    std::string longRoot(500, 'q');
+    // Must not overrun the resolved[256] buffer inside RewritePath.
+    CHECK_EQ(ResolveSamplePaths(longRoot.c_str()), 0);
+}
+
+// PlaySample of a concrete (dotted) name that embeds "%lang" with a long root.
+TEST(Sb3Unit, PlaySampleLongRootStaysInBounds) {
+    ResetAll();
+    g_activeBank = new SbRecord();
+    std::strcpy(g_activeBank->name, "B");
+    // PlaySample uses root="" internally for the rewrite, so a long *name* is the
+    // oversized input here: a 255-char dotted token.
+    std::string name = "%lang\\";
+    name += std::string(248, 'z');
+    name += ".w"; // dotted -> concrete branch
+    g_hooks.sampleFileSize = [](const char*) -> int { return 0; }; // missing -> -1
+    CHECK_EQ(PlaySample(name.c_str(), 0), -1);
+}
+
+// Empty / single-char / NUL-only token inputs must parse without reading past
+// the buffers.
+TEST(Sb3Unit, LoadFromTextDegenerateTokens) {
+    ResetAll();
+    // Only the end markers, no bank name body beyond the first token.
+    TextStream rs; rs.tokens = Tokenize("{EndOfSamples} {EndOfSampleBank}");
+    InstallTextHooks(&rs, nullptr);
+    // First token becomes the bank name ("{EndOfSamples}"), then the next token
+    // "{EndOfSampleBank}" is read where {EndOfSamples} is expected -> falls
+    // through the sample loop as a (mis)named sample, then EOF -> status -1.
+    int rc = LoadFromText("", "b.txt");
+    CHECK(rc == 0 || rc == -1); // either way: no OOB/UB
 }
 
 TEST(Sb3Unit, DestroyFreesEverything) {

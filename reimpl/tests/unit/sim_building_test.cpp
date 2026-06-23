@@ -231,6 +231,58 @@ TEST(SimBuilding, RatingCurveAndItemValue) {
     SetBuildingPriceMode(0);
 }
 
+// ---------------------------------------------------------------------------
+// WAVE-16 1:1: ComputeItemBaseValue @0x58f328. inIdx (a4) reads the 6-wide +553
+// PRODUCTION factor array (inputFactor[6], indexed 0..5 by the worth aggregator's
+// output loop); outIdx (a3) reads the 2-wide +563 INPUT factor array
+// (outputFactor[2], indexed 0..1). The original performs no bounds check; the
+// arrays are sized to cover the live indices, so an outIdx of 2..5 reads a 0
+// padding byte / out-of-array slot -> 0. statLevel has 5 entries;
+// EvalProductionRating must reject negative/over-large stats. ASAN+UBSAN clean.
+// ---------------------------------------------------------------------------
+TEST(SimBuildingHarden, ItemBaseValueIndexBounds) {
+    setupTypeTable();
+    SetBuildingPriceMode(0);
+    BuildingRec b{}; b.objectKind = 0;
+
+    // valid output slots 0,1 (factors 3,5) -> 896*factor, byte-identical.
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 1, 0, -1), 2688.0));   // 896*3
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 1, 1, -1), 4480.0));   // 896*5
+    // out-of-range output slots 2..5 (the aggregator's 0..5 sweep) -> 0, no OOB.
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 1, 2, -1), 0.0));
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 1, 5, -1), 0.0));
+    // valid input slots 0,1 (factors 7,0).
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 1, -1, 0), 6272.0));   // 896*7
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 1, -1, 1), 0.0));      // 896*0
+    // out-of-range input slot -> 0, no OOB.
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 1, -1, 5), 0.0));
+}
+
+TEST(SimBuildingHarden, EvalProductionRatingStatBounds) {
+    setupTypeTable();
+    SetBuildingRatingHooks(nullptr);
+    BuildingRec b{}; b.typeIndex = 1;
+    for (int i = 0; i < 5; ++i) b.statLevel[i] = 100;
+    // valid stats 0..4 return a real (>= 0) rating.
+    CHECK(Building_EvalProductionRating(&b, 0) >= 0.0f);
+    CHECK(Building_EvalProductionRating(&b, 4) >= 0.0f);
+    // stat >= 5 (original guard) and negative stat (added guard) -> -1, no OOB.
+    CHECK(feq(Building_EvalProductionRating(&b, 5), -1.0));
+    CHECK(feq(Building_EvalProductionRating(&b, -1), -1.0));
+    CHECK(feq(Building_EvalProductionRating(&b, 1000), -1.0));
+    // null building -> -1.
+    CHECK(feq(Building_EvalProductionRating(nullptr, 0), -1.0));
+}
+
+TEST(SimBuildingHarden, ItemBaseValueUnloadedType) {
+    // A type index with no loaded table entry must resolve to factor 0 (td null
+    // path) and not dereference garbage.
+    ResetBuildings();                         // table unloaded
+    BuildingRec b{}; b.objectKind = 0;
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 200, 0, -1), 0.0));
+    CHECK(feq(Building_ComputeItemBaseValue(&b, 200, -1, 0), 0.0));
+}
+
 TEST(SimBuilding, ProductionRateAndOutput) {
     setupTypeTable();
     // rate: outputFactor {3,5}, price 1000, divisor 10 -> ~995.5556

@@ -25,6 +25,8 @@ namespace {
 struct Block { u8 b[700]; };
 inline HeRecord* H(Block& b) { return reinterpret_cast<HeRecord*>(b.b); }
 inline void Zero(Block& b) { std::memset(b.b, 0, sizeof(b.b)); }
+// Byte-exact unaligned store (avoid binding a u16& to a misaligned address, UB).
+inline void Poke16(u8* p, int off, u16 v) { std::memcpy(p + off, &v, sizeof(v)); }
 
 // The randomModulo hook -> REAL util::RandomModulo (which calls crt::RandNext).
 int RealRandomModulo(int n) { return util::RandomModulo(static_cast<u16>(n)); }
@@ -119,7 +121,7 @@ TEST(CharActionSteps8Itest, InitArrestRealRngWake) {
     CharActionStep8Hooks h = MakeWired();
     Block person; Zero(person);
     person.b[0] = 3;                       // ordinary class
-    *reinterpret_cast<u16*>(person.b + 37) = 0xFFFF;
+    Poke16(person.b, 37, 0xFFFF);
     w.person = reinterpret_cast<HeRecord*>(person.b);
     SetCharActionStep8Hooks(&h);
 
@@ -142,7 +144,7 @@ TEST(CharActionSteps8Itest, InitArrestRealRngWakeSeed1) {
     CharActionStep8Hooks h = MakeWired();
     Block person; Zero(person);
     person.b[0] = 3;
-    *reinterpret_cast<u16*>(person.b + 37) = 0xFFFF;
+    Poke16(person.b, 37, 0xFFFF);
     w.person = reinterpret_cast<HeRecord*>(person.b);
     SetCharActionStep8Hooks(&h);
 

@@ -151,24 +151,29 @@ int DragSlotRemoveItem(DragSlotTable& t, i32 key, i32 qty) {
 
 // ===========================================================================
 // VIBE_DragSlot_StoreItem  0x41f95c  (eax=key, edx=qty)
-//   v4 = 0;   // slot index (low dword); HIDWORD == byte offset (12*slot)
+//   eax = slot counter, edx = byte offset (steps by 12).
 //   if (key != dword_75B9F0[0])
-//       do { off += 12; ++v4; } while (off < 72 && key != *(F0 + off));
-//   if (v4 == 6) {                    // not found -> first free
-//       v4 = 0;
+//       do { off += 12; ++eax; } while (off < 72 && key != *(F0 + off));
+//   if (eax == 6) {                   // not found -> first free
+//       eax = 0; off = 0;
 //       if (dword_75B9F0[0] != -1)
-//           do { off += 12; ++v4; } while (off < 72 && *(F0 + off) != -1);
+//           do { off += 12; ++eax; } while (off < 72 && *(F0 + off) != -1);
 //   }
-//   if (v4 != 6) {                    // have a slot
-//       off = 12 * v4;
-//       *(F0 + off) = key;
-//       *(F4 + off) = qty;            // OVERWRITE
-//       if (!qty) *(F0 + off) = -1;   // qty 0 -> free
+//   if (eax != 6) {                   // have a slot
+//       eax = 12 * eax;               // (shl/sub/shl: 4*s; 4*s-s=3*s; 3*s<<2=12*s)
+//       *(F0 + eax) = key;            // F0[byteoff] = key
+//       *(F4 + eax) = qty;            // OVERWRITE
+//       if (!qty) *(F0 + eax) = -1;   // qty 0 -> free
 //   }
-//   return v4;                        // slot index (0..6)
+//   return eax;                       // *** BYTE OFFSET 12*slot on a store, 6 if full
+//
+// FIDELITY (disasm 0x41f9ae-0x41f9b8): the Hex-Rays `return v4` collapses the
+// register reuse. The disasm shows eax is overwritten with 12*slot BEFORE the
+// writes and that same eax is returned. So a successful store returns 12*slot
+// (the byte offset), not the slot index; only the full-table path returns 6.
 // ===========================================================================
 int DragSlotStoreItem(DragSlotTable& t, i32 key, i32 qty) {
-    int v4 = 0;  // slot index
+    int v4 = 0;  // slot index counter (eax)
     if (key != t.slots[0].key) {
         int off = 0;
         do {
@@ -191,8 +196,9 @@ int DragSlotStoreItem(DragSlotTable& t, i32 key, i32 qty) {
         t.slots[v4].accum = qty;  // OVERWRITE (not accumulate)
         if (!qty)
             t.slots[v4].key = -1;
+        return v4 * 12;           // *** byte offset 12*slot (disasm shl/sub/shl)
     }
-    return v4;
+    return v4;                    // table full -> 6
 }
 
 }  // namespace guild::sim

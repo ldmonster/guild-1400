@@ -267,8 +267,17 @@ i32  hSceneWalk(char) { g_log->calls.push_back("sceneWalk"); return g_log->appen
 void hParticles(char) { g_log->calls.push_back("particles"); }
 void hSkyFlares() { g_log->calls.push_back("skyFlares"); }
 void hMirrors(char) { g_log->calls.push_back("mirrors"); }
-void hAnim(char) { g_log->calls.push_back("anim"); }
 i32  hTimeNow() { return 1000; }
+// wave-15: DrawUniverseAndStats a2-block hooks (ScrollUvCoords, the unconditional
+// projection walk, and the a3-gated 64-list animation pose walk). One non-empty
+// list (index 0, single node) so "anim" fires exactly once.
+void hScrollUv(i32) { g_log->calls.push_back("scrollUv"); }
+void hProjectWalk(i16, i32) { g_log->calls.push_back("projectWalk"); }
+static int s_sentinel = 0, s_node = 0;
+void* hAnimHead(int k) { return (k == 0) ? (void*)&s_node : nullptr; }
+void* hAnimSentinel() { return (void*)&s_sentinel; }
+void* hAnimNext(void*) { return (void*)&s_sentinel; }
+void  hAnimPose(void*, i16, i32) { g_log->calls.push_back("anim"); }
 
 FrameHooks fullHooks() {
     FrameHooks h{};
@@ -276,7 +285,10 @@ FrameHooks fullHooks() {
     h.renderTerrain = hTerrain; h.resetLights = hResetLights;
     h.sceneWalk = hSceneWalk; h.renderParticles = hParticles;
     h.updateSkyFlares = hSkyFlares; h.buildMirrors = hMirrors;
-    h.updateAnim = hAnim; h.timeNow = hTimeNow;
+    h.scrollUvCoords = hScrollUv; h.projectWalk = hProjectWalk;
+    h.animListHead = hAnimHead; h.animSentinel = hAnimSentinel;
+    h.animNext = hAnimNext; h.animPose = hAnimPose;
+    h.timeNow = hTimeNow;
     h.terrain = (void*)1; h.world = (void*)1;
     return h;
 }
@@ -292,13 +304,15 @@ TEST(RenderSceneUnit, FrameWalkOrderAndGate) {
 
     RenderMainViewFrame(fs, h);
 
-    // Expected subsystem order across Begin + DrawUniverseAndStats:
+    // Expected subsystem order across Begin + DrawUniverseAndStats (wave-15 1:1):
     //   main-view clearRect, begin's clearRect, terrain, resetLights, sceneWalk,
-    //   particles, skyFlares, mirrors, then anim (in DrawUniverseAndStats).
+    //   particles, skyFlares, mirrors, then DrawUniverseAndStats' a2 block:
+    //   scrollUv, projectWalk, anim (the 64-list pose walk, one non-empty list).
     const char* want[] = {"clearRect", "clearRect", "terrain", "resetLights",
-                          "sceneWalk", "particles", "skyFlares", "mirrors", "anim"};
-    CHECK_EQ((int)log.calls.size(), 9);
-    for (int i = 0; i < 9; ++i) CHECK(std::string(log.calls[i]) == want[i]);
+                          "sceneWalk", "particles", "skyFlares", "mirrors",
+                          "scrollUv", "projectWalk", "anim"};
+    CHECK_EQ((int)log.calls.size(), 11);
+    for (int i = 0; i < 11; ++i) CHECK(std::string(log.calls[i]) == want[i]);
 
     // sceneWalk's appended count is snapshotted.
     CHECK_EQ(fs.appendedPolys, 7);

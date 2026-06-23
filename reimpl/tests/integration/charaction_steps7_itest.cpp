@@ -14,6 +14,8 @@
 #include "util/math_random.h"   // REAL sibling
 #include "crt/rand.h"           // REAL LCG behind it
 
+#include <cstring>              // std::memcpy (alignment-safe field stores)
+
 using namespace guild;
 using namespace guild::sim;
 
@@ -122,7 +124,7 @@ void RunOneWorkTickAtLap4(HeRecord* hp, Block& sb, Block& gb, Block& cb, Block& 
     // cart class byte (+18) == 0 so the ambush threshold is `randMod(30) > 0`.
     *reinterpret_cast<u8*>(HeBytes(g_w.cart) + 18) = 0;
     // the variant-2 sub-step's ApplyTransportSpeed dereferences cart+59 (vehicle).
-    *reinterpret_cast<HeRecord**>(HeBytes(g_w.cart) + 59) = reinterpret_cast<HeRecord*>(&vb);
+    { HeRecord* _p = reinterpret_cast<HeRecord*>(&vb); std::memcpy(HeBytes(g_w.cart) + 59, &_p, sizeof(_p)); }
 
     Cas7_StartId(hp) = 11; Cas7_GoalId(hp) = 22; Cas7_CartId(hp) = 33;
     He_Flags(hp) = 2; He_State(hp) = 1;

@@ -88,23 +88,32 @@ TEST(ScriptImport3, AddEventTokenLayout) {
     ResetEventTokens();
 }
 
-// ---- AddEventToken: growth across the chunk boundary, stable record addrs ----
+// ---- AddEventToken: single-chunk fill, stable record addrs ----
+// gilde.exe 0x441148-0x44115b grows when `count + 48 > capBytes` (verified by
+// disasm: `mov eax,count; add eax,30h; cmp eax,capBytes; ja grow`).  The grow
+// chunk is 768 bytes = 16 records, so the FIRST insert grows once (0+48>0) and
+// the table then holds 16 records (offsets 0..15*48, the 16th ending at 768)
+// before the condition fires again — which only happens at count > 720.  The
+// original therefore overflows its own buffer past 16 tokens; the game never
+// registers that many in one table (RegisterSoundCommands adds 8).  This test
+// fills exactly one chunk and confirms cap stays at one grow-chunk.
 TEST(ScriptImport3, AddEventTokenGrowth) {
     ResetEventTokens();
-    // Insert 20 records: forces a second growth at record 16.
-    for (int i = 0; i < 20; ++i) {
+    // Insert 16 records: fills one 768-byte chunk; no second growth (count+48
+    // never exceeds 768 until count > 720).
+    for (int i = 0; i < 16; ++i) {
         char nm[8];
         std::snprintf(nm, sizeof nm, "T%d", i);
         AddEventToken(nm, i, static_cast<u8>(i & 0xF));
     }
-    CHECK_EQ(EventTokens().count, 20u);
-    CHECK_EQ(EventTokens().capBytes, static_cast<u32>(2 * kEventTokenGrowBytes)); // 1536
-    // Records are contiguous at the 48-byte stride; spot-check the 17th.
+    CHECK_EQ(EventTokens().count, 16u);
+    CHECK_EQ(EventTokens().capBytes, static_cast<u32>(kEventTokenGrowBytes)); // 768, one chunk
+    // Records are contiguous at the 48-byte stride; spot-check the 16th.
     const u8* base = EventTokens().base;
     if (base) {
-        const u8* r17 = base + 16 * kEventTokenStride;
-        CHECK_EQ(*reinterpret_cast<const i32*>(r17 + 44), 16);
-        CHECK_EQ(ReadName(r17 + 1), std::string("T16"));
+        const u8* r16 = base + 15 * kEventTokenStride;
+        CHECK_EQ(*reinterpret_cast<const i32*>(r16 + 44), 15);
+        CHECK_EQ(ReadName(r16 + 1), std::string("T15"));
     }
     ResetEventTokens();
 }
@@ -121,7 +130,7 @@ TEST(ScriptImport3, RegisterCommandsCore) {
         CHECK_EQ(sleep[36], static_cast<u8>(1));            // int arg
         CHECK_EQ(sleep[48], static_cast<u8>(5));            // statement kind
     }
-    u8* rnd = FindCommandByName(Commands().bytes, "Random");
+    u8* rnd = FindCommandByName(Commands().bytes, "rnd");    // 0x43c8be name = off_61688C = "rnd"
     CHECK(rnd != nullptr);
     if (rnd) CHECK_EQ(rnd[48], static_cast<u8>(1));          // function kind
     u8* dummy = FindCommandByName(Commands().bytes, "ecmd_Dummy");
@@ -172,7 +181,7 @@ TEST(ScriptImport3, RegisterObjectCommands) {
     u8* ce = FindCommandByName(Commands().bytes, "CreateEmitter");
     CHECK(ce != nullptr);
     if (ce) CHECK_EQ(*reinterpret_cast<i32*>(ce + 32), 7);
-    u8* last = FindCommandByName(Commands().bytes, "SelectAllTextures");
+    u8* last = FindCommandByName(Commands().bytes, "SelectAllTextureSets");
     CHECK(last != nullptr);
     if (last) {
         CHECK_EQ(last[36], static_cast<u8>(6));

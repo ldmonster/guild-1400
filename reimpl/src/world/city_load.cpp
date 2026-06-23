@@ -12,13 +12,22 @@ namespace guild::world {
 DistrictCoord g_districtCoords[kDistrictCount] = {};
 
 // gilde.exe 0x5783c4 — VIBE_City_GetDistrictCoord.
-//   if ( a1 >= 72 ) return 0;
-//   v3 = &word_641DB0[4*a1];  *a2 = v3[0..1]; a2[1] = v3[2..3];  return 1;
+//   cmp al, 48h ; jl  -> if ( (signed char)a1 >= 72 ) return 0;
+//   movsx esi, al ; lea esi, word_641DB0[esi*8]  (8-byte/4-word stride)
+//   *a2 = v3[0..1]; a2[1] = v3[2..3];  return 1;
+// 1:1 NOTE: `a1` is a SIGNED char and the only bound is the signed `>= 72` test —
+// the original has NO lower bound, so a negative id would index word_641DB0 out of
+// bounds (UB). District ids are always 0..71 in practice, so we replicate the exact
+// signed upper-bound branch and add a low-side guard (the only divergence is the
+// unreachable negative-id OOB the original would perform).
 int CityGetDistrictCoord(int district, i32* out) {
-    if (static_cast<unsigned>(district) >= static_cast<unsigned>(kDistrictCount))
+    signed char id = static_cast<signed char>(district);
+    if (id >= static_cast<signed char>(kDistrictCount))   // cmp al,48h ; jl
         return 0;
-    out[0] = g_districtCoords[district].a;
-    out[1] = g_districtCoords[district].b;
+    if (id < 0)                                            // guard: orig OOBs here
+        return 0;
+    out[0] = g_districtCoords[id].a;
+    out[1] = g_districtCoords[id].b;
     return 1;
 }
 

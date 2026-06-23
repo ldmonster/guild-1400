@@ -50,9 +50,12 @@ TEST(GuiCharCreate, AncestryObjectTable) {
 }
 
 TEST(GuiCharCreate, ApplyActorClickFillsParitySlots) {
+    // gilde.exe 0x52bcd4 parity gate: even slots take males, odd slots take females.
+    // (1:1 NOTE: in the original only the two PARENT slots 4/5 are click-filled; this shared
+    //  model fills 0..5 because gui/choosecharacter_run.* also consumes it.  See the source
+    //  note + progress/harden for the tracked cross-module correction.)
     DynastyTable t;
     int fill = 0;
-    // Even slots (0,2,4) take males; odd slots (1,3,5) take females.
     // A female click while the next free slot is even (0) is rejected.
     CHECK_EQ(ChooseCharacter_ApplyActorClick(t, ChooseCharActor::kZigeunerinFrau, &fill), -1);
     CHECK_EQ(fill, 0);
@@ -64,7 +67,6 @@ TEST(GuiCharCreate, ApplyActorClickFillsParitySlots) {
     CHECK_EQ(ChooseCharacter_ApplyActorClick(t, ChooseCharActor::kHandwerkerinFrau, &fill), 1);
     CHECK_EQ(t.slot[1], 1);    // Handwerker code 1
     CHECK_EQ(fill, 2);
-    // Not complete yet.
     CHECK(!ChooseCharacter_IsComplete(fill));
     // Fill the rest: slot2 male, slot3 female, slot4 male, slot5 female.
     CHECK_EQ(ChooseCharacter_ApplyActorClick(t, ChooseCharActor::kOffizierMann, &fill), 2);
@@ -104,14 +106,20 @@ TEST(GuiCharCreate, TalentMaternalMap) {
 }
 
 TEST(GuiCharCreate, TalentEnablePredicates) {
-    // "+" enabled when value <= cap.
+    // gilde.exe 0x52b088 enable loop (@0x52b386 / @0x52b3b0).
+    // DECREASE ("-") widget: enabled when value <= cap  (jle loc_52B576 -> ebp=1).
     CHECK(Talent_CanDecrease(3, 3));
     CHECK(Talent_CanDecrease(2, 3));
     CHECK(!Talent_CanDecrease(4, 3));
-    // "-" enabled when budget>0 and value>=floor (default floor 0).
-    CHECK(Talent_CanIncrease(1, 5));
-    CHECK(!Talent_CanIncrease(1, 0));
-    CHECK(!Talent_CanIncrease(-1, 5));
+    // INCREASE ("+") widget: enabled when budget <= 0 || value >= 126.0 (dbl_622E18).
+    // DISABLED only when budget>0 && value<126.
+    CHECK(!Talent_CanIncrease(1, 5));     // budget>0, value<126 -> disabled
+    CHECK(Talent_CanIncrease(1, 0));      // budget<=0 -> enabled (0 >= budget)
+    CHECK(Talent_CanIncrease(1, -3));     // budget<=0 -> enabled
+    CHECK(!Talent_CanIncrease(-1, 5));    // budget>0, value<126 -> disabled
+    CHECK(Talent_CanIncrease(126, 5));    // value>=126 -> enabled despite budget
+    CHECK(Talent_CanIncrease(200, 5));    // value>=126 -> enabled
+    CHECK(!Talent_CanIncrease(125, 5));   // value<126, budget>0 -> disabled
 }
 
 TEST(GuiCharCreate, CommitTalents) {

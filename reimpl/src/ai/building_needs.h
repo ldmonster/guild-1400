@@ -37,8 +37,9 @@ constexpr float kBuildRatioThreshold = 0.5f; // flt_61E85C
 
 // gilde.exe 0x4c7774 (probability step) — the global build probability.
 //   N = (gameTick / 4) + 1;  p = N / (diffScale[clamp(difficulty,0,4)] + N).
-// `gameTick` is the low dword of qword_13CE852; the original uses a signed /4 via
-// arithmetic shift (we reproduce gameTick>>2, sign-propagating).
+// `gameTick` is the low dword of qword_13CE852; the original divides by 4 with the
+// MSVC sar/shl/sbb/sar/inc idiom (gilde.exe 0x4c77b5) which TRUNCATES toward zero
+// (not a bare arithmetic shift). We reproduce it with C++ `gameTick / 4`.
 double BuildProbability(int gameTick, int difficulty);
 
 // One category tally the candidate-mask rule reads.

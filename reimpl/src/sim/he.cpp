@@ -59,9 +59,21 @@ int He_SumPlayerHandlerValues(const HeEntityTable& table, i32 playerId) {
         i32 owner = *reinterpret_cast<const i32*>(entry);
         i32 state = *reinterpret_cast<const i32*>(entry + 15);
         if (owner == playerId && state == 1) {
-            u8 action = entry[6];
-            if (action < kHeScoreEntries)
-                row = kHeScoreTable[action];
+            // gilde.exe reads the action column as a SIGNED char (`char v4`) and
+            // tests `v4 < 26` (signed). For 0..25 this indexes the score table; for
+            // 26..127 it leaves `v6` carrying the previous row. For 128..255 the
+            // original's signed compare is TRUE and it qmemcpy's from a NEGATIVE
+            // index (memory before unk_631E98) — an OOB read of data outside this
+            // tree. We reproduce the signed comparison faithfully; for in-range
+            // action bytes (0..25) the index is taken, otherwise the row carries
+            // forward. The negative-index region is a BOUNDARY (data not in tree).
+            i8 action = static_cast<i8>(entry[6]);   // char v4 (signed)
+            if (action < static_cast<i8>(kHeScoreEntries)) {
+                if (action >= 0)
+                    row = kHeScoreTable[action];
+                // else: original reads kHeScoreTable[negative] (OOB, out of tree) —
+                // left as a documented boundary; `row` carries forward.
+            }
             if (row)
                 total += row[3];   // v6[3] — column +12
         }

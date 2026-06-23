@@ -330,3 +330,58 @@ TEST(SimCombatPackets, BuildAttackEarlyOuts) {
     noslot.findOrAllocSlot = [](i32, i32) { return false; };
     CHECK_EQ(BuildAttackPacket(q, make_handle(1, 1), 0x5000, 0x6000, 0, false, noslot), -1);
 }
+
+// --- Wave-12 hardening: staging/packet bounds ------------------------------
+// The 44-byte OrderStage buffer must absorb every field accessor at its max
+// offset (set_secondary writes byte 28; the highest put32 is field6 at 24..27)
+// without writing past the buffer; RequestBuildOp80 then copies the full 44
+// bytes into the 153-byte packet at +0x14 (ending at +0x40, before the cut
+// target). Drive all fields at their extremes and confirm the wire image.
+TEST(SimCombatPackets, OrderStageAllFieldsMaxNoOverflow) {
+    OrderStage st{};
+    st.set_targetId(static_cast<i32>(0xFFFFFFFF));
+    st.set_kind(0xFF);
+    st.set_field4(static_cast<i32>(0x7FFFFFFF));
+    st.set_field5(static_cast<i32>(0x80000000));
+    st.set_field6(static_cast<i32>(0xFFFFFFFF));
+    st.set_secondary(0xFF);
+    // All writes land inside the 44-byte buffer (highest touched byte is +28).
+    CHECK_EQ(st.get32(0), static_cast<i32>(0xFFFFFFFF));
+    CHECK_EQ(static_cast<int>(st.bytes[4]), 0xFF);
+    CHECK_EQ(st.get32(16), static_cast<i32>(0x7FFFFFFF));
+    CHECK_EQ(st.get32(20), static_cast<i32>(0x80000000));
+    CHECK_EQ(st.get32(24), static_cast<i32>(0xFFFFFFFF));
+    CHECK_EQ(static_cast<int>(st.bytes[28]), 0xFF);
+    // Bytes above +28 stay zero (no spill).
+    for (int i = 29; i < 44; ++i)
+        CHECK_EQ(static_cast<int>(st.bytes[i]), 0);
+
+    CommandQueue q;
+    q.Init();
+    i32 ring = RequestBuildOp80(q, static_cast<i32>(0xFFFFFFFF), st,
+                                static_cast<i32>(0x7FFFFFFF));
+    CHECK_EQ(ring, 1);
+    const CommandPacket& p = enq_slot(q, ring);
+    // staging copied to +0x14..+0x3F; the cut target sits at +0x40 untouched by
+    // the staging copy.
+    CHECK_EQ(p.get32(0x14), 0xFFFFFFFFu);          // targetId
+    CHECK_EQ(static_cast<int>(p.bytes[0x18]), 0xFF); // kind
+    CHECK_EQ(p.get32(0x40), 0x7FFFFFFFu);          // cut target
+}
+
+// A target id at the high boundary: target+4 must wrap as the original's 32-bit
+// add (no UB / no OOB), and the simple builder still produces a valid packet.
+TEST(SimCombatPackets, BuildSimpleHighTargetWraps) {
+    CommandQueue q;
+    q.Init();
+    CombatOrderContext ctx;
+    ctx.findOrAllocSlot = [](i32, i32) { return true; };
+    // target = 0x7FFFFFFD -> target+4 wraps to 0x80000001 (well-defined here:
+    // the field is computed in i32 and stored via put32's unsigned bytes).
+    i32 ring = BuildSimplePacket(q, make_handle(0x1, 0x2),
+                                 static_cast<i32>(0x7FFFFFFD), ctx);
+    CHECK_EQ(ring, 1);
+    const CommandPacket& p = enq_slot(q, ring);
+    CHECK_EQ(p.get32(0x14), 0x80000001u);
+    CHECK_EQ(static_cast<int>(p.bytes[0x18]), 8);
+}

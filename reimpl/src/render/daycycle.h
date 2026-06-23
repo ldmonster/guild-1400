@@ -52,4 +52,68 @@ constexpr double kBandScale = 0.01; // dbl_61DD68
 struct SkyBandSelect { int band; float blend; };
 SkyBandSelect BrightnessToBand(int brightness);
 
+// =============================================================================
+// Consolidated time -> sun-state query (the wave-6 day/night DRIVER handoff).
+//
+// This is the single pure entry the sky / lighting / shadow passes consume. It
+// composes the leaf math already reconstructed here and in the band/light
+// modules — there is NO new engine behaviour, it is the same chain
+// VIBE_DayCycle_UpdateBrightness @0x4b2504 walks before its stateful relight,
+// extracted as a deterministic function of the world clock:
+//
+//   season  = day % 4                        (VIBE_GameTime_GetSeasonFromDay 0x58339c)
+//   kf[6]   = BuildTimeTable(season)         (VIBE_DayCycle_BuildTimeTable    0x4b2438)
+//   bright  = UpdateBrightness(kf,hour,min)  (brightness core @0x4b253b..0x4b283b)
+//   band,bl = BrightnessToBand(bright)       (band = trunc(bright*0.01)%7, blend=frac)
+//
+// plus the sun-elevation REGIME the original picks at 0x4b26bb..0x4b28f8 when the
+// band changes: bands 0..2 take the SUNRISE walk (raise=0 -> positive elevation,
+// 0.3..0.9), bands 3..6 take the SUNSET walk (raise=1 -> negative elevation,
+// -0.9..-0.3). The actual per-light elevation float is RNG-driven and produced by
+// render::SetSunHeight @0x4b24b0 (owned by render_leaves2); this query reports the
+// REGIME (raise flag) and the deterministic [lo,hi] elevation envelope so the
+// shadow pass can derive the sun-direction sign without re-deriving the band math.
+// =============================================================================
+
+// Sun-elevation regime: which VIBE_Light_SetSunHeight @0x4b24b0 branch the current
+// band selects, and the deterministic elevation envelope that branch samples in.
+//   raise == 0 -> sunrise/day  : elevation in [+0.3, +0.9)  (dbl_61DD48 + r*dbl_61DD38)
+//   raise == 1 -> sunset/night : elevation in [-0.9, -0.3)  (dbl_61DD40 - r*dbl_61DD38)
+struct SunElevationRegime {
+    int   raise;       // the `raise` arg the day-cycle passes to SetSunHeight (0 day / 1 night)
+    float elevLo;      // inclusive low bound of the sampled elevation
+    float elevHi;      // exclusive high bound of the sampled elevation
+};
+
+// dbl_61DD48 / 61DD40 / 61DD38 — sun-height envelope constants (VIBE_Light_SetSunHeight
+// @0x4b24b0). Recovered byte-for-byte (get_bytes @0x61dd38). The day branch is
+// 0.3 + r*0.6, the night branch is -0.3 - r*0.6, with r = RandomFloatScaled() in
+// [0,1). Span 0.6 mirrors render_leaves2::kSunRandSpan (same dbl_61DD38).
+constexpr double kSunDayBase   = 0.3;  // dbl_61DD48
+constexpr double kSunNightBase = 0.3;  // |dbl_61DD40| (night base, negated)
+constexpr double kSunSpan      = 0.6;  // dbl_61DD38
+
+// Map a band index (0..6) to the sun-elevation regime the day-cycle relight uses.
+// Bands 0,1,2 -> sunrise (raise=0, positive). Bands 3..6 -> sunset (raise=1,
+// negative). This is the (v11%7 < 3) split at 0x4b28f0.
+SunElevationRegime SunRegimeForBand(int band);
+
+// Full deterministic sun/day-cycle state for a world time. Everything here is a
+// pure function of (day, hour, minute) — the RNG-sampled per-light elevation is
+// NOT included (it is produced live by SetSunHeight); instead `regime` gives the
+// branch + envelope. This is the struct the sky/light/shadow agents consume.
+struct SunState {
+    int   season;     // day % 4
+    i32   keyframes[6]; // BuildTimeTable(season) seconds-of-day thresholds
+    int   brightness; // 0..600 (UpdateBrightness)
+    int   band;       // 0..6 sky band (trunc(brightness*0.01) % 7)
+    float blend;      // cross-band blend fraction [0,1)
+    SunElevationRegime regime; // sun-elevation branch + envelope for `band`
+};
+
+// gilde.exe composed chain (0x58339c -> 0x4b2438 -> 0x4b253b -> band split) —
+// compute the full time-of-day sun state. `day` selects the season; `hour`/`minute`
+// are the wall-clock fields from the world-time record (a1+4 / a1+6 in 0x4b2504).
+SunState ComputeSunState(i32 day, int hour, int minute);
+
 } // namespace guild::render

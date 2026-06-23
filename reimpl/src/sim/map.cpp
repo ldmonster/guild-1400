@@ -200,8 +200,11 @@ int PathFindNearestFreeTile(const MapGrid& g, int a1, int a2, int* outX, int* ou
                         if (v12 > v10)
                             goto next_row;
                     }
-                    *outY = v7;
-                    *outX = v12;
+                    // gilde.exe 0x4861bf/0x4861c8: *a4(4th ptr) = column (ecx=v12),
+                    // *a3(3rd ptr) = row (ebx=v7). The 3rd pointer arg (outX) receives
+                    // the row loop var, the 4th (outY) receives the matched column.
+                    *outX = v7;   // *a3 = v7  (row)
+                    *outY = v12;  // *a4 = v12 (column)
                     return 1;
                 }
             next_row:
@@ -277,21 +280,25 @@ int PathFindNearestTileToPoint(const guild::render::Heightmap* hm,
                 float dy = world[1] - w[1];
                 float dz = world[2] - w[2];
                 double dist = std::sqrt((double)dx * dx + (double)dy * dy +
-                                        (double)dz * dz);
+                                        (double)dz * dz);    // st0 (v14)
+                // gilde.exe 0x486334: fst var_10 -> v37 = (float)dist. The MIN
+                // compare (fcomp var_18) uses the full-precision sqrt result (v14);
+                // every other comparison/gate reloads the ROUNDED float v37.
+                float v37 = (float)dist;
 
                 if (dist < (double)bestMinDist &&
-                    dist > kFindNearestTileMinDist) {
+                    (double)v37 > kFindNearestTileMinDist) {
                     found = 1;
                     nearX = j;
                     nearY = i;
-                    bestMinDist = (float)dist;
+                    bestMinDist = v37;
                 }
-                if (dist > (double)bestMaxDist &&
-                    dist > kFindNearestTileMinDist) {
+                if ((double)v37 > (double)bestMaxDist &&
+                    (double)v37 > kFindNearestTileMinDist) {
                     found = 1;
                     farX = j;
                     farY = i;
-                    bestMaxDist = (float)dist;
+                    bestMaxDist = v37;
                 }
             }
         }

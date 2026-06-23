@@ -140,6 +140,40 @@ TEST(RenderCullUnit, NullPolygonIgnored) {
     CHECK_EQ(p.flags36, (u8)0x00);
 }
 
+// ----- wave-12 boundary hardening --------------------------------------------
+// Zero vertex AND zero polygon counts: both loops must not execute (no read of
+// the null base pointers).  ASAN/UBSAN clean = no spurious deref at count 0.
+TEST(RenderCullUnit, ZeroCountsNoAccess) {
+    Frustum f = MakeFrustum();
+    ComputeVertexClipFlags(kClipOutMask, nullptr, 0, nullptr, 0, f);
+    CHECK(true);  // reaching here without a sanitizer trap is the assertion
+}
+
+// Extreme / huge coordinates: every per-plane test is a plain compare, so
+// FLT_MAX and -FLT_MAX classify deterministically with no overflow/UB.
+TEST(RenderCullUnit, ExtremeCoordsClassify) {
+    Frustum f = MakeFrustum();
+    const float big = 3.0e38f;
+    Vertex v[2] = { MakeVtx(big, big, big), MakeVtx(-big, -big, -big) };
+    ComputeVertexClipFlags(kClipOutMask, v, 2, nullptr, 0, f);
+    // (+big): x>0 bit1, y>0 bit3, z>far bit5 => 0x2a
+    CHECK_EQ(v[0].clipFlags, (u8)0x2a);
+    // (-big): x<0 bit0, y<0 bit2, z<near bit4 => 0x15
+    CHECK_EQ(v[1].clipFlags, (u8)0x15);
+}
+
+// A "zero-extent" triangle (all three verts identical, fully inside): the AND of
+// equal outcodes (0) is 0 -> kept, OR is 0 -> flags36 == 0x80 (kept bit only).
+TEST(RenderCullUnit, DegenerateTriangleKept) {
+    Frustum f = MakeFrustum();
+    Vertex v[3] = { MakeVtx(0,0,50), MakeVtx(0,0,50), MakeVtx(0,0,50) };
+    Polygon p;
+    std::memset(&p, 0, sizeof(p));
+    p.v0 = &v[0]; p.v1 = &v[1]; p.v2 = &v[2];
+    ComputeVertexClipFlags(kClipOutMask, v, 3, &p, 1, f);
+    CHECK_EQ(p.flags36, (u8)0x80);   // (0|0|0) | kept
+}
+
 // ----- ComputeViewScale clamp golden -----------------------------------------
 TEST(RenderCullUnit, ViewScaleClampGolden) {
     CHECK_EQ(ComputeViewScale(0.0f),    (i32)5);

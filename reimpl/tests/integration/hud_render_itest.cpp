@@ -66,18 +66,20 @@ TEST(HudRenderItest, BarFillRealLeaves) {
     CHECK_EQ(res.barSlotsDrawn, 2);
     CHECK(res.barFillRows > 0);
 
-    // Slot 0 sub-window at (subWinX, subWinY) = (15, 63), 80x6, fully filled.
+    // Slot 0 sub-window at (subWinX, subWinY) = (6, 63), w=15 x h=80 (AddChildWindow
+    // a1=x=6, a2=y=63, a3=w=15, a4=h=80 @0x4b19a5), fully filled.
     gui::PlayerBarLayout L0 = gui::PlayerBar_SlotLayout(0);
     uint8_t r, g, b;
     Px(buf, W, L0.subWinX + 2, L0.subWinY + 2, r, g, b); // inside slot 0 fill
     CHECK_EQ((int)r, pal.barFillR); CHECK_EQ((int)g, pal.barFillG); CHECK_EQ((int)b, pal.barFillB);
 
-    // Slot 1 at row pitch 78: sub-window y = 78 + 63 = 141; half-filled (40px). A
-    // pixel near the left is fill; a pixel near the right is track (empty).
+    // Slot 1 at row pitch 78: sub-window y = 78 + 63 = 141; half-filled. With w=15 the
+    // fill is (50*15)/100 = 7px wide. A pixel near the left is fill; a pixel past the
+    // fill (still inside the 15px-wide bar) is track (empty).
     gui::PlayerBarLayout L1 = gui::PlayerBar_SlotLayout(1);
     Px(buf, W, L1.subWinX + 2, L1.subWinY + 2, r, g, b);  // left -> fill
     CHECK_EQ((int)r, pal.barFillR); CHECK_EQ((int)g, pal.barFillG); CHECK_EQ((int)b, pal.barFillB);
-    Px(buf, W, L1.subWinX + 70, L1.subWinY + 2, r, g, b); // right -> track
+    Px(buf, W, L1.subWinX + 12, L1.subWinY + 2, r, g, b); // right (x=12, > 7 fill) -> track
     CHECK_EQ((int)r, pal.barTrackR); CHECK_EQ((int)g, pal.barTrackG); CHECK_EQ((int)b, pal.barTrackB);
 
     // The real SurfaceDrawRectOutline produced frame pixels.

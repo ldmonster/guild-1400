@@ -40,6 +40,21 @@ TEST(GuiTextFormat2, DigitPairGolden) {
     CHECK_EQ(callDP(99), std::string("99"));
 }
 
+// --- FormatDigitPair: exact 8/16-bit DIV semantics (0x5faafe) ----------------
+// The branch at 0x5fab04 tests ONLY the low byte (`cmp al, cl`); when not taken,
+// `div cl` divides the FULL 16-bit AX by 10 (AL=quotient->out[0], AH=rem->out[1]).
+// These goldens lock in that the high byte participates in the DIV path and acts
+// as the tens digit in the jb-taken (low byte < 10) path.
+TEST(GuiTextFormat2, DigitPairHighByte) {
+    // low byte < 10: jb taken -> out[0]=high byte, out[1]=low byte (no DIV).
+    CHECK_EQ(callDP(0x0102u), std::string("12"));  // ah=1,al=2
+    CHECK_EQ(callDP(0x0900u), std::string("90"));  // ah=9,al=0
+    // low byte >= 10: DIV of full AX by 10. 266/10=26, 266%10=6.
+    // out[0] = (char)(26+'0'), out[1] = '6'.
+    CHECK_EQ(callDP(266u),
+             std::string(1, static_cast<char>(26 + '0')) + "6");
+}
+
 // --- FormatDigitPair2: fixed 4-digit ----------------------------------------
 TEST(GuiTextFormat2, DigitPair2Golden) {
     CHECK_EQ(callDP2(0), std::string("0000"));

@@ -140,7 +140,8 @@ constexpr int kTrainStaffMinBudget = 38400;  // budget gate
 
 // gilde.exe 0x4596e4 (core) — PlanProduction output multiplier. The production
 // scaling applied to the building's stock count based on the AiPlayer multiplier
-// tier (+583): 1 -> *flt_6198F0, 2 -> *flt_6198EC, 3 -> *flt_6198E8, else the
+// tier (+583): 1 -> *flt_6198F0 (1.5625e-05), 2 -> *flt_6198EC (7.8125e-06),
+// 3 -> *flt_6198E8 (3.906e-06), else the
 // stock count is left unscaled (the switch default). The result is then
 // (scaled * 0.5 + 0.25) (flt_6198F4 / flt_6198F8). Returns the production ratio.
 double PlanProductionRatio(u8 multiplierTier, int stockCount);

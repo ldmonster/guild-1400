@@ -35,7 +35,12 @@ static u8 WidthLog2Table(i32 mipWidth) {
 //     } else { bind the 1x1 white default }
 // ---------------------------------------------------------------------------
 void TextureBank::BindActive(int idx) {
-    if (idx == binding.boundIndex || !valid(idx))
+    // gilde.exe 0x5db566-0x5db570: `if (result != dword_64A1F8 && result)`.
+    // The gate is idx != boundIndex AND idx != 0 (NOT a bounds check); idx==0 is
+    // a no-op exactly like a re-bind of the already-bound record. (`valid()` is
+    // kept only as a defensive guard on the vector access for out-of-tree callers
+    // — the original trusts the caller and does no upper-bound check.)
+    if (idx == binding.boundIndex || idx == 0 || !valid(idx))
         return;
     binding.boundIndex = idx;                  // dword_64A1F8 = result
 
@@ -133,15 +138,16 @@ bool TextureBank::UploadToSurface(int idx, bool force, const char* path,
     bool nameSpecial = !rec->name.empty() && (u8)rec->name[0] == 42;
 
     if (swEnabled) {                            // byte_649D70 != 0 (GPU present)
-        // Reload only when there is no live dest surface OR a forced reload.
-        if (g.dstSurface == 0 || force) {       // !*(v4+96) || a2  (96==our dst)
-            if (g.dstSurface != 0) {            // release stale source(+96)
-                dev.release(g.dstSurface);      // (*(vtable+8))(*(v4+96))
-                g.dstSurface = 0;
-            }
-            if (g.srcSurface != 0) {            // release stale dest(+100)
-                dev.release(g.srcSurface);      // (*(vtable+8))(*(v4+100))
+        // 0x5db27d: `if (*(v4+96) != 0) goto tail` — reload only when there is no
+        // live SOURCE surface (+96) OR a forced reload (a2).
+        if (g.srcSurface == 0 || force) {       // !*(v4+96) || a2  (96==srcSurface)
+            if (g.srcSurface != 0) {            // 0x5db287: release +96 (source) first
+                dev.release(g.srcSurface);      // (*(vtable+8))(*(v4+96))
                 g.srcSurface = 0;
+            }
+            if (g.dstSurface != 0) {            // 0x5db2a0: then release +100 (dest)
+                dev.release(g.dstSurface);      // (*(vtable+8))(*(v4+100))
+                g.dstSurface = 0;
             }
             if (force && !rec->texels.empty()) {// a2: drop the system texel copy
                 rec->texels.clear();            // FreeDebug(*(v4+68)); +68 = 0
@@ -156,25 +162,32 @@ bool TextureBank::UploadToSurface(int idx, bool force, const char* path,
                                                     noKey, rec->loadShift,
                                                     &g.srcSurface, &g.dstSurface);
                     rec->shift = achieved;           // *(v4+124) = v12
-                    // *(v4+116) = *(v4+120) >> byte_64A350  (MipWidth, saturated)
-                    rec->mipWidth = MipWidth(rec->baseWidth, mipShiftGlobal);
+                    // 0x5db34d-0x5db352: *(v4+116) = (u32)*(v4+120) >> byte_64A350.
+                    // A RAW logical shift (`shr eax,cl`) — NOT saturated to >=1
+                    // (MipWidth() would clamp; the binary does not). Identical for
+                    // every real input (po2 baseWidth, small shift); exact here.
+                    rec->mipWidth =
+                        (i32)((u32)rec->baseWidth >> (mipShiftGlobal & 31));
                 }
             }
         }
     } else {                                    // software path: drop GPU surfaces
+        // 0x5db492: enter when *(v4+96) || *(v4+100) || !*(v4+68).
         if (g.srcSurface != 0 || g.dstSurface != 0 || rec->texels.empty()) {
-            if (g.dstSurface != 0) {            // release +96
-                dev.release(g.dstSurface);
-                g.dstSurface = 0;
-            }
-            if (g.srcSurface != 0) {            // release +100
+            if (g.srcSurface != 0) {            // 0x5db417: release +96 (source) first
                 dev.release(g.srcSurface);
                 g.srcSurface = 0;
             }
-            if (!force && !rec->texels.empty()) // !a2 && *(+68): free the texels
-                rec->texels.clear();
-            // *(v4+68) = 0 (always) — the buffer is dropped either way.
-            // Software path keeps the texels only on the force path (a2).
+            if (g.dstSurface != 0) {            // 0x5db431: then release +100 (dest)
+                dev.release(g.dstSurface);
+                g.dstSurface = 0;
+            }
+            // 0x5db451: `if (!a2 && *(v4+68)) FreeDebug(...)` — the allocator free
+            // runs only on the !force path; then 0x5db45f `*(v4+68) = 0` ALWAYS
+            // drops the texel base. In our owning model "drop the base" == clear()
+            // (force just leaks the original buffer there — not representable, and
+            // immaterial: the pointer becomes 0 either way).
+            rec->texels.clear();
             if (nameSpecial) {
                 // '*' record: release the slot back to the pool. We mirror the
                 // refCount decrement (ReleaseEntry) without a TextureSet handle by

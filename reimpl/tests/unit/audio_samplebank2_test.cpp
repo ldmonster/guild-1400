@@ -28,14 +28,17 @@ Record* MakeSample(const char* name, int size) {
 
 TEST(Sb2ExtractExt, Basic) {
     Reset();
+    // gilde.exe 0x447770 extracts the BASE FILENAME (bytes between the last '\\'
+    // and the trailing '.'), copying from v7+1 for v8-v7-1 bytes — NOT the file
+    // extension despite the recovered name.  For "C:\\sounds\\bird.wav" that is
+    // "bird" (4 bytes).  Verified against the disasm (sub ebx,edx @0x4477b1).
     char out[32];
     std::memset(out, 0xAA, sizeof(out));
     CHECK_EQ(ExtractFileExtension("C:\\sounds\\bird.wav", out, 32), 0);
-    CHECK_EQ(std::strncmp(out, "wav", 3), 0);
-    // The original StrNCopyPad copies exactly `needed` (3) bytes; with needed<cap
-    // it does NOT pad beyond, so out[3] is the caller's pre-existing byte. (This
-    // is a faithful quirk: ExtractFileExtension copies only the length, not cap.)
-    CHECK_EQ(static_cast<unsigned char>(out[3]), 0xAA);
+    CHECK_EQ(std::strncmp(out, "bird", 4), 0);
+    // StrNCopyPad copies exactly `needed` (4) bytes; with needed<cap it does NOT
+    // pad beyond, so out[4] keeps the caller's pre-existing byte (faithful quirk).
+    CHECK_EQ(static_cast<unsigned char>(out[4]), 0xAA);
 }
 
 TEST(Sb2ExtractExt, ErrorsAndCap) {
@@ -43,10 +46,13 @@ TEST(Sb2ExtractExt, ErrorsAndCap) {
     char out[8];
     CHECK_EQ(ExtractFileExtension(nullptr, out, 8), -1);
     CHECK_EQ(ExtractFileExtension("x.wav", nullptr, 8), -1);
-    CHECK_EQ(ExtractFileExtension("noext", out, 8), -1);     // no dot
-    // "wav" needs 3 bytes; cap 3 -> needed(3) >= cap(3) -> -1
-    CHECK_EQ(ExtractFileExtension("a.wav", out, 3), -1);
-    CHECK_EQ(ExtractFileExtension("a.wav", out, 4), 0);
+    // No dot after the (last) backslash -> StrChr returns null -> -1.
+    CHECK_EQ(ExtractFileExtension("dir\\noext", out, 8), -1);
+    // Basename "bird" needs 4 bytes; cap 4 -> needed(4) >= cap(4) -> -1.
+    CHECK_EQ(ExtractFileExtension("p\\bird.wav", out, 4), -1);
+    // cap 5 -> needed(4) < cap -> copy "bird", return 0.
+    CHECK_EQ(ExtractFileExtension("p\\bird.wav", out, 5), 0);
+    CHECK_EQ(std::strncmp(out, "bird", 4), 0);
 }
 
 TEST(Sb2Classify, FormatCodes) {

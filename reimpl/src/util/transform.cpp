@@ -15,13 +15,17 @@ inline float* ParentLink(float* frame) {
 
 } // namespace
 
-// gilde.exe 0x5c8b38 — VIBE_Transform_PointThroughBoneChain
+// gilde.exe 0x5c8b38 — VIBE_Transform_PointThroughBoneChain   (__usercall eax=fn(frame@eax, point@edx, out@ebx))
 //   out = point + frame[30..32];
 //   for (i = parent(frame); i; i = parent(i)) {
 //     t = out + i[27..29](bytes 108/112/116);
 //     out = (3x3 at i[99/103/107 | 100/104/108 | 101/105/109]) * t;
 //     out -= i[27..29];  out += i[19..21](bytes 76/80/84);  out += i[30..32](120/124/128);
 //   }
+// Original return value (eax) is pathological and unused by every caller: it is the
+// `frame` arg when the loop runs 0 times, otherwise the address of the on-stack scratch
+// `&v6` (`mov eax,esp` at 0x5c8b79) which dangles after return. We return `out` instead
+// (the only observable side effects are the 3 floats written to `out`).
 float* PointThroughBoneChain(float* frame, const float* point, float* out) {
     // Original: *out = *point + frame[30]; ... (frame[30..32] == bytes 120/124/128).
     out[0] = point[0] + frame[30];
@@ -79,11 +83,15 @@ float* PointThroughBoneChainPivot(float* frame, const float* point, float* out) 
     return PointThroughBoneChain(frame, tmp, out);
 }
 
-// gilde.exe 0x5c8990 — VIBE_Transform_RotateVectorByHierarchy
-//   out = (3x3 of frame: cols frame[99..101]/[103..105]/[107..109]) * vec;
-//   for (i = parent(frame); i; i = parent(i)) out = (3x3 of i) * out;  return last.
-//   The frame's own 3x3 here uses indices 99/100/101 | 103/104/105 | 107/108/109
-//   (bytes 396/400/404, 412/416/420, 428/432/436) — the column-major read.
+// gilde.exe 0x5c8990 — VIBE_Transform_RotateVectorByHierarchy   (__usercall eax=fn(frame@eax, vec@edx, out@ebx))
+//   out = (3x3 of frame: rows frame[99,103,107]/[100,104,108]/[101,105,109]) * vec;
+//   for (i = parent(frame); i; i = parent(i)) out = (3x3 of i) * out;
+//   y,z (out[1],out[2]) are computed from vec before out[0] is stored, so the result
+//   is correct even if `out` aliases `vec` (matches the original FPU-stack ordering).
+//   Original return value (eax) is pathological/unused: it is the `vec` arg when the
+//   loop runs 0 times, otherwise the float bits of the last out[2] reinterpreted as a
+//   pointer (`mov eax,[esp+var_14]` at 0x5c8a5c). We return `out` (the observable side
+//   effects are the 3 floats written to `out`).
 float* RotateVectorByHierarchy(float* frame, const float* vec, float* out) {
     double y = (double)vec[0] * frame[100] + (double)vec[1] * frame[104] + (double)vec[2] * frame[108];
     double z = (double)vec[0] * frame[101] + (double)vec[1] * frame[105] + (double)vec[2] * frame[109];

@@ -193,12 +193,15 @@ TEST(AiMeisterWs, CapacityTopLevelInfeasible) {
     g_td = ai::WsTypeDef{};
     g_td.inputNeed[0] = 5;
     std::vector<ai::WsItem> items(1);
-    items[0].id = 10; items[0].backIndex = -1; items[0].reserved = 0; items[0].flags50 = 1;
+    // binary field map (verified @0x45bace/badb/bae2): gate is need vs STOCK(+42),
+    // headroom is freeCap(+46)!=0, "already feasible" is reserved(+38)!=0.
+    items[0].id = 10; items[0].backIndex = -1;
+    items[0].stock = 0; items[0].reserved = 0; items[0].freeCap = 100;
     std::vector<ai::WsStation> st(1);
     st[0].typeId = 100; st[0].slots[0] = 0;
     ai::MeisterWsEnv env = MakeWsEnv();
     ai::StockNeedQuery nq; nq.sellers = &FakeSellers; nq.budget = 1000000;
-    // top level: need 5 > reserved 0 -> infeasible immediately.
+    // top level: need 5 > stock 0 -> infeasible immediately.
     CHECK(!ai::CheckWorkstationCapacity(st, 0, items, env, nq, true));
 }
 
@@ -207,9 +210,9 @@ TEST(AiMeisterWs, CapacitySellerFeasible) {
     g_td.inputNeed[0] = 5;
     std::vector<ai::WsItem> items(1);
     items[0].id = 10; items[0].backIndex = -1; items[0].reserved = 0;
-    items[0].flags50 = 1; items[0].stock = 0; items[0].unitPrice = 2.0f;
+    items[0].freeCap = 100; items[0].stock = 0; items[0].unitPrice = 2.0f;
     std::vector<ai::WsStation> st(1);
-    st[0].typeId = 100; st[0].slots[0] = 0;
+    st[0].typeId = 100; st[0].slots[0] = 0; st[0].freeCap = 100;
     ai::MeisterWsEnv env = MakeWsEnv();
 
     // a non-self market seller with deficit 10, same owner -> free transfer -> ok.
@@ -232,7 +235,7 @@ TEST(AiMeisterWs, CapacitySpecialItemAlwaysOk) {
     g_td.inputNeed[0] = 5;
     std::vector<ai::WsItem> items(1);
     items[0].id = 452; items[0].backIndex = -1; items[0].reserved = 0;
-    items[0].flags50 = 1; items[0].stock = 0;
+    items[0].freeCap = 100; items[0].stock = 0;
     std::vector<ai::WsStation> st(1);
     st[0].typeId = 100; st[0].slots[0] = 0;
     ai::MeisterWsEnv env = MakeWsEnv();

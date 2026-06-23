@@ -17,8 +17,9 @@ using namespace guild;
 using namespace guild::world;
 
 // Builds a synthetic descriptor table: `n` entries, entry i has value (i+10) and
-// category cats[i]. (The shipped static image stores 0x17 in every +5 byte, so a
-// synthetic table is needed to exercise the category-keyed lookups meaningfully.)
+// category cats[i]. (A synthetic table makes the per-category counts deterministic
+// for the lookup tests; the shipped default image is exercised separately in
+// DefaultImageLayout, where the +5 categories are the 0..5 book grouping.)
 static void BuildSyntheticTable(const u8* cats, int n) {
     EventTableReset();
     for (int i = 0; i < n; ++i) {
@@ -175,17 +176,20 @@ TEST(WorldMission, RequirementAdvance) {
     CHECK(MissionRequirementAdvance(0, 23));
     CHECK_EQ(g_missionSlots[0].fieldAt28, 2);
 
-    // Non-matching crime type (different from slot type) does not advance.
-    CHECK(!MissionRequirementAdvance(0, 11));
-    CHECK_EQ(g_missionSlots[0].fieldAt28, 2);
+    // A trackable but NON-matching crime type still returns true (the original
+    // unconditionally does mov eax,1 once the slot is found + type is trackable),
+    // but it does NOT bump the progress counter (only slot.type == crimeType does).
+    CHECK(MissionRequirementAdvance(0, 11));   // 11 trackable, != slot type 23
+    CHECK_EQ(g_missionSlots[0].fieldAt28, 2);  // unchanged
 
-    // Untrackable type never advances even if it equals the slot type.
+    // Untrackable type returns false (the type-gate's xor eax,eax) even if it
+    // equals the slot type.
     MissionSlotTableReset();
     MissionSlotRegister(/*owner*/100, /*type*/12);   // type 12 is untrackable
     CHECK(!MissionRequirementAdvance(0, 12));
     CHECK_EQ(g_missionSlots[0].fieldAt28, 0);
 
-    // Empty slot never advances.
+    // Empty slot (FindBySource miss) returns false.
     MissionSlotTableReset();
     CHECK(!MissionRequirementAdvance(0, 23));
 }

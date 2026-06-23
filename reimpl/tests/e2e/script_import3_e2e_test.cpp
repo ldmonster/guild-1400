@@ -80,7 +80,7 @@ TEST(ScriptImport3E2E, RegisterAllTables) {
     CHECK(FindCommandByName(Commands().bytes, "Sleep") != nullptr);
     CHECK(FindCommandByName(Commands().bytes, "PlaySample3D") != nullptr);
     CHECK(FindCommandByName(Commands().bytes, "CreateEmitter") != nullptr);
-    CHECK(FindCommandByName(Commands().bytes, "SelectAllTextures") != nullptr);
+    CHECK(FindCommandByName(Commands().bytes, "SelectAllTextureSets") != nullptr);
     // 8 SND_* tokens from the sound group.
     CHECK_EQ(EventTokens().count, 8u);
     ResetCommands();

@@ -147,9 +147,10 @@ TEST(GuiHudMode, FindModeIndexDepth) {
     CHECK_EQ(Hud_FindModeIndex(7, 3, table), 3);
     // modeId 9 (tag 36) at index 3 -> depth 0.
     CHECK_EQ(Hud_FindModeIndex(9, 3, table), 0);
-    // not found -> returns 4*modeId.
-    CHECK_EQ(Hud_FindModeIndex(2, 3, table), 8);
-    // curIndex < 0 -> returns 4*modeId.
+    // not found (scan falls off the bottom) -> 0x4bea4f returns `result * 4` where
+    // `result` is the negative loop counter at exit: 6->4->2->0->-2, so -2*4 = -8.
+    CHECK_EQ(Hud_FindModeIndex(2, 3, table), -8);
+    // curIndex < 0 -> eax (result) is still modeId, so returns 4*modeId.
     CHECK_EQ(Hud_FindModeIndex(5, -1, table), 20);
 }
 
@@ -331,9 +332,12 @@ TEST(GuiMenuOptions, OptionEnabledFlags) {
     CHECK(!Menu_OptionEnabled(OptionsItem::kLoad, kFlagMission));
     CHECK(!Menu_OptionEnabled(OptionsItem::kSave, kFlagMission));
     CHECK(Menu_OptionEnabled(OptionsItem::kGfx, kFlagMission));
-    // Network client (0x4 without 0x10) disables Load.
+    // gilde.exe 0x56dccc: network (bit 0x4) disables Load UNCONDITIONALLY (regardless
+    // of 0x10), and disables Save unless the host bit 0x10 is set.
     CHECK(!Menu_OptionEnabled(OptionsItem::kLoad, kFlagNetwork));
-    CHECK(Menu_OptionEnabled(OptionsItem::kLoad, kFlagNetwork | 0x10));
+    CHECK(!Menu_OptionEnabled(OptionsItem::kLoad, kFlagNetwork | 0x10)); // Load still off
+    CHECK(!Menu_OptionEnabled(OptionsItem::kSave, kFlagNetwork));        // Save off (no 0x10)
+    CHECK(Menu_OptionEnabled(OptionsItem::kSave, kFlagNetwork | 0x10));  // Save on (host)
 }
 
 // ===========================================================================

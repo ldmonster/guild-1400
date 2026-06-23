@@ -57,6 +57,23 @@
 
 namespace guild::play {
 
+// Bounded relation snapshot read. world::RelationGet (gilde.exe 0x5942fc) indexes
+// the flat 768x768 grid as g_relationMatrix[768*a + b] with NO internal bound, so a
+// degenerate out-of-range click id (e.g. a stale/garbage victim/perpetrator id) is a
+// genuine OOB read. ApplyCrimeCommand already gates the WRITE on kRelationDim; the
+// slice's before/after SNAPSHOTS must gate the READ identically. For in-range pairs
+// this returns exactly RelationGet (goldens unchanged); an out-of-range pair has no
+// stored relation, so we report the unbound default 0 (the zero-initialized matrix
+// cell value) without touching memory. (RelationGet/RelationSet themselves lack the
+// bound — DOCUMENTED for the world/relation owner; not editable here.)
+namespace {
+int RelationGetSafe(i32 a, i32 b) {
+    if (a < 0 || b < 0 || a >= world::kRelationDim || b >= world::kRelationDim)
+        return 0;
+    return world::RelationGet(a, b);
+}
+} // namespace
+
 // The order-pad offsets the op-80 apply writes (same as input_command.cpp).
 namespace {
 constexpr int kAppliedKindOff  = 0x60;  // order-kind byte
@@ -308,14 +325,14 @@ void RunCombatCommand(CombatSliceResult& r, const CombatInteraction& it,
         r.attackApplied = (applied == 1);
         r.padKindAfter  = base[kAppliedKindOff];
     } else if (it.action == HostileAction::kCrime) {
-        r.relationBefore = world::RelationGet(it.victimId, it.perpetratorId);
+        r.relationBefore = RelationGetSafe(it.victimId, it.perpetratorId);
         i32 cid = SliceCrimeId(seed);
         int slot = ApplyCrimeCommand(it, cid);
         r.crimeSlot     = slot;
         r.crimeId       = cid;
         r.crimePerp     = it.perpetratorId;
         r.crimeVictim   = it.victimId;
-        r.relationAfter = world::RelationGet(it.victimId, it.perpetratorId);
+        r.relationAfter = RelationGetSafe(it.victimId, it.perpetratorId);
     }
 }
 
@@ -403,7 +420,7 @@ int RunCombatStepsSynthetic(std::uint32_t seed, const CombatInteraction& it,
         if (it.action == HostileAction::kAttack)
             *outBefore = reinterpret_cast<u8*>(&sim::g_objects[0])[kAppliedKindOff];
         else
-            *outBefore = world::RelationGet(it.victimId, it.perpetratorId);
+            *outBefore = RelationGetSafe(it.victimId, it.perpetratorId);
     }
 
     // --- kCommand: build + apply the real hostile command --------------------
@@ -421,7 +438,7 @@ int RunCombatStepsSynthetic(std::uint32_t seed, const CombatInteraction& it,
         if (it.action == HostileAction::kAttack)
             *outAfter = reinterpret_cast<u8*>(&sim::g_objects[0])[kAppliedKindOff];
         else
-            *outAfter = world::RelationGet(it.victimId, it.perpetratorId);
+            *outAfter = RelationGetSafe(it.victimId, it.perpetratorId);
     }
 
     // --- kDay: the real per-day cascade --------------------------------------

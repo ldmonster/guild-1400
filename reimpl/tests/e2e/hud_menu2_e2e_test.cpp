@@ -50,7 +50,7 @@ TEST(HudMenu2E2E, MinimapToHudToTeardown) {
     CHECK_EQ(sp.upId, 0);
     CHECK_EQ(sp.labelId, 2);
     if (sp.labelId < (int)widgets.size())
-        CHECK_EQ((int)widgets[sp.labelId].editFlags(), 67);
+        CHECK_EQ((int)widgets[sp.labelId].at<i16>(112), 67); // 0x4bd564 writes +112
 
     // border colour quads
     BorderColorCell sliderColors;
@@ -94,7 +94,10 @@ TEST(HudMenu2E2E, MinimapToHudToTeardown) {
     // --- 6. Tear down the player bar, verifying ordered side effects ---
     DragSlotTables drag;
     PlayerBar_ResetDragSlots(drag);
-    CHECK_EQ(drag.t708[0], 0xFFFF);
+    // 0x4b1d17 resets slots 10..320 (the `i += 10` runs before the writes), so slot 0
+    // stays 0 and slot 10 is the first reset (t708 -> 0xFFFF).
+    CHECK_EQ(drag.t708[0], 0);
+    CHECK_EQ(drag.t708[10], 0xFFFF);
 
     E2EPlayerBar pb;
     PlayerBar_SetHooks(&pb);

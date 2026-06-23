@@ -55,7 +55,10 @@ double RandomUnitFloat() {
     g_minstdLast = g_minstdTable[idx & 31];
     double v = static_cast<double>(g_minstdLast) * kUnitScale;
     if (v > kUnitMax)
-        return kUnitMax;
+        // 0x58b835: clamp path stores the constant as a *float* (dword 3F7FFFFEh)
+        // and `fld dword` promotes it back to double — i.e. (double)(float)0.99999988,
+        // == 0.9999998807907104, NOT the raw double 0.99999988. Cast through float.
+        return static_cast<float>(kUnitMax);
     return static_cast<float>(v);
 }
 
@@ -105,12 +108,15 @@ int RandomSignedOffset(u16 n) {
 
 // gilde.exe 0x58bc00 — VIBE_Math_RandomRangeWithBase (__usercall al=fn(base@al))
 //   if (base == 0)  return RandNext() % 42 + 21;       // [21, 62]
-//   mod = (base < 42.0f) ? 6 : 11;  (flt_626770 == 42.0)
+//   mod = ((u8)base < 42.0f) ? 6 : 11;  (flt_626770 == 42.0)
 //   return base + RandNext() % mod;                    // [base, base+mod-1]
 char RandomRangeWithBase(char base) {
     if (!base)
         return static_cast<char>(crt::RandNext() % 42 + 21);
-    int mod = (static_cast<i16>(base) < 42) ? 6 : 11;
+    // 0x58bc0c: `xor eax,eax; mov al,bl; fild word ptr` -> the base is ZERO-extended
+    // to a byte (u8) before the FPU load, so the `< 42.0` compare is UNSIGNED in
+    // [0,255], not signed. A negative char (high bit set) compares as >= 42 -> mod 11.
+    int mod = (static_cast<u8>(base) < 42) ? 6 : 11;
     int r = crt::RandNext();
     return static_cast<char>(r % mod + base);
 }

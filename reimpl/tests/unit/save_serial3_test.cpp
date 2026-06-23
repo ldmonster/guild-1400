@@ -21,7 +21,9 @@ namespace {
 // Recovered per-record byte sizes (see save_serial3_test computation).
 constexpr u32 kSlotSub   = 40;                 // per city-slot sub-record
 constexpr u32 kSlotTable = 16 + 62 * kSlotSub; // 2496
-constexpr u32 kCityInfoNoTail = 642;
+// gilde.exe 0x5a623c — the writer ALWAYS emits the +748 8-byte tail (no version
+// gate on the write side; the gate is loader-only at 0x5aa77f). So every city-info
+// record is 650 bytes regardless of the version argument.
 constexpr u32 kCityInfoTail   = 650;
 
 // Fill a buffer with a deterministic, non-zero pattern so any mis-sized field is
@@ -34,7 +36,7 @@ void Fill(std::vector<u8>& v, u8 seed) {
 } // namespace
 
 TEST(SaveSerial3, BuildingSlotTables_EmittedSize_WithTail) {
-    std::vector<u8> slot((std::size_t)kSlotTable * kBst_CitySlotTableCount, 0);
+    std::vector<u8> slot((std::size_t)kBst_CitySlotTableStride * kBst_CitySlotTableCount, 0);  // in-memory stride (7952), not emitted size
     std::vector<u8> city((std::size_t)kBst_CityInfoStride * kBst_CityInfoRecCount, 0);
     Fill(slot, 1);
     Fill(city, 99);
@@ -53,26 +55,41 @@ TEST(SaveSerial3, BuildingSlotTables_EmittedSize_WithTail) {
     CHECK_EQ(expect, (u32)15080);
 }
 
-TEST(SaveSerial3, BuildingSlotTables_EmittedSize_NoTail) {
-    std::vector<u8> slot((std::size_t)kSlotTable * kBst_CitySlotTableCount, 0);
+TEST(SaveSerial3, BuildingSlotTables_TailAlwaysWritten_LowVersion) {
+    // The writer has NO version gate on the +748 tail (verified @0x5a623c): even at
+    // a version below the loader gate (0x10037) the writer still emits the full
+    // 650-byte record. Size the destination to the no-tail size; the write must
+    // OVERFLOW (the memory stream clamps) -> the function observes a short write and
+    // returns false. This pins the unconditional-tail behavior.
+    std::vector<u8> slot((std::size_t)kBst_CitySlotTableStride * kBst_CitySlotTableCount, 0);  // in-memory stride (7952), not emitted size
     std::vector<u8> city((std::size_t)kBst_CityInfoStride * kBst_CityInfoRecCount, 0);
     Fill(slot, 5);
     Fill(city, 200);
 
-    // Size the destination to EXACTLY the no-tail expectation; a write that emits
-    // even one extra byte would overflow the memory stream (it clamps) and the
-    // function would observe a short write -> false.
-    const u32 expect = kSlotTable * kBst_CitySlotTableCount
-                     + kCityInfoNoTail * kBst_CityInfoRecCount;  // 15048
-    CHECK_EQ(expect, (u32)15048);
+    // No-tail size (642/record): one byte too small for the always-emitted tail.
+    const u32 noTail = kSlotTable * kBst_CitySlotTableCount
+                     + 642 * kBst_CityInfoRecCount;  // 15048
+    CHECK_EQ(noTail, (u32)15048);
 
-    std::vector<u8> out(expect, 0);
+    std::vector<u8> out(noTail, 0);
     VfsHandle* w = VfsOpenMemoryStream(out.data(), (u32)out.size(), "wb");
     CHECK(w != nullptr);
     if (w) {
+        // version 0x10036 < 0x10037: writer STILL emits the tail -> overflow -> false.
         bool ok = SaveWriteBuildingSlotTables(w, slot.data(), city.data(), 0x10036);
-        CHECK(ok);   // must fit exactly with no tail
+        CHECK(!ok);
         VfsCloseStream(w);
+    }
+
+    // And with room for the tail it succeeds at the SAME low version (tail unconditional).
+    std::vector<u8> out2(kSlotTable * kBst_CitySlotTableCount
+                         + kCityInfoTail * kBst_CityInfoRecCount, 0);  // 15080
+    VfsHandle* w2 = VfsOpenMemoryStream(out2.data(), (u32)out2.size(), "wb");
+    CHECK(w2 != nullptr);
+    if (w2) {
+        bool ok = SaveWriteBuildingSlotTables(w2, slot.data(), city.data(), 0x10036);
+        CHECK(ok);
+        VfsCloseStream(w2);
     }
 }
 

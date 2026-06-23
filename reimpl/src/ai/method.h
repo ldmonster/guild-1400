@@ -23,12 +23,14 @@ namespace guild::ai {
 int RandomModulo(u16 n);
 
 // gilde.exe 0x46797c — VIBE_AiMethod_RandomBoolCheck
-//   return RandomModulo(n) != 0;   (true with probability (n-1)/n)
-bool RandomBoolCheck(u16 n);
+//   0x46797c: mov eax, 2; call RandomModulo. The modulus is HARDCODED to 2 (the
+//   function takes no argument). return (u16)RandomModulo(2) != 0;  (true ~1/2).
+bool RandomBoolCheck();
 
 // gilde.exe 0x467994 — VIBE_AiMethod_RandomValue
-//   return (unsigned __int16)RandomModulo(n);
-int RandomValue(u16 n);
+//   0x467994: mov eax, 7; call RandomModulo. The modulus is HARDCODED to 7 (the
+//   function takes no argument). return (u16)RandomModulo(7);  (result in 0..6).
+int RandomValue();
 
 // --- AiAction gate predicates ----------------------------------------------
 

@@ -45,6 +45,8 @@
 #include "guild/common/types.h"
 #include "sim/he.h"
 
+#include <cstring>   // std::memcpy (unaligned He-field loads)
+
 namespace guild::sim {
 
 // ===========================================================================
@@ -70,7 +72,13 @@ namespace guild::sim {
 //   +0xE8 (+232)  : Meister resolved recruit entity id (dword).
 // ===========================================================================
 inline GameTime& He_ScratchTimeB(HeRecord* h) { return *reinterpret_cast<GameTime*>(HeBytes(h) + 96); }
-inline u8&    He_SubMethodByte(HeRecord* h)    { return *reinterpret_cast<u8*>(HeBytes(h) + 169); }
+// Office sub-method index: the original reads the unaligned DWORD at +169 and does a
+// signed arithmetic shift right 24 (disasm `mov ebx,[ebp+0A9h]; sar ebx,18h`), i.e.
+// the sign-extended high byte of the +169 dword (== signed byte at +172). NOT the
+// low byte at +169. Returns the signed value.
+inline i32 He_SubMethodByte(HeRecord* h) {
+    i32 v; std::memcpy(&v, HeBytes(h) + 169, sizeof(v)); return v >> 24;  // sar 24 (signed)
+}
 inline i32&   He_F172(HeRecord* h)             { return *reinterpret_cast<i32*>(HeBytes(h) + 172); }
 inline u8&    He_MemberCountByte(HeRecord* h)  { return *reinterpret_cast<u8*>(HeBytes(h) + 172); }
 inline i32&   He_F176(HeRecord* h)             { return *reinterpret_cast<i32*>(HeBytes(h) + 176); }

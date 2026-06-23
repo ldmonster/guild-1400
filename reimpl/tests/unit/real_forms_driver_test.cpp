@@ -52,8 +52,10 @@ void WriteWindow(u8* rec, int x, int y, int w, int h, u32 flags,
     wr_name(rec, 3664, text);            // window text @ +3664
     for (std::size_t o = 0; o < objs.size(); ++o) {
         const ObjSpec& s = objs[o];
-        wr_u32(rec, 208  + 8 * int(o), u32(s.type));      // type
-        wr_u32(rec, 3472 + 8 * int(o), u32(s.aux));       // aux
+        // Per-object strides recovered from gilde.exe 0x41c4d6: type/aux base
+        // increments by 4 (`add esi,4`), NOT 8.
+        wr_u32(rec, 208  + 4 * int(o), u32(s.type));      // type @+208+4o
+        wr_u32(rec, 3472 + 4 * int(o), u32(s.aux));       // aux  @+3472+4o
         wr_u32(rec, 10   + 2 * int(o), u32(s.x) << 16);   // x16.16 (>>16 = x)
         wr_u32(rec, 106  + 2 * int(o), u32(s.y) << 16);   // y16.16
         wr_name(rec, 400 + 64 * int(o), s.name);          // 64-byte name slot
@@ -108,18 +110,22 @@ TEST(RealFormsDriver, SyntheticFrm2BuildsWidgetTree) {
     // 6 records in w0 + 1 in w1 = 7 object records seen.
     CHECK_EQ(df.objectRecords, 7);
 
-    // Built widgets: 2 sprites + 1 label + 1 input + 1 slider in w0, 1 label in w1.
-    // The inert (type 0) object builds nothing.
-    CHECK_EQ(df.spriteCount, 2);
-    CHECK_EQ(df.labelCount, 2);
+    // Built widgets (gilde.exe 0x41beb8 dispatch): `if (type < 64) Object_AddToWindow`
+    // builds a widget for EVERY type < 64 — that includes the two sprites (type 5) AND
+    // the "inert" type-0 spacer. The independent type switch then builds the label
+    // (67), input (65) and slider (69). So widgetCount = 3 (type<64) + 1 + 1 + 1 in w0,
+    // plus 1 label in w1 = 7. spriteCount counts only type 5/64 records (the type-0
+    // spacer falls in the switch default), so it stays 2.
+    CHECK_EQ(df.spriteCount, 2);   // 2 type-5 sprites
+    CHECK_EQ(df.labelCount, 2);    // lbl + childlbl
     CHECK_EQ(df.inputCount, 1);
     CHECK_EQ(df.sliderCount, 1);
-    CHECK_EQ(df.widgetCount, 6); // 2 + 2 + 1 + 1
+    CHECK_EQ(df.widgetCount, 7);   // 3 (type<64: img,btn,spacer) + label + input + slider + childlbl
 
-    // The inert edge hooks fired: sprites + slider resolve a property (3), labels
-    // resolve a text index (2). Read the module counters back.
+    // Edge hooks: Form_PropertyValidate fires for every type<64 object (img, btn,
+    // spacer = 3) plus the slider (1) = 4; Form_FindTextArrayIndex for the 2 labels.
     FormHookCounts hc = RealFormsHookCounts();
-    CHECK_EQ(hc.propertyValidate, 3); // 2 sprites + 1 slider
+    CHECK_EQ(hc.propertyValidate, 4); // 3 type<64 + 1 slider
     CHECK_EQ(hc.findTextIndex, 2);    // 2 labels
 }
 

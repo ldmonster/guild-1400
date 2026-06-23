@@ -568,7 +568,10 @@ static void CombatCaseResolve(HeRecord* h, bool isAttack) {
         u8 kind = H->personKind ? H->personKind(tgt) : 0;
         if ((kind == 6 || kind == 7) && H->sendMessage)
             H->sendMessage(perpPlayer, 6243);
-        He_State(h) = 5;
+        // Detected/caught teardown state differs between the twins:
+        //   Raid  (0x4cf456 / 0x4cf46f) sets state -1;
+        //   Attack(0x4ee186 / 0x4ee19f) sets state 5.
+        He_State(h) = isAttack ? 5 : -1;
         return;
     }
 

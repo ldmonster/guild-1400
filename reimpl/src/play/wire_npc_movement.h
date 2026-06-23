@@ -21,6 +21,34 @@
 // @0x4e7e88, sim::NpcDaily_DailyRoutineStep) call these path-follow leaves once a
 // person has a destination assigned.
 //
+// VERIFIED CADENCE (disasm pass 2026-06-11, IDA back online)
+// ---------------------------------------------------------------------------
+// The original's sub-tile motion is ANIM-ATTACHMENT ROOT MOTION, not a direct
+// per-frame position integration in the walk code:
+//   * WalkUpdate @0x40a0b8 runs per frame off the action queue; a fresh walk
+//     first waits out a 225-master-tick morph delay (entry+340 + 225 >
+//     dword_62D008 @0x40a127; master tick = the 14 ms winmm TimeBase).
+//   * WalkStep @0x4093b0 advances ONE WAYPOINT per completed segment: it
+//     writes the segment target into the walk-anim attachment (+76..84) and
+//     the segment DURATION into anim+92 — 20 base / 40 mounted, 8 / 24 on the
+//     final segment, x1.2 indoors (WalkSegmentDuration, charaction_walk.h).
+//   * WalkUpdate then writes the PLAYBACK SPEED anim+96 = mesh+416 baseSpeed
+//     x terrain factor flt_6108F0..FC = {2.2, 2.5, 1.7, 1.9} (keyed by the
+//     tile-type-ahead 6/11 and the cart bit mesh+4&8, @0x40a40b..0x40a4c1)
+//     x tile factor 0.7 (or dword_62D07C == 1.0f when mesh+44 == -1 and
+//     node+512 set, @0x40a3f2) x the ramp mesh+420 (+0.01/frame to 1.0,
+//     flt_6108EC @0x40a34a).
+//   * The actual translation toward anim+76..84 over duration/speed is
+//     integrated by the ANIM ATTACHMENT runtime (the mesh +492 attachment
+//     list — Anim_FindFreeMeshSlot/ReleaseMeshData/PruneExpiredAttachments
+//     @0x5cf114/0x5cfe30/0x5d0d38 + the morph anims WalkPathActionUpdate
+//     @0x408c4c rebuilds), which the session persons do NOT own. The faithful
+//     per-frame world advance therefore needs that attachment runtime — the
+//     named gap stands; the session's tile advance per opcode-30 commit stays
+//     the deterministic binding. Effective original tile rate: one waypoint
+//     per anim segment, i.e. ~ duration/speed master ticks per tile
+//     (e.g. base 20 ticks / (1.0 x 2.2 x 0.7 x 1.0) ~ 13 ticks ~ 180 ms).
+//
 // THE MOTION MODEL (what advances, and where it is stored)
 // ---------------------------------------------------------------------------
 // In the engine the live actor's CURRENT world position lives on its avatar mesh

@@ -166,7 +166,8 @@ GesetzDescResult GesetzFormatDescriptionLow(char* dest, u8 op, int value,
                                             int lowFlag);
 
 // 0x4c2f58 — VIBE_Gesetz_FormatDescriptionMid  (op-class 8..15; handles 13,15).
-//   op==13: base 4213 ; op==15: base 4223 ; else fallback.
+//   flag = (lowFlag <= 1) ? 1 : 0  (0x4c2f69 setle).
+//   op==13: base flag+4213 ; op==15: base flag+4223 ; else fallback.
 GesetzDescResult GesetzFormatDescriptionMid(char* dest, u8 op, int value,
                                             i32 subjectId, int lowFlag);
 

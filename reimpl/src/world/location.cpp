@@ -29,27 +29,29 @@ int ContactDispatch(const std::vector<ContactMenuItem>& items,
     return -1;
 }
 
-// gilde.exe PanelDispatcher title switch (the `switch (v11)` on *object) reused
-// as the contact-router classifier. Object-type bytes:
-//   8/14 -> dwelling/residence, 6 -> market/church-adjacent, 22 -> guild,
-//   11/12/13 -> office, 2/7 -> special, 19/4/16 -> production, 10 -> contor.
+// gilde.exe 0x51defc — VIBE_Building_EnterAndDispatch contact-loop selector.
+// The original reads the building object's 16-bit type code (`v31 = *v21`, the
+// `mov ax,[esi]` at 0x51e267) and runs a binary-search switch (0x51e26a..) that
+// picks the contact loop. The exact object-type codes for the loops modeled by
+// LocationKind here (verified against the decompile, ==/range tests):
+//   84  (0x54)        -> VIBE_Location_ThiefGuildContactLoop   (0x525070)
+//   229 (0xE5) / 230 (0xE6) -> VIBE_Location_ChurchContactLoop (0x5239c0)
+//   247 (0xF7)        -> VIBE_Location_ProductionContactLoop   (0x52388c)
+//   288 (0x120)       -> VIBE_ContactMenu_Tavern               (0x518c50)
+// Every other code routes to a different loop / the default LABEL_30 spin; the
+// kinds those open are not represented by this small enum, so they map to Idle.
+// (There is NO "residence" loop in the dispatcher — Residence is unreachable.)
 LocationKind ClassifyLocationKind(int objectType) {
     switch (objectType) {
-        case 19:
-        case 4:
-        case 16:
-        case 10:
-            return LocationKind::Production;
-        case 6:
-            return LocationKind::Church;
-        case 22:
+        case 84:
             return LocationKind::ThiefGuild;
-        case 2:
-        case 7:
+        case 229:
+        case 230:
+            return LocationKind::Church;
+        case 247:
+            return LocationKind::Production;
+        case 288:
             return LocationKind::Tavern;
-        case 8:
-        case 14:
-            return LocationKind::Residence;
         default:
             return LocationKind::Idle;
     }

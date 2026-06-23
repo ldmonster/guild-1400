@@ -56,7 +56,11 @@ int PlayerBar_FindFreeSlot() {
             ++slot;
         } while (slot < kPlayerBarSlots && g_playerBarSlots[slot].objId != kPlayerBarFree);
     }
-    // Original: `if (v45 > 32) break;` — give up once past the 32-slot capacity.
+    // Original: the v46 loop guard is `v46 < 320` (== slot < 32), so a full bar exits
+    // the scan with slot == 32. The original's own `if (v45 > 32) break;` never fires as
+    // the full-detector (that role is the earlier `if (v43 < 32) goto LABEL_22` de-dup
+    // guard, which skips the assign entirely when the bar is full). Isolated here, "full"
+    // is slot == 32 -> -1, which is the only safe in-bounds result for this helper.
     if (slot >= kPlayerBarSlots)
         return -1;
     return slot;

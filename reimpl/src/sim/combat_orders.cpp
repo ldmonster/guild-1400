@@ -379,17 +379,21 @@ int SelectBeatingTarget(const std::vector<i32>& seedIds,
             filterByte = filterTable25[idx];
         std::vector<i32> ids = queryFn ? queryFn(attempt, filterByte)
                                        : std::vector<i32>{};
-        // Append up to 3 of the query results, each gated by RandomModulo(4) < 3.
-        int taken = 0;
+        // Append up to 3 SUCCESSFUL appends of the query results, each gated by
+        // RandomModulo(4) < 3. Per disasm @0x57834B the "3" counter (ecx) is
+        // incremented ONLY when the gate passes (inc ecx is inside the take block,
+        // 0x578369); the iterator (Person_IterNext) advances every result, and the
+        // RandomModulo(4) draw is made on every result that reaches the gate. So we
+        // keep iterating/drawing until 3 successes (taken), 16 candidates, or the
+        // result set is exhausted.
+        int taken = 0;   // ecx — counts SUCCESSFUL appends, cap 3
         for (i32 id : ids) {
             if (taken >= 3 || count >= 16)
                 break;
             if (static_cast<u16>(Math_RandomModulo(4)) < 3) {
                 candidates[count++] = id;
+                ++taken;   // inc ecx ONLY on gate-pass (0x578369)
             }
-            // The original advances its iterator each step (taken++) regardless of
-            // whether the gate passed; it only breaks at 3 *iterations* or 16.
-            ++taken;
         }
     }
     if (count == 0)

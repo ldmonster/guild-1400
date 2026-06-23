@@ -141,7 +141,12 @@ TEST(AiMeisterE2E, CardGameFullRound) {
     // unchanged if seat A only knocked. Either way it never shrinks.
     CHECK(st.geti32(68) >= potBefore);
 
-    // Resolve the round to a terminal phase.
+    // Resolve the round to a terminal phase. gilde.exe UpdateRoundState ping-pongs
+    // phase 3<->4 unless a seat reaches a terminal decision (3 stand / 4 knock) or
+    // busts (sum>17). Force both seats to "stand" (decision 3) so the showdown at
+    // phase 3 (r[36]==3 && r[64]==3) compares the hand sums and resolves to 5 or 6.
+    st.bytes[36] = 3;
+    st.bytes[64] = 3;
     st.bytes[8] = 2; // force into reveal/showdown chain
     for (int i = 0; i < 8; ++i) {
         ai::UpdateRoundState(st);

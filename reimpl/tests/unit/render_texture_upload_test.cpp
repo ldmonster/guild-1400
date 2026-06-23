@@ -394,8 +394,9 @@ TEST(TexUpload, MipChainGolden8x8) {
     CHECK_EQ(chain[3][0], 0);
 }
 
-TEST(TexUpload, MipWidthSaturates) {
+TEST(TexUpload, MipWidthShift) {
+    // gilde.exe 0x5db350 `shr eax, cl` -> bare unsigned shift, NO saturation.
     CHECK_EQ(MipWidth(256, 0), 256);
     CHECK_EQ(MipWidth(256, 2), 64);
-    CHECK_EQ(MipWidth(2, 8), 1);              // saturates to >= 1
+    CHECK_EQ(MipWidth(2, 8), 0);              // 2 >> 8 == 0 (no clamp in binary)
 }

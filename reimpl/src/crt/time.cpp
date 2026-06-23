@@ -320,16 +320,16 @@ void TimeBase::Tick() {
 }
 
 void TimeBase::PumpFromClock() {
+    // Both StartTimer modes are continuous in the original: a2 == 0 arms a
+    // TIME_PERIODIC timer (@0x44e28c fuEvent = (a2 == 0)); a2 != 0 arms a
+    // one-shot that fptc re-arms each tick (@0x44e209, dword_62EB50). So the
+    // pump never self-stops; only StopTimer @0x44e2c4 ends the ticking.
     if (!running_ || !platform_ || delayMs_ == 0)
         return;
     u32 now = platform_->timeMs();
     while (now - lastTickMs_ >= delayMs_) {
         lastTickMs_ += delayMs_;
         Tick();
-        if (!periodic_) {
-            running_ = false;
-            break;
-        }
     }
 }
 

@@ -124,7 +124,9 @@ TEST(LawApply2, PromotionListMaxZero) {
     CHECK_EQ(OfficeBuildPromotionList(p, 0, out), 0);
     int rb = -1;
     CHECK_EQ(OfficeBuildPromotionListFiltered(p, 0, &rb, out), 0);
-    CHECK_EQ(rb, 0);
+    // gilde.exe 0x47f434: the `a2 <= 0` early return fires BEFORE the
+    // `if (v29) *v29 = v34` store, so *outRankBlocked is left UNTOUCHED (stays -1).
+    CHECK_EQ(rb, -1);
 }
 
 TEST(LawApply2, PromotionListEmptyWhenPersonInvalid) {

@@ -431,7 +431,10 @@ int SetPixelRgb(const ColorFormat& fmt, int x, int y, u8 r, u8 g, u8 b, void* su
         return 0;
     }
     int shift = static_cast<int>(Rd<u8>(surf, 20)) >> 3;
-    u16 packed = static_cast<u16>(PackColor(fmt, r, g, b));
+    // Original packs VIBE_Result_Handler_Final(a4, a3, a5) == PackColor(al=a4, dl=a3,
+    // bl=a5). With a3==r, a4==g, a5==b this is PackColor(fmt, g, r, b): the r and g
+    // PACK arguments are swapped relative to the byte-write order (which uses g,r,b).
+    u16 packed = static_cast<u16>(PackColor(fmt, g, r, b));
     i32 pitch = RdI(surf, 16);
     u8* pix = static_cast<u8*>(RdP(surf, 28));
     u8 bpp = Rd<u8>(surf, 20);

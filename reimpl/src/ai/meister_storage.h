@@ -222,7 +222,7 @@ int GatherRequiredItems(const std::vector<GatherNeed>& needs,
 // gilde.exe 0x45bd68 — recursively stamp the per-item reserve target + capacity
 // flags down a station's input chain. For each of the 4 input slots of
 // `stations[stationIdx]`:
-//   * clamp the item's reserveTarget (field18) to the station's reserveTarget;
+//   * clamp the item's flags50 (+50 dword_B54480) to the station's reserveTarget;
 //     set the item 0x2 reserve bit.
 //   * special ids (449..454): set the 0x10 "headroom" flag when there is free
 //     capacity and the chained production is below 4x the slot need.

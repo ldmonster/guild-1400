@@ -28,7 +28,9 @@
 //   * AddItem    returns the DWORD index (3*slot, or 6 when full / on qty==0
 //                no-op it returns the untouched key register).
 //   * RemoveItem returns the BYTE offset (3*slot*4 == 12*slot).
-//   * StoreItem  returns the SLOT index (0..6; 6 == table full).
+//   * StoreItem  returns the BYTE offset (12*slot) on a successful store, or 6
+//                when the table is full (disasm 0x41f9ae-0x41f9b8: eax is set to
+//                12*slot before the write and that eax is returned).
 // We preserve these exact return values; callers compare against 6 / use the
 // offset to index sibling widget tables.
 //
@@ -92,8 +94,8 @@ int DragSlotRemoveItem(DragSlotTable& t, i32 key, i32 qty);
 
 // gilde.exe 0x41f95c — VIBE_DragSlot_StoreItem (eax=key, edx=qty). OVERWRITE
 // the slot whose key == `key` (or the first free slot) with (key, accum=qty).
-// If qty == 0 the slot is freed (key=-1). Returns the SLOT index (0..6; 6 ==
-// table full).
+// If qty == 0 the slot is freed (key=-1). Returns the BYTE offset 12*slot on a
+// successful store, or 6 when the table is full (disasm-verified).
 int DragSlotStoreItem(DragSlotTable& t, i32 key, i32 qty);
 
 // ---------------------------------------------------------------------------

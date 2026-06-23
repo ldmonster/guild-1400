@@ -2,6 +2,7 @@
 #include "guild/common/types.h"
 #include "render/texture.h"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,19 @@ public:
     // stored/compared in the record. Returns the slot index, or -1 on failure.
     int LoadByName(const char* path, const std::string& name);
 
+    // BMP-bytes source override (ADDITIVE; default unset -> the VFS slurp below).
+    // The engine's VIBE_Vfs_ResolveAndBuildPath @0x4500a0 search resolves the
+    // "*"+name+".BMP" wildcard against EVERY mounted resource container, including
+    // the .BIN archives (Textures.BIN holds the floor slot BMPs as members, e.g.
+    // "_DYNAMIC/Boden/Wiese.bmp"). A loose-file VfsSlurp of "*WIESE.BMP" can't see
+    // an archive member, so this hook lets a caller (CityView3D) supply the member
+    // bytes by the bare slot name — exactly the bytes the engine's VFS resolve
+    // would have handed VIBE_Bmp_LoadBuffer. When set, LoadByName uses it instead
+    // of VfsSlurp; the rest of the decode path (square check + DecodeBmpIntoTexture)
+    // is unchanged. Unset -> byte-identical to before.
+    using BmpFetch = std::function<bool(const std::string& name, std::vector<u8>& out)>;
+    void SetBmpFetch(BmpFetch fn) { bmpFetch_ = std::move(fn); }
+
     // Direct access for tests / the mesh loader bridge.
     TextureSet& set() { return set_; }
     const TextureSet& set() const { return set_; }
@@ -84,6 +98,7 @@ public:
 
 private:
     TextureSet set_;
+    BmpFetch   bmpFetch_;
 };
 
 } // namespace guild::render

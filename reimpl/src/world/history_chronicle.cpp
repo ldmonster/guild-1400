@@ -108,6 +108,17 @@ int Chronicle::ScanNextForward(i32 currentDay) const {
 }
 
 char* Chronicle::FormatDate(int i, char* out) const {
+    // The in-memory chronicle models the engine's loaded-entry list; the engine never
+    // formats an entry it did not load, so bound the index to the live range. An
+    // out-of-range index yields a zero date "00.00.0000" rather than an OOB read.
+    if (i < 0 || i >= count_) {
+        if (out) {
+            for (int k = 0; k < 10; ++k)
+                out[k] = (k == 2 || k == 5) ? '.' : '0';
+            out[10] = '\0';
+        }
+        return out;
+    }
     const ChronicleEntry& e = entries_[i];
     // Inverse of ParseDate's fixed-width "DD.MM.YYYY": two digits, dot, two
     // digits, dot, four digits. Day/month clamped to two digits, year to four.

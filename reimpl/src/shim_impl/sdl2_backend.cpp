@@ -121,6 +121,15 @@ bool Sdl2Platform::pumpMessages() {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT)
             quit_ = true;
+        else if (e.type == SDL_MOUSEWHEEL) {
+            // SDL_MOUSEWHEEL -> MouseState::wheel notches (the WM_MOUSEWHEEL
+            // 120-unit stream the original fed into dword_672254). Respect the
+            // "natural"/flipped direction SDL reports.
+            int n = e.wheel.y;
+            if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
+                n = -n;
+            wheelAccum_ += n;
+        }
     }
     return !quit_;
 }
@@ -143,6 +152,8 @@ void Sdl2Platform::getMouse(MouseState& out) {
     out.left = (b & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
     out.right = (b & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
     out.middle = (b & SDL_BUTTON(SDL_BUTTON_MIDDLE)) != 0;
+    out.wheel = wheelAccum_;     // notches since the previous getMouse()
+    wheelAccum_ = 0;
 }
 
 // Map a Win32 virtual-key code to an SDL_Scancode for the common keys the

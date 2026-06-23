@@ -75,16 +75,21 @@ TEST(WorldRenderItest, BuildRasterizeSmallSceneNonBlank) {
     CHECK(changed > 100);
 
     // KNOWN PIXEL ORACLE: the terrain ground quad (the widest, always-emitted
-    // object) rasterizes a deterministic upper-span footprint — the real flat-
-    // triangle edge-walk paints the quad's upper region, a solid 45-px run from
-    // x=2 across rows y~16..34 for this 96x72 framebuffer (verified against the
-    // real rasterizer output). Pixel (10, 25) sits squarely inside that run, so it
-    // must be painted (differs from the clear colour) — a fixed-coordinate oracle.
+    // object) rasterizes a deterministic footprint. Since the wave-3 surface-
+    // format routing (render/meshlist.cpp RasterTri: a 16bpp target renders
+    // untextured polys through the 1x1 WHITE default binding — BindActive
+    // @0x5db564 slot==0 — instead of corrupting the 16bpp buffer with the 8bpp
+    // shade span), the quad paints its TRUE span: a solid white x=4..92 run
+    // across rows y~31..70 for this 96x72 framebuffer (verified against the
+    // real rasterizer output). Pixel (48, 50) sits squarely inside that run, so
+    // it must be painted (differs from the clear colour) — a fixed-coordinate
+    // oracle. (The pre-wave-3 oracle (10,25) was calibrated against the old
+    // byte-pair artifact footprint.)
     render::Surface* fb = wr.binder().framebuffer();
     CHECK(fb != nullptr);
     if (fb) {
         u16 clear = (u16)render::PackColor(fb->fmt, opt.clearR, opt.clearG, opt.clearB);
-        CHECK(Px16(fb, 10, 25) != clear);     // inside the terrain footprint
+        CHECK(Px16(fb, 48, 50) != clear);     // inside the terrain footprint
     }
 
     ResetEntityArrays();

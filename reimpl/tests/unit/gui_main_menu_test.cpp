@@ -312,3 +312,22 @@ TEST(GuiNewGame, NetworkCommitAddsNetworkFlag) {
     CHECK_EQ(p.sessionFlags & kSessionNewGame, kSessionNewGame);
     NewGame_SetSink(nullptr);
 }
+
+// ===== Wave-11 hardening: out-of-range / "bad button count" indices ==================
+// The main-menu dispatch is indexed by the hovered radio slot. A malformed menu (a stale
+// or out-of-range hovered id) must not index the 8-entry button table out of bounds.
+
+TEST(GuiMainMenuHarden, OutOfRangeButtonIndexIsSafe) {
+    // Negative, == count, and far-past indices must all be handled without OOB reads.
+    CHECK_EQ(MainMenu_ButtonY(-1), -1);
+    CHECK_EQ(MainMenu_ButtonY(kMainMenuButtonCount), -1);
+    CHECK_EQ(MainMenu_ButtonY(99999), -1);
+
+    // Dispatch on an out-of-range index returns a no-op transition (no close, no flags).
+    MainMenuTransition t = MainMenu_Dispatch(kMainMenuButtonCount);
+    CHECK(!t.close);
+    CHECK_EQ(t.sessionFlags, 0);
+    MainMenuTransition tn = MainMenu_Dispatch(-7);
+    CHECK(!tn.close);
+    CHECK_EQ(tn.sessionFlags, 0);
+}

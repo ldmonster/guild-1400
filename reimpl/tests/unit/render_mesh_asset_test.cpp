@@ -188,6 +188,142 @@ TEST(MeshAssetUnit, TextureCacheReuse) {
     guild::io::VfsShutdown();
 }
 
+// ===========================================================================
+// W11 hardening: malformed / truncated / oversized .BGF fast-chunk inputs.
+// Every case must fail-safe (return false, no crash, no ASAN report) and never
+// run off the buffer. Build with -fsanitize=address,undefined to exercise.
+// ===========================================================================
+namespace {
+
+// Append a little-endian u32 to a byte vector.
+void Pu32(std::vector<u8>& v, u32 x) {
+    v.push_back((u8)(x & 0xFF)); v.push_back((u8)((x >> 8) & 0xFF));
+    v.push_back((u8)((x >> 16) & 0xFF)); v.push_back((u8)((x >> 24) & 0xFF));
+}
+// Frame a raw fast-chunk: leading tag, '-' token, chunkSize, magic, then `body`.
+std::vector<u8> FrameChunk(const std::vector<u8>& body) {
+    std::vector<u8> out;
+    Pu32(out, 0);                       // leading tag (skipped)
+    out.push_back(kBgfTokenChunk);      // '-'
+    Pu32(out, 4u + (u32)body.size());   // chunkSize (magic + body)
+    Pu32(out, kBgfFastChunkMagic);
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
+}
+
+} // namespace
+
+// ---- 0-byte and sub-header buffers reject cleanly --------------------------
+TEST(MeshAssetUnit, FastChunkEmptyAndTiny) {
+    BgfModel m;
+    CHECK(!LoadFastChunk(nullptr, 0, m));
+    const u8 zero = 0;
+    CHECK(!LoadFastChunk(&zero, 0, m));            // 0-byte
+    CHECK(!LoadFastChunk(&zero, 1, m));            // 1-byte (< 4-byte tag)
+    // Valid chunk header but no body bytes at all -> the count reads fail.
+    std::vector<u8> hdrOnly = FrameChunk({});
+    CHECK(!LoadFastChunk(hdrOnly.data(), hdrOnly.size(), m));
+}
+
+// ---- vertexCount declared larger than the file -> reject, no OOB -----------
+TEST(MeshAssetUnit, FastChunkVertexCountTooLarge) {
+    std::vector<u8> body;
+    Pu32(body, 0);            // materialCount
+    Pu32(body, 1000000u);     // vertexCount: far more than the buffer holds
+    Pu32(body, 0);            // polyCount
+    body.push_back(1); body.push_back(2);  // a few stray bytes
+    std::vector<u8> buf = FrameChunk(body);
+    BgfModel m;
+    CHECK(!LoadFastChunk(buf.data(), buf.size(), m));  // bounded before alloc
+}
+
+// ---- polyCount declared larger than the file -> reject, no OOB -------------
+TEST(MeshAssetUnit, FastChunkPolyCountTooLarge) {
+    std::vector<u8> body;
+    Pu32(body, 0);            // materialCount
+    Pu32(body, 0);            // vertexCount (still allocates +8 slots)
+    Pu32(body, 1000000u);     // polyCount: impossible for this buffer
+    std::vector<u8> buf = FrameChunk(body);
+    BgfModel m;
+    CHECK(!LoadFastChunk(buf.data(), buf.size(), m));
+}
+
+// ---- vertexCount near UINT_MAX must not overflow the +8 slack -------------
+TEST(MeshAssetUnit, FastChunkVertexCountOverflowGuard) {
+    std::vector<u8> body;
+    Pu32(body, 0);
+    Pu32(body, 0xFFFFFFFEu);  // +8 would wrap to a tiny value without the guard
+    Pu32(body, 0);
+    std::vector<u8> buf = FrameChunk(body);
+    BgfModel m;
+    CHECK(!LoadFastChunk(buf.data(), buf.size(), m));  // rejected by the byte bound
+}
+
+// ---- truncated mid-vertex-block -> reject, no over-read --------------------
+TEST(MeshAssetUnit, FastChunkTruncatedMidVertex) {
+    std::vector<u8> body;
+    Pu32(body, 0);            // materialCount
+    Pu32(body, 4);            // vertexCount=4 -> reads (4+8)=12 records of 24 bytes
+    Pu32(body, 0);            // polyCount
+    // Provide only ~1.5 vertices worth of bytes (24*12 = 288 needed).
+    for (int i = 0; i < 36; ++i) body.push_back((u8)i);
+    std::vector<u8> buf = FrameChunk(body);
+    BgfModel m;
+    CHECK(!LoadFastChunk(buf.data(), buf.size(), m));
+}
+
+// ---- truncated material block (NUL-less name runs to EOF) -> reject --------
+TEST(MeshAssetUnit, FastChunkUnterminatedMaterialName) {
+    // Build a valid 1-vertex/0-poly/1-material chunk, then strip the trailing
+    // material flag bytes + NULs so the name reader runs off the end.
+    BgfModel src;
+    src.materialCount = 1; src.vertexCount = 1; src.polyCount = 0; src.dummyCount = 0;
+    src.vertices.assign(1 + 8, BgfVertex{});
+    BgfMaterial mat{}; mat.name0 = "STONE";
+    src.materials.push_back(mat);
+    std::vector<u8> good = Model_WriteFastChunk(src);
+    // Sanity: the well-formed buffer parses.
+    BgfModel ok; CHECK(LoadFastChunk(good.data(), good.size(), ok));
+    // Now truncate inside the material name (drop the NUL + flag bytes).
+    std::vector<u8> bad(good.begin(), good.end() - 8);
+    BgfModel m;
+    CHECK(!LoadFastChunk(bad.data(), bad.size(), m));  // ReadString hits EOF
+}
+
+// ---- oversized poly index past vertexCount -> BuildGeometry rejects --------
+TEST(MeshAssetUnit, BuildGeometryRejectsBadPolyIndex) {
+    BgfModel m;
+    m.vertexCount = 3;
+    m.vertices.assign(3 + 8, BgfVertex{});
+    BgfPolygon q{};
+    q.vtx[0] = 0; q.vtx[1] = 1; q.vtx[2] = 99;  // index past the vertex array
+    m.polygons.push_back(q);
+    m.polyCount = 1;
+    BgfGeometry g;
+    CHECK(!BuildGeometry(m, g));  // out-of-range index -> clean false, no OOB
+}
+
+// ---- material index out of range survives the post-process (no heap OOB) ---
+TEST(MeshAssetUnit, PostProcessOutOfRangeMaterialIndex) {
+    ParsedModel pm;
+    pm.skipVertexDedup = true;
+    pm.vertices.assign(3, MeshVertex{});
+    pm.vertices[1].pos[0] = 1; pm.vertices[2].pos[1] = 1;
+    pm.polygons.assign(1, MeshPolygon{});
+    pm.polygons[0].vtx[0]=0; pm.polygons[0].vtx[1]=1; pm.polygons[0].vtx[2]=2;
+    pm.polygons[0].matIndex = 7;            // index way past the (1) material
+    pm.materials.assign(1, MeshMaterial{});
+    std::strcpy(pm.materials[0].name0, "ONE");
+    pm.materials[0].uScale = 1; pm.materials[0].vScale = 1;
+
+    Mesh out;
+    g_texLoadRequests.clear(); g_texFixed = -1;
+    // Must not corrupt the heap: the guards skip the bad index. (ASAN-checked.)
+    bool ok = LoadBgfPostProcess(pm, "OOBMAT", 0, false, out);
+    CHECK(ok);
+    CHECK_EQ((int)out.polyCount, 1);
+}
+
 // ---- MeshAssetCache returns the SAME handle on re-load ---------------------
 TEST(MeshAssetUnit, MeshCacheReuse) {
     MA_MockFs fs;

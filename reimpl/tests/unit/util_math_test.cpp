@@ -43,13 +43,26 @@ TEST(Math, Distance2D) {
 TEST(Math, NormalizeAngleAndDecrement) {
     CHECK_EQ(util::NormalizeAngle(3.0), 3.0);
     CHECK_EQ(util::NormalizeAngle(-2.0), -3.0);   // negative -> add -1
+    // Non-integral: trunc toward zero first (0x602968), then -1 if value<0.
+    CHECK_EQ(util::NormalizeAngle(3.7), 3.0);     // trunc(3.7)=3, not negative
+    CHECK_EQ(util::NormalizeAngle(-2.3), -3.0);   // trunc(-2.3)=-2, then -1
     CHECK_EQ(util::DecrementAndAbs(2.0), 3.0);    // -Normalize(-2.0) = -(-3.0) = 3.0
+    CHECK_EQ(util::DecrementAndAbs(2.7), 3.0);    // -Normalize(-2.7) = -(trunc(-2.7)-1) = -(-3) = 3
 }
 
 TEST(Math, StoreAndZero) {
+    // gilde.exe 0x602968: stores trunc(value) and returns the fractional part
+    // (value - trunc(value)), sign-preserving. (Original disasm: fld/fld st/
+    // ConvertX truncates st0, fsub st(1),st, fstp [out].)
     double slot = 99.0;
     double r = util::StoreAndZero(5.5, &slot);
-    CHECK_EQ(slot, 5.5);
+    CHECK_EQ(slot, 5.0);                 // trunc(5.5)
+    CHECK_EQ(r, 0.5);                    // 5.5 - 5.0
+    r = util::StoreAndZero(-2.25, &slot);
+    CHECK_EQ(slot, -2.0);               // trunc toward zero
+    CHECK_EQ(r, -0.25);                 // -2.25 - (-2.0)
+    r = util::StoreAndZero(7.0, &slot); // integral -> fractional part 0
+    CHECK_EQ(slot, 7.0);
     CHECK_EQ(r, 0.0);
 }
 
@@ -63,8 +76,14 @@ TEST(Math, Atan2MatchesLibm) {
 TEST(Math, AcosGuarded) {
     for (double x = -0.99; x <= 0.99; x += 0.07)
         CHECK(close(util::AcosGuarded(x), std::acos(x)));
-    CHECK_EQ(util::AcosGuarded(1.5), 0.0);          // x>1 saturates
-    CHECK(close(util::AcosGuarded(-1.5), 3.14159265358979323846));
+    // gilde.exe 0x5f0b9c: the fldz/fldpi saturation branch is taken ONLY when
+    // s == 1-x*x == 0 (x == +/-1). For |x| > 1 (s < 0) the FTST jnz routes into
+    // SqrtGuarded, whose s<0 guard yields NaN via FpClassifyAdjust — matching
+    // std::acos(|x|>1) == NaN. (A prior golden wrongly expected 0/pi here.)
+    CHECK_EQ(util::AcosGuarded(1.0), 0.0);                       // x == +1 -> 0
+    CHECK(close(util::AcosGuarded(-1.0), 3.14159265358979323846)); // x == -1 -> pi
+    CHECK(std::isnan(util::AcosGuarded(1.5)));      // |x|>1 -> NaN (domain error)
+    CHECK(std::isnan(util::AcosGuarded(-1.5)));     // |x|>1 -> NaN
 }
 
 // ---------------------------------------------------------------------------

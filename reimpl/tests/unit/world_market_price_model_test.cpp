@@ -105,3 +105,33 @@ TEST(WorldMarketPriceModel, NamedComponentSkipped) {
     float p = BuildingComputeMarketPrice(t, 0, 100);
     CHECK_EQ(p, 110.0f);
 }
+
+// ---------------------------------------------------------------------------
+// Boundary: goodId out of range (the price-table index guard). The original
+// indexes records[goodId] directly; the reconstruction bounds goodId to
+// [0,count) before the access. Negative / >= count ids must return 0.0 without
+// reading out of bounds (ASAN-checked).
+// ---------------------------------------------------------------------------
+TEST(WorldMarketPriceModel, GoodIdOutOfRangeReturnsZero) {
+    std::vector<GoodRecord> recs(2);
+    recs[0] = Leaf(2, 200, 8);
+    recs[1] = Leaf(2, 400, 8);
+    GoodTable t{ recs.data(), 2 };
+    CHECK_EQ(BuildingComputeMarketPrice(t, -1, 100), 0.0f);    // negative
+    CHECK_EQ(BuildingComputeMarketPrice(t, 2, 100), 0.0f);     // == count
+    CHECK_EQ(BuildingComputeMarketPrice(t, 32000, 100), 0.0f); // far past
+    // In-range still works.
+    CHECK_EQ(BuildingComputeMarketPrice(t, 0, 100), 110.0f);
+}
+
+// A recipe component carrying an out-of-range good id must be re-validated on the
+// recursive call (it returns 0.0 for that leg) rather than indexing OOB.
+TEST(WorldMarketPriceModel, BadComponentIndexNoOOB) {
+    std::vector<GoodRecord> recs(1);
+    recs[0] = Leaf(2, 200, 8);
+    recs[0].components[0] = { 7, 1 };   // good id 7, table has only index 0
+    GoodTable t{ recs.data(), 1 };
+    // The bad component recurses, hits the goodId>=count guard -> 0 contribution.
+    float p = BuildingComputeMarketPrice(t, 0, 100);
+    CHECK_EQ(p, 110.0f);
+}

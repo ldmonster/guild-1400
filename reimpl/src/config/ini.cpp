@@ -37,16 +37,22 @@ int ParseProfileInt(const std::string& value) {
         neg = (value[i] == '-');
         ++i;
     }
-    long acc = 0;
+    // Accumulate in an UNSIGNED type: signed overflow on a pathologically long
+    // digit run (untrusted .INI) is C++ UB, whereas unsigned wraparound is well
+    // defined. For every value in the int range the final truncation is
+    // bit-identical to the prior signed accumulation, so valid inputs are
+    // unchanged; only out-of-range garbage (which was UB before) differs.
+    unsigned long acc = 0;
     bool any = false;
     while (i < value.size() && value[i] >= '0' && value[i] <= '9') {
-        acc = acc * 10 + (value[i] - '0');
+        acc = acc * 10u + static_cast<unsigned long>(value[i] - '0');
         any = true;
         ++i;
     }
     if (!any)
         return 0;
-    return static_cast<int>(neg ? -acc : acc);
+    unsigned long mag = neg ? (0ul - acc) : acc; // two's-complement negate, no UB
+    return static_cast<int>(static_cast<unsigned int>(mag));
 }
 
 void IniFile::parse(const std::string& text) {

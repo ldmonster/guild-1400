@@ -46,8 +46,48 @@ struct Texture {
     i32  paletteId = -1;    // +80   palette id (-1 = unset)
     u32  texelMask = 0;     // +88   (w-1) | (w*w-1)  — raster wrap mask
     i32  refField = 0;      // +92   secondary ref/use counter
-    u8   flags = 0;         // +104  bit0 mip, bit1 clone/tile, bit2 stretch,
-                            //       bit3 no-transparency, bit6 colour-key-off
+    u8   flags = 0;         // +104  bit assignments CONFIRMED line-for-line from
+                            //   the FRESH-LOAD writer VIBE_Texture_LoadByName
+                            //   @0x5da714 and the consumer
+                            //   VIBE_Texture_UploadToSurface @0x5db234:
+                            //   bit0 (1):  a4&1 selector (call arg low bit;
+                            //              0x5da799 v91 = a4 & 1)
+                            //   bit1 (2):  alias/clone record — resolve via base
+                            //              + (+76 << 7) (0x5db258/0x5db265). Set
+                            //              to 1 on a fresh load (0x5daa01).
+                            //   bit2 (4):  TRANSPARENCY / COLOUR-KEY flag. Set on
+                            //              a fresh BMP load at 0x5dad52 when
+                            //              `!dword_140809C && v79(bmp bpp) > 8`
+                            //              (a >8bpp/24-bit source, global gate
+                            //              off): `*v59 = (4 * v61) | v62`.
+                            //              UploadToSurface @0x5db319 tests
+                            //              `(*(rec+104) & 4)` to pick the
+                            //              TRANSPARENT surface descriptor
+                            //              &unk_14080C4 over the opaque
+                            //              &unk_14080A0 for LoadAndStretchTexture
+                            //              @0x5dea50 — a DDraw colour-key on
+                            //              palette entry 0 (index-0 transparent).
+                            //              THIS is the predicate the masked span
+                            //              (FillSpanTexturedMasked @0x5F721A,
+                            //              index 0 transparent) is the faithful
+                            //              software equivalent of. See
+                            //              TextureIsColourKeyed() below.
+                            //   bit3 (8):  name-contains-"_NM" flag — set at
+                            //              0x5dad75 from
+                            //              loc_5CB930(rec+104, "_NM"). In
+                            //              UploadToSurface @0x5db2f4 it ONLY
+                            //              selects v9 = (bit3)?0:dword_64A1FC, the
+                            //              MIP-BIAS arg 5 of LoadAndStretchTexture
+                            //              @0x5dea50 — NOT a colour key. (The
+                            //              wave-3/4 code wrongly used this bit as
+                            //              the colour-key trigger; corrected in
+                            //              wave-5, see progress/colourkey-wave5.md.)
+                            //   bit5 (20): 8-bit-indexed source indicator (cleared
+                            //              then re-set from v85; 0x5dac7b/0x5dac92).
+                            //   bit6 (40): "don't downscale" — forces byte_64A350
+                            //              (global mip shift) to 0 for this upload
+                            //              (0x5db300). Set if rec[110]&2 or a name
+                            //              probe (0x5dad82/0x5dae30).
     i32  mipLevels = 0;     // +112  number of mip levels
     u8   isMip = 0;         // +113  this record is a generated mip
     i32  mipWidth = 0;      // +116  current width (= baseWidth >> shift)
@@ -66,6 +106,33 @@ struct Texture {
     // palette here and points `palette` at it so it outlives the load call.
     std::vector<u8> paletteStore;  // 256*3 RGB triples when set by DecodeBmpIntoTexture
 };
+
+// ---------------------------------------------------------------------------
+// Texture record +104 flag bits (see the `flags` field doc above for the
+// per-bit provenance). Named constants for the bits the software render path
+// consults.
+// ---------------------------------------------------------------------------
+enum TextureFlagBits : u8 {
+    kTexFlagArg0Low    = 0x01, // bit0 — a4&1 (0x5da799)
+    kTexFlagAlias      = 0x02, // bit1 — clone/alias record (0x5db258)
+    kTexFlagColourKey  = 0x04, // bit2 — TRANSPARENCY / colour-key (0x5dad52/0x5db319)
+    kTexFlagNameNM     = 0x08, // bit3 — name contains "_NM"; mip-bias select only
+    kTexFlagIndexed8   = 0x20, // bit5 — 8-bit indexed source
+    kTexFlagNoDownscale= 0x40, // bit6 — don't downscale (0x5db300)
+};
+
+// gilde.exe 0x5da714 (writer, 0x5dad52) / 0x5db234 (consumer, 0x5db319) —
+// a texture record is colour-keyed iff record +104 BIT 2 (0x04) is set: a
+// >8bpp/24-bit source loaded with the global gate dword_140809C off. The
+// original DDraw path then colour-keys on palette entry 0 (index-0 transparent);
+// the faithful software equivalent is to route such a texture through the masked
+// span FillSpanTexturedMasked @0x5F721A (which treats source index 0 as
+// transparent). Bit 3 ("_NM") is NOT a colour key — it only feeds the mip-bias
+// arg of LoadAndStretchTexture @0x5dea50 (0x5db2f4); the wave-3/4 code used it
+// in error (see progress/colourkey-wave5.md).
+inline bool TextureIsColourKeyed(const Texture& t) {
+    return (t.flags & kTexFlagColourKey) != 0;
+}
 
 // gilde.exe 0x5db724 — texel index mask: (w-1) | (w*w-1). For power-of-two w
 // this equals w*w-1.
@@ -127,5 +194,62 @@ struct TextureSet {
     // gilde.exe 0x5d9a0c — VIBE_Texture_ReleaseEntry. Decrement; free at 0.
     void ReleaseEntry(int idx);
 };
+
+// ---------------------------------------------------------------------------
+// The "WHITE" DEFAULT binding — a HOST-DEFINED STAND-IN (flagged, rule 8).
+//
+// WAVE-4 EVIDENCE (captured decompile of VIBE_Texture_BindActive @0x5db564):
+// when the resolved record's +76 field is ZERO the original sets
+//     dword_1406A88 = 0   (texel mask)         unk_1406A8C = 0  (texel base!)
+//     dword_1406A78 = 0   (palette/HiColTab)   dword_1406A7C = 1 (width)
+//     byte_1407A91  = 1   (width shift — note: 1, not 0)
+// i.e. a NULL binding: a span fetched through it would read texel byte
+// [0 & 0] = absolute address 0 and a palette at address 0 — not representable
+// in a faithful host reconstruction. VIBE_Texture_ResetBinding @0x5db5f0
+// stores the same nulls (plus dword_64A1F8 = 0). There is NO white texture in
+// the binary; "1x1 white" is this tree's substitute so untextured polys render
+// through the same 16bpp textured leaf instead of dereferencing null. The only
+// captured live caller (RasterizeMirrorTriangle @0x5f6c30) binds the poly's
+// real texture record, so the null arm is not known to be rasterized through.
+// Behavioural sign-off for the white substitution is tracked in
+// progress/raster-verify-wave4.md.
+// The palette packs white in RGB565 (0xFFFF — all channels full).
+// ---------------------------------------------------------------------------
+const Texture& WhiteDefaultTexture();   // 1x1, texel index 0
+const u16*     WhiteDefaultPalette();   // 256 entries, all 0xFFFF
+
+// ---------------------------------------------------------------------------
+// 24-BIT BMP MATERIAL POLICY — GAP CLOSED (wave-4 verification pass).
+//
+// The original's software path palettizes a 24-bit source through
+// VIBE_Texture_LoadSoftPalettize @0x5da34c -> VIBE_Bmp_LoadBuffer @0x5f0ce4
+// (flags=7) -> VIBE_Quant_BuildPalette @0x6029f0 (256 colours, serpentine
+// Floyd–Steinberg dither). That quantizer is now RECONSTRUCTED 1:1 in
+// render/texture_palettize.{h,cpp}; the resolve layer
+// (play::RealTextureSource) palettizes every 24-bit DecodedBmp on first
+// decode, so such materials bind 8-bit indices + a 256-colour palette and
+// render through the SAME palettized path as 8-bit sources — the original
+// software renderer's behaviour, and the DEFAULT.
+//
+// The legacy stand-in switch below is KEPT FOR API COMPATIBILITY only: it
+// used to opt 24-bit materials into the in-tree affine RGB kernel while the
+// palettizer was missing. On the default path it is now unreachable — a
+// resolve-layer 24-bit bind always carries palettized indices, so the bind
+// sites' "no indices" branch (which consulted this switch) no longer fires
+// for resolve-layer textures. Still default false.
+// ---------------------------------------------------------------------------
+bool Rgb24MaterialStandInEnabled();          // default false; legacy/compat
+void SetRgb24MaterialStandIn(bool on);
+
+// ---------------------------------------------------------------------------
+// COLOUR-KEY master switch (wave-5 W5-CKEY). Default TRUE — the faithful engine
+// behaviour: a 24-bit colour-keyed texture (kTexFlagColourKey, record +104 bit
+// 2) renders its black backdrop transparent (the DDraw KEYSRC-on-pal[0]==black
+// path, VIBE_Render_LoadAndStretchTexture @0x5dea50). DIAGNOSTIC ONLY: set FALSE
+// to render the same frame with the key suppressed (== the prior keyed=false
+// posture) for a before/after black-pixel measurement. The engine itself has no
+// such toggle. See progress/colourkey-integration-wave5.md.
+bool ColourKeyEnabled();
+void SetColourKeyEnabled(bool on);
 
 } // namespace guild::render

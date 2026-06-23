@@ -307,11 +307,17 @@ TEST(GuiInputZOrder, InsertKeepsGroupSiblingsContiguous) {
 // Tooltip dispatch by type.
 // ---------------------------------------------------------------------------
 TEST(GuiInputTooltip, ClassifyByRangeAndBuilder) {
-    // Build synthetic scene tables.
-    static u8 objectTable[65 * 4];
-    static u8 buildingTable[8];
-    std::memset(objectTable, 0, sizeof(objectTable));
-    std::memset(buildingTable, 0, sizeof(buildingTable));
+    // The real classifier disambiguates a scene pointer purely by which table's
+    // [base, base+span) range it falls into, and the ranges are large (object span
+    // 47515, building span 43264).  In the binary the tables are distinct globals
+    // placed far apart so the ranges never overlap; reproduce that here by carving
+    // the synthetic object/building tables out of one buffer with bases separated by
+    // more than either span (so an object pointer is never caught by the building
+    // range, which the dispatcher tests first).
+    static u8 mem[200000];
+    std::memset(mem, 0, sizeof(mem));
+    u8* objectTable   = mem;            // object base
+    u8* buildingTable = mem + 100000;   // building base (>47515 away)
     // object record 2's class byte = 32 -> kObject; record 3 class byte = 5 -> kUpgrade.
     objectTable[65 * 2] = 32;
     objectTable[65 * 3] = 5;

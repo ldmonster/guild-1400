@@ -7,6 +7,7 @@
 #include "gui/object.h"
 #include "gui/window.h"
 
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -94,9 +95,12 @@ void EMProf(int, int) {}
 // The detail sub-panel runs its OWN inner frame loop; it must exit immediately
 // (return 0) so the session terminates. The OUTER panel loop runs g_e.frameIter
 // iterations then exits.
-int  EFrame(int, int, const void* self) {
-    // self == &Panel_RunBuildingDetail for the inner loop -> exit at once.
-    if (self == reinterpret_cast<const void*>(&Panel_RunBuildingDetail)) return 0;
+int  EFrame(int, int a2, const void*) {
+    // gilde.exe @0x551e0e: VIBE_Panel_RunBuildingDetail's frame loop passes its own
+    // address as a2 (ebx), not a3 (RunFrameLoop is __usercall edx/ebx/edi). Detect the
+    // inner detail loop via a2 == &Panel_RunBuildingDetail -> exit at once.
+    if (a2 == static_cast<int>(reinterpret_cast<std::intptr_t>(&Panel_RunBuildingDetail)))
+        return 0;
     if (g_e.frameIter > 0) { --g_e.frameIter; return 1; }
     return 0;
 }

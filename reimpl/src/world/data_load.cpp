@@ -36,7 +36,10 @@ u8 g_typeRemap[kSceneTypeLoadCount];      // byte_13CE862[731]
 
 // byte access into the building-type table by absolute byte offset (the original
 // reaches every field off the raw `char*` base dword_13CE294).
-inline u8* GebBase() { return reinterpret_cast<u8*>(g_buildingTypes); }
+// Byte view over the WHOLE building-type array object (&array, not element 0)
+// so the flat byte-offset arithmetic below stays in-bounds of the object UBSAN
+// tracks — the original treats this table as a flat byte_XXX[] base.
+inline u8* GebBase() { return reinterpret_cast<u8*>(&g_buildingTypes); }
 inline u8  GebByte(int byteOff) { return GebBase()[byteOff]; }
 inline u16 GebRoom(int recByteOff, int slot) {
     // room list is the u16 array at record +35.
@@ -44,9 +47,11 @@ inline u16 GebRoom(int recByteOff, int slot) {
     std::memcpy(&v, GebBase() + recByteOff + 35 + 2 * slot, 2);
     return v;
 }
-// byte access into the scene/object-type table.
+// byte access into the scene/object-type table — per-element byte view (field is
+// always < kSceneTypeStride), so the u8* stays in-bounds of the objType-th
+// record object (avoids forming a cross-element pointer from element 0).
 inline u8 ObjByte(int objType, int field) {
-    return reinterpret_cast<const u8*>(g_sceneTypes)[kSceneTypeStride * objType + field];
+    return reinterpret_cast<const u8*>(&g_sceneTypes[objType])[field];
 }
 } // namespace
 
@@ -75,6 +80,21 @@ int WorldInitBuildingTypeTable() {
     g_kindWorth[17] = 32;  // byte_13CEB4D
     // byte_13CEB3D[i] == g_kindWorth[i + 1].
     const u8* kindWorthD = g_kindWorth + 1;
+    // Bounded fallback read: the index is the record's +33 "subtype" byte, a u8
+    // that on real A_Obj.dat exceeds the seeded 24-entry table for some object
+    // types — the raw kindWorthD[subtype] then reads past byte_13CEB3C[25].
+    // VERIFIED 1:1 (decompile VIBE_World_InitBuildingTypeTable @0x5833b4 +
+    // get_bytes @0x13CEB3C): the original byte_13CEB3C is exactly 25 bytes and
+    // DOES over-read `byte_13CEB3D[subtype]` for subtype>23 — into the adjacent
+    // .bss, which is zero (264 bytes from 0x13CEB3C read all-zero in the image,
+    // and this runs at early world-load before those neighbors are written), so
+    // the original yields 0 there. Returning 0 for subtype>=24 reproduces that
+    // exactly while staying in-bounds; the in-range path (subtype<24) is the
+    // verbatim table read. (Residual: a pre-init write to the byte_13CEB3C
+    // neighbors would diverge — none observed; the region is zero-BSS.)
+    auto kindWorth = [&](int subtype) -> u8 {
+        return (subtype >= 0 && subtype < 24) ? kindWorthD[subtype] : 0;
+    };
 
     // 3. seed byte_13CE862[0..730] = 72 (the "untouched" sentinel == record count).
     for (int i = 0; i < kSceneTypeLoadCount; ++i)
@@ -111,7 +131,7 @@ int WorldInitBuildingTypeTable() {
             const int objType = room & 0x7FFF;     // v16 strip present-bit
 
             // v14 = byte_13CEB3D[objType.subtype]  (a building-record index)
-            const int v14 = kindWorthD[ObjByte(objType, 33)];
+            const int v14 = kindWorth(ObjByte(objType, 33));
             // j = run length of same-kind records starting at v14.
             int v10 = v14, j = 0;
             for (; v10 < 72; ++j) {
@@ -131,7 +151,7 @@ int WorldInitBuildingTypeTable() {
     // 5. fill any object-type still at 72 with its subtype's kind->worth fallback.
     for (int i = 0; i < kSceneTypeLoadCount; ++i) {
         if (g_typeRemap[i] == 72)
-            g_typeRemap[i] = kindWorthD[ObjByte(i, 33)];
+            g_typeRemap[i] = kindWorth(ObjByte(i, 33));
     }
 
     // mirror the low part into the shared 256-wide consumer table.

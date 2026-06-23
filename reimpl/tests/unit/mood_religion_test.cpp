@@ -92,6 +92,46 @@ TEST(MoodReligionUnit, ParseSetReligionRejects) {
     CHECK(!ParseSetReligion(nullptr).valid);
 }
 
+// --- ParseSetReligion: second-number field rejects a trailing '_' --------------
+// gilde.exe 0x4fc085 second-number loop: unlike the first field (which stops
+// benignly at '_'), the second loop returns 0 on ANY non-digit, including a further
+// '_'. So "-EVANGELISCH_5_6_7" is REJECTED even though 5 and 6 are individually in
+// range — the trailing "_7" makes the second-number parse return 0.
+TEST(MoodReligionUnit, ParseSetReligionSecondNumberRejectsTrailingSep) {
+    CHECK(!ParseSetReligion("-EVANGELISCH_5_6_7").valid);  // 2nd field has '_'
+    CHECK(!ParseSetReligion("-KATHOLISCH_4_5_6").valid);
+    CHECK(!ParseSetReligion("-KATHOLISCH_40_3_").valid);   // trailing '_' after 3
+    CHECK(!ParseSetReligion("-KATHOLISCH_40_3x").valid);   // non-digit after 3
+    // But a 3-digit second field stops at the limit and ignores what follows:
+    // "678" parses (region 678) then fails the [1,8] range -> invalid (not a parse
+    // error). Distinct path, same observable reject.
+    CHECK(!ParseSetReligion("-KATHOLISCH_40_678").valid);
+}
+
+// --- ParseSetReligion: malformed / truncated commands (no over-read) ----------
+// Wave-12 hardening: the name match uses strncmp, so a command shorter than the
+// religion name ("KATHOLISCH"=10, "EVANGELISCH"=11) must NOT read past its NUL
+// terminator. Under ASAN a short heap-allocated command would catch an over-read;
+// these also pin the reject behavior is unchanged.
+TEST(MoodReligionUnit, ParseSetReligionTruncatedNameNoOverread) {
+    // Prefixes of a valid name that stop short of the full name -> no match.
+    CHECK(!ParseSetReligion("-").valid);            // just the dash
+    CHECK(!ParseSetReligion("-K").valid);
+    CHECK(!ParseSetReligion("-KAT").valid);
+    CHECK(!ParseSetReligion("-KATHOLISC").valid);   // one char short of KATHOLISCH
+    CHECK(!ParseSetReligion("-E").valid);
+    CHECK(!ParseSetReligion("-EVANGELISC").valid);  // one char short of EVANGELISCH
+    CHECK(!ParseSetReligion("").valid);             // empty (no leading '-')
+    // A heap-allocated short buffer: ASAN would trip a fixed-size memcmp over-read.
+    {
+        char buf[5] = {'-', 'K', 'A', 'T', '\0'};
+        CHECK(!ParseSetReligion(buf).valid);
+    }
+    // Name present but immediately NUL after the prefix the original compares.
+    CHECK(!ParseSetReligion("-KATHOLISCH").valid);  // matches name, no '_' follows
+    CHECK(!ParseSetReligion("-EVANGELISCH").valid);
+}
+
 // --- ReligionConversionCost: (int)(people*level*0.01) -------------------------
 TEST(MoodReligionUnit, ReligionConversionCostGolden) {
     CHECK_EQ(ReligionConversionCost(0, 40),    0);

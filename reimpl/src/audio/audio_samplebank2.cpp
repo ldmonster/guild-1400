@@ -51,26 +51,32 @@ static bool ContainsSubstr(const char* hay, const char* needle) {
 // ---- SampleBank leaves -------------------------------------------------------
 
 int ExtractFileExtension(const char* path, char* out, int cap) {
+    // Despite the recovered name, the binary extracts the BASE FILENAME — the
+    // bytes BETWEEN the last '\\' and the trailing '.' — not the extension.
+    //   v7  = StrChr(path,'\\')   ; last backslash               (0x447793)
+    //   v8  = StrChr(v7,'.')      ; last dot at/after backslash   (0x44779f)
+    //   if (!v8) return -1                                        (0x4477a6)
+    //   if (!v7) return -1        ; ecx==v7 guard                 (0x4477aa)
+    //   v10 = v8 - v7 - 1         ; chars between '\\' and '.'    (0x4477b1)
+    //   if (v10 >= cap) return -1 ; signed jge                    (0x4477b5)
+    //   StrNCopyPad(out, v7+1, v10)                               (0x4477b9)
     if (!path) return -1;            // 0x44777c
     if (!out)  return -1;            // 0x447780
-    // v7 = StrChr(path, '\\'); v8 = StrChr(v7, '.')
-    const char* afterBackslash = StrChrLast(path, '\\'); // 0x447793
-    if (!afterBackslash) {
-        // StrChr returns 0 (no backslash) -> StrChr(0,'.') derefs would crash in
-        // the binary; in practice every sample path has a separator. We treat a
-        // missing backslash as scanning the whole path for the dot, which keeps
-        // the well-formed-path behavior intact.
-        afterBackslash = path;
+    const char* bs = StrChrLast(path, '\\'); // 0x447793  v7
+    if (!bs) {
+        // The binary would dereference null in StrChr(0,'.') here; in practice
+        // every sample path carries a separator.  Treat a missing backslash as
+        // scanning from the start of the path so well-formed inputs are exact.
+        bs = path;
+        // NB: when there is no backslash the "ecx==v7" guard at 0x4477aa would
+        // also fire (v7==0 -> return -1) in the binary, but that path cannot be
+        // reached without first crashing on StrChr(0,'.').
     }
-    const char* dot = StrChrLast(afterBackslash, '.');   // 0x44779f
+    const char* dot = StrChrLast(bs, '.');   // 0x44779f  v8
     if (!dot) return -1;             // 0x4477a6
-    // v9 = (int)dot ; if (!v9) return -1  — dot is a valid pointer here.
-    // v10 = &dot[-dot - 1]  == reinterpret of the byte length AFTER the dot:
-    //   the original computes the count of chars following the '.' . Faithfully,
-    //   that is strlen(dot+1).
-    int needed = static_cast<int>(std::strlen(dot + 1)); // v10 length
-    if (needed >= cap) return -1;    // 0x4477b5 (>= a3)
-    StrNCopyPad(out, dot + 1, needed); // 0x4477b9 copy from dot+1
+    int needed = static_cast<int>(dot - bs - 1); // 0x4477b1  v10 = v8 - v7 - 1
+    if (needed >= cap) return -1;    // 0x4477b5 (signed jge >= a3)
+    StrNCopyPad(out, bs + 1, needed); // 0x4477b9  copy from v7+1 (after backslash)
     return 0;                        // 0x447789
 }
 

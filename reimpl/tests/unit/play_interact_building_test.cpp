@@ -10,6 +10,15 @@
 using namespace guild;
 using namespace guild::play;
 
+// --- golden: pin the QueueRequestArgs26 (@0x494848) opcode-26 building-field-delta
+// packet-staging byte offsets. Recovered constants traced to interact_building.h. ---
+TEST(PlayInteractBuildingUnit, QueueRequestArgs26OffsetsGolden) {
+    CHECK_EQ((int)kBuildingCmdOpcode, 26);  // 0x1A
+    CHECK_EQ((int)kCmdBuildingIdOff, 0x10); // +16 building id
+    CHECK_EQ((int)kCmdFieldOff,      0x14); // +20 field selector
+    CHECK_EQ((int)kCmdValueOff,      0x18); // +24 delta value
+}
+
 // --- kind -> contact-menu action group (EnterAndDispatch's switch(*v21)). -------
 TEST(PlayInteractBuildingUnit, KindToActionGroupGolden) {
     CHECK(BuildingDialogKindToActionGroup(19)  == BuildingActionGroup::kGuildMaster);

@@ -7,6 +7,7 @@
 #include "shim_impl/memory_graphics.h"
 #include "shim/IPlatform.h"
 #include <vector>
+#include <string>
 #include <cstdint>
 
 using namespace guild;
@@ -157,4 +158,71 @@ TEST(CreditsScreenUnit, Deterministic) {
 
 TEST(CreditsScreenUnit, DefaultCreditLinesNonEmpty) {
     CHECK(!play::DefaultCreditLines().empty());
+}
+
+// ---------------------------------------------------------------------------
+// HARDENING (wave-12): the credits crawl sweeps line y through negative values
+// and toward the top; render::DrawGlyph writes its 5x7 raster WITHOUT clipping.
+// Without a full-glyph-band guard a line at y in (-7,0) writes BEFORE the
+// scratch (heap-buffer-overflow caught by ASAN), and a line wider than the
+// framebuffer writes PAST the right edge. These drive the crawl across many
+// frames on tiny buffers so the negative-y and right-edge bands are hit; ASAN
+// turns any OOB back into a hard failure. Goldens (scroll model) are unchanged.
+// ---------------------------------------------------------------------------
+TEST(CreditsScreenUnit, CrawlNegativeYNoOob) {
+    // Tiny buffer; the initial offset is -fbH, so as offset advances toward 0 the
+    // top lines pass through y in (-lineH, 0) every run — the exact OOB window.
+    shim::MemoryGraphicsDevice dev;
+    CHECK(dev.init(32, 24, 32, false));
+    SeqPlatform plat;
+    auto cfg = BaseCfg();
+    cfg.fbW = 32; cfg.fbH = 24; cfg.lineHeight = 5; cfg.maxFrames = 400;
+    cfg.frameTimeMetric = 10.0f;              // step 1 -> sweep every frame
+    play::CreditsScreenResult r = play::RunCreditsScreen(dev, plat, cfg);
+    CHECK(r.framesPresented == 400);          // ran clean (ASAN would have aborted)
+}
+
+TEST(CreditsScreenUnit, OverlongLinesNarrowBufferNoOob) {
+    shim::MemoryGraphicsDevice dev;
+    CHECK(dev.init(40, 30, 32, false));
+    SeqPlatform plat;
+    auto cfg = BaseCfg();
+    cfg.fbW = 40; cfg.fbH = 30; cfg.lineHeight = 6; cfg.maxFrames = 300;
+    cfg.frameTimeMetric = 10.0f;
+    // Lines far wider than the 40px buffer (would overrun the right edge per glyph).
+    cfg.lines = {
+        std::string(200, 'X'),
+        "A 4HEAD STUDIOS PRODUCTION WITH A VERY LONG SUBTITLE THAT EXCEEDS THE WINDOW",
+        std::string(64, 'Q'),
+    };
+    play::CreditsScreenResult r = play::RunCreditsScreen(dev, plat, cfg);
+    CHECK(r.framesPresented == 300);
+}
+
+TEST(CreditsScreenUnit, ZeroAndOneLineNoOob) {
+    shim::MemoryGraphicsDevice dev;
+    CHECK(dev.init(64, 48, 32, false));
+    // Empty list falls back to the default crawl; a single line is the 1-element edge.
+    for (const std::vector<std::string>& set :
+         { std::vector<std::string>{}, std::vector<std::string>{ "ONLY ONE" } }) {
+        SeqPlatform plat;
+        auto cfg = BaseCfg();
+        cfg.fbW = 64; cfg.fbH = 48; cfg.lineHeight = 7; cfg.maxFrames = 120;
+        cfg.lines = set;
+        play::CreditsScreenResult r = play::RunCreditsScreen(dev, plat, cfg);
+        CHECK(r.framesPresented == 120);
+    }
+}
+
+TEST(CreditsScreenUnit, ManyLinesNoOob) {
+    shim::MemoryGraphicsDevice dev;
+    CHECK(dev.init(80, 60, 32, false));
+    SeqPlatform plat;
+    auto cfg = BaseCfg();
+    cfg.fbW = 80; cfg.fbH = 60; cfg.lineHeight = 4; cfg.maxFrames = 200;
+    cfg.lines.assign(500, "LINE");            // a very tall crawl
+    play::CreditsScreenResult r = play::RunCreditsScreen(dev, plat, cfg);
+    // It may finish before maxFrames; the point is it ran clean (ASAN guards OOB).
+    CHECK(r.framesPresented > 0);
+    CHECK(r.framesPresented <= 200);
 }

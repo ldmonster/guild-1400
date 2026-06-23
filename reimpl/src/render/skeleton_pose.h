@@ -15,6 +15,11 @@
 //
 // SCOPE / DEFERRED
 // ---------------------------------------------------------------------------
+// NOTE: the FULL driver control flow of UpdateSkeletonPose @0x5cd1d8 is now
+// reconstructed 1:1 in render/skeleton_pose_driver.{h,cpp} (a hooks-based
+// orchestrator). This module remains the home of the self-contained advance/walk
+// MATH that driver reuses (AdvanceTrackPhase, the morph/light vertex object-walks).
+//
 // The PRODUCTION UpdateSkeletonPose (1777 instructions, 185 blocks) is a sprawl
 // of object-record + scene-graph state mutation with ~20 leaf calls
 // (VIBE_Object_SetPosition/SetWorldTranslation push into the live scene graph,

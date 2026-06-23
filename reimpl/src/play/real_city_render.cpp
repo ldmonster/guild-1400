@@ -24,6 +24,7 @@
 #include "render/surface.h"
 #include "shim/IGraphicsDevice.h"
 #include "shim_impl/filedump_graphics.h"
+#include "sim/character_factory.h"   // DecomposeModelName (0x402a4c)
 #include "sim/entity.h"
 
 #include <algorithm>
@@ -61,6 +62,29 @@ const MaterialTextureTable* ActiveTexTableResolver(const EntityRef& e) {
     return g_activeRenderer->TexTableForPublic(e);
 }
 
+// Person-aware MeshResolver: persons resolve through the active renderer's
+// prepared person pass (posed-or-rest character geometry); everything else
+// routes to the ordinary RealMeshResolver adapter (objects unchanged).
+const render::MeshGeometry* PersonAwareMeshResolver(const EntityRef& e) {
+    if (e.kind == EntityKind::Person && g_activeRenderer)
+        return g_activeRenderer->MeshForPersonPublic(e);
+    return RealMeshResolver(e);
+}
+
+// Atmos-relight MeshResolver (Options::atmosRelight): resolve through the
+// normal path, then run the resolved mesh frame through the reconstructed
+// day/night lighting-table rebuild (the VIBE_Render_ProcessSceneNode on-screen
+// rebuild arm) so its Vertex::lightIdx carries the CURRENT ambient before the
+// world-seat copy + raster.
+const render::MeshGeometry* AtmosRelightMeshResolver(const EntityRef& e) {
+    const render::MeshGeometry* g =
+        (g_activeOpt && g_activeOpt->scanPersons) ? PersonAwareMeshResolver(e)
+                                                  : RealMeshResolver(e);
+    if (g && g_activeRenderer)
+        g = g_activeRenderer->RelightForPublic(g);
+    return g;
+}
+
 } // namespace
 
 // Public adapters the free-function hooks call (the hooks can't reach privates).
@@ -92,6 +116,35 @@ RealCityRenderer::~RealCityRenderer() {
         g_activeRenderer = nullptr;
         g_activeOpt = nullptr;
     }
+    // Unregister this renderer's lighting-scene membership (and free any
+    // affecting-light cache lists the invalidate walk left empty/full).
+    for (auto& kv : lightObjs_) {
+        render::LightAtmosRemoveCacheEntry(*kv.second, nullptr);
+        render::LightAtmosUnregisterObject(kv.second.get());
+    }
+}
+
+// Atmos-relight adapter: one LightAtmosObject per distinct mesh frame, kept
+// registered across renders (the rebuild walk's scene membership); the
+// on-screen ProcessSceneNode arm decides per resolve whether the cached shade
+// is stale (serial compare + the per-frame vertex budget) and rebuilds it.
+const render::MeshGeometry*
+RealCityRenderer::RelightForPublic(const render::MeshGeometry* g) {
+    if (!g)
+        return g;
+    auto it = lightObjs_.find(g);
+    if (it == lightObjs_.end()) {
+        auto obj = std::make_unique<render::LightAtmosObject>();
+        // The resolver owns/caches the geometry; the relight mutates its
+        // vertex light bytes in place (the engine's obj+460 frame).
+        obj->geom = const_cast<render::MeshGeometry*>(g);
+        render::LightAtmosRegisterObject(obj.get());
+        it = lightObjs_.emplace(g, std::move(obj)).first;
+    }
+    if (render::LightAtmosEnsureNodeLit(*it->second, /*freshFrame=*/false,
+                                        /*onScreen=*/true, frameCounter_))
+        ++relitThisFrame_;
+    return g;
 }
 
 bool RealCityRenderer::Init(shim::IFileSystem* fs, const char* archivePath,
@@ -136,6 +189,8 @@ bool RealCityRenderer::InitTextures(shim::IFileSystem* fs, const char* archivePa
 }
 
 const void* RealCityRenderer::nodeFor(const EntityRef& e, const Options& opt) const {
+    if (e.kind == EntityKind::Person)
+        return personNodeFor(e, opt);
     // Lay each object on a grid so distinct objects decode to distinct world
     // positions; a real SceneNodeWorldPlacement read drives the actual placement.
     const int kNodeBytes = 640;
@@ -168,11 +223,193 @@ const void* RealCityRenderer::nodeFor(const EntityRef& e, const Options& opt) co
 }
 
 std::string RealCityRenderer::nameFor(const EntityRef& e) const {
+    // PERSON: the REAL model resolution (VIBE_Office_ResolveStaffModel @0x57c1e8)
+    // already ran in PreparePersons; hand back the exact archive member so the
+    // texture-table path (TexTableForPublic) keys the same cached model.
+    if (e.kind == EntityKind::Person) {
+        auto it = personDraws_.find(e.slot);
+        return it != personDraws_.end() ? it->second.member : std::string();
+    }
     if (meshNames_.empty()) return std::string();
     // Deterministic id-derived pick from the real member list, so each object maps
     // to a real shipped .bgf (the engine's +460 handle, inert-substituted).
     std::size_t i = (std::size_t)((e.id < 0 ? -e.id : e.id) + e.slot) % meshNames_.size();
     return meshNames_[i];
+}
+
+// ---------------------------------------------------------------------------
+// PERSON pass.
+// ---------------------------------------------------------------------------
+bool RealCityRenderer::InitPersonAnims(shim::IFileSystem* fs, const char* archivePath) {
+    animsMounted_ = anims_.Mount(fs, archivePath, /*caseInsensitive=*/true);
+    return animsMounted_;
+}
+
+const void* RealCityRenderer::personNodeFor(const EntityRef& e, const Options& opt) const {
+    // The same real-format node buffer the object pass builds (the engine node
+    // SceneNodeWorldPlacement decodes), seated at the person's prepared world pos.
+    auto it = personDraws_.find(e.slot);
+    if (it == personDraws_.end()) return nullptr;
+    const PersonDraw& pd = it->second;
+
+    const int kNodeBytes = 640;
+    int idx = nodeUsed_;
+    if ((int)nodeStore_.size() < (idx + 1) * kNodeBytes)
+        nodeStore_.resize((size_t)(idx + 1) * kNodeBytes, 0);
+    unsigned char* nb = nodeStore_.data() + (size_t)idx * kNodeBytes;
+    std::memset(nb, 0, kNodeBytes);
+    ++nodeUsed_;
+
+    std::memcpy(nb + kNodePosX, &pd.world[0], 4);
+    std::memcpy(nb + kNodePosY, &pd.world[1], 4);
+    std::memcpy(nb + kNodePosZ, &pd.world[2], 4);
+    float yaw = (float)((e.id % 8) * 0.39269908f);   // id-derived heading (n*pi/8)
+    float c = std::cos(yaw), s = std::sin(yaw);
+    float m[16] = { c,0,s,0,  0,1,0,0,  -s,0,c,0,  0,0,0,1 };
+    std::memcpy(nb + kNodeFrameMatrix, m, sizeof m);
+    nb[kNodeTypeByte] = kNodeTypeMeshA;
+    (void)opt;
+    return nb;
+}
+
+const render::MeshGeometry* RealCityRenderer::MeshForPersonPublic(const EntityRef& e) {
+    auto it = personDraws_.find(e.slot);
+    if (it == personDraws_.end()) return nullptr;       // -> quad fallback
+    PersonDraw& pd = it->second;
+    if (pd.posed && pd.framePosed)
+        return pd.framePosed;                            // posed (anim chain)
+    if (!pd.member.empty())
+        return src_.Resolve(pd.member.c_str());          // static rest pose
+    return nullptr;
+}
+
+int RealCityRenderer::PreparePersons(const Options& opt) {
+    using namespace guild::sim;
+    personDraws_.clear();
+    roster_.clear();
+    lastPersonOpt_ = opt;
+
+    // The same city-view camera the render projects with (for the roster).
+    float ppu = opt.pixelsPerUnit > 0.0f ? opt.pixelsPerUnit : 1.0f;
+    float eye[3] = {
+        opt.eyeX - ((float)opt.fbW * 0.5f) / ppu, 0.0f,
+        opt.eyeZ - ((float)opt.fbH * 0.5f) / ppu
+    };
+    CityViewCamera cam = MakeCityViewCamera(eye, ppu, opt.fbW, opt.fbH);
+
+    int cols = opt.personGridCols > 0 ? opt.personGridCols : 8;
+    int live = 0, prepared = 0;
+    for (int i = 0; i < kPersonCapacity; ++i) {
+        const Person& p = g_persons[i];
+        if (p.marker == -1) continue;     // free slot
+        if (p.kind >= 10) continue;       // not a "real person" (0x4f8e60 gate)
+        ++live;
+        if (prepared >= opt.maxPersons) continue;   // count live, cap prepared
+
+        // 1. REAL model resolution (1:1 VIBE_Office_ResolveStaffModel @0x57c1e8).
+        PersonModelView v = MakePersonModelView(&p);
+        const StaffModelRecord* rec = ResolveStaffModel(v);
+        if (!rec || rec->name[0] == 0) continue;
+
+        // 2. The character mesh member ("_DYNAMIC/Character/<model>.bgf",
+        //    case-insensitive — the engine's VFS match).
+        std::string wanted = CharacterMeshMemberName(rec->name);
+        std::string member = FindMemberCaseInsensitive(names_.members(), wanted);
+        if (member.empty()) continue;     // model not shipped -> not drawn
+
+        PersonDraw pd;
+        pd.id = p.id;
+        pd.slot = i;
+        pd.gridIdx = prepared;
+        pd.model = rec->name;
+        pd.member = member;
+
+        // 3. The factory name decomposition -> the anim base directory.
+        char base[256] = {0}, prefix[256] = {0};
+        bool wrotePrefix = false;
+        sim::DecomposeModelName(rec->name, base, prefix, &wrotePrefix);
+        pd.base = base;
+
+        // 4. Grid seat (the documented engine-state substitution; rule 8 note).
+        pd.world[0] = opt.personOriginX + (float)(prepared % cols) * opt.personCellSize;
+        pd.world[1] = 0.0f;
+        pd.world[2] = opt.personOriginZ + (float)(prepared / cols) * opt.personCellSize;
+
+        // 5. The pose chain: the factory-preloaded idle clip first
+        //    ("stehen/stehen_newnoise"), then the gait ("bewegung/gehen").
+        render::MeshGeometry* rest = src_.Resolve(member.c_str());
+        if (rest && animsMounted_ && !pd.base.empty()) {
+            static const char* kClips[2] = { "stehen/stehen_newnoise",
+                                             "bewegung/gehen" };
+            for (int c2 = 0; c2 < 2 && !pd.pose; ++c2) {
+                std::string animName =
+                    CharacterAnimMemberName(pd.base.c_str(), kClips[c2]);
+                std::vector<u8> bytes;
+                if (!anims_.OpenMember(animName.c_str(), bytes) || bytes.empty())
+                    continue;
+                auto pose = std::make_unique<PersonCharacterPose>();
+                if (pose->LoadClip(bytes.data(), bytes.size(), animName.c_str()) &&
+                    pose->BindMesh(rest)) {
+                    pd.pose = std::move(pose);
+                }
+            }
+        }
+        if (pd.pose) {
+            pd.pose->Advance(opt.personAnimStep);   // the REAL driver tick
+            pd.framePosed = pd.pose->SamplePosed(); // posed + relit model space
+            pd.posed = (pd.framePosed != nullptr);
+        }
+
+        // 6. Roster entry: projected centre + radius from the drawn geometry's
+        //    model-space XZ extent (posed when available, else rest).
+        PersonRosterEntry re;
+        re.id = pd.id;
+        re.slot = pd.slot;
+        re.model = pd.model;
+        re.member = pd.member;
+        re.world[0] = pd.world[0]; re.world[1] = pd.world[1]; re.world[2] = pd.world[2];
+        re.posed = pd.posed;
+        re.onScreen = ProjectWorldToScreen(cam, pd.world, &re.screenX, &re.screenY);
+        const render::MeshGeometry* g = pd.posed ? pd.framePosed : rest;
+        float ext = 0.0f;
+        if (g && g->vertices && g->vertexCount > 0) {
+            for (int k = 0; k < g->vertexCount; ++k) {
+                float ax = std::fabs(g->vertices[k].x);
+                float az = std::fabs(g->vertices[k].z);
+                if (ax > ext) ext = ax;
+                if (az > ext) ext = az;
+            }
+        }
+        re.radius = ext * ppu;
+        if (re.radius < 2.0f) re.radius = 2.0f;
+        roster_.push_back(re);
+
+        personDraws_.emplace(i, std::move(pd));
+        ++prepared;
+    }
+    return live;
+}
+
+ScenePickResult RealCityRenderer::PickPerson(const Options& opt, float sx, float sy,
+                                             float extraRadius) const {
+    ScenePickResult best;
+    best.index = -1; best.id = 0; best.screenDist = 0.0f;
+    float bestDist = 0.0f;
+    (void)opt;
+    for (std::size_t i = 0; i < roster_.size(); ++i) {
+        const PersonRosterEntry& re = roster_[i];
+        if (!re.onScreen) continue;
+        float dx = re.screenX - sx, dy = re.screenY - sy;
+        float d = std::sqrt(dx * dx + dy * dy);
+        if (d > re.radius + extraRadius) continue;
+        if (best.index < 0 || d < bestDist) {
+            best.index = (int)i;
+            best.id = re.id;
+            best.screenDist = d;
+            bestDist = d;
+        }
+    }
+    return best;
 }
 
 RealCityRenderer::Result RealCityRenderer::Render(const Options& opt,
@@ -203,13 +440,43 @@ RealCityRenderer::Result RealCityRenderer::Render(const Options& opt,
     g_activeOpt = &opt;
     lastOpt_ = opt;
 
+    // PERSON pass (opt-in): resolve live persons to their REAL character models,
+    // advance + sample their poses, and seat them; the renderer below then scans
+    // them into the SAME draw list as the objects.
+    r.animsMounted = animsMounted_;
+    if (opt.scanPersons)
+        r.livePersons = PreparePersons(opt);
+    else {
+        personDraws_.clear();
+        roster_.clear();
+    }
+
     ObjectMeshRenderer renderer;
     ObjectMeshRenderer::Options ro;
     ro.nodeResolver = &ActiveNodeResolver;   // real placement decode per object
-    ro.meshResolver = &RealMeshResolver;     // REAL AGF mesh source (NOT inert default)
+    // Person-aware adapter when the person pass is on (objects still route to
+    // RealMeshResolver inside it); plain RealMeshResolver otherwise (unchanged).
+    ro.meshResolver = opt.scanPersons ? &PersonAwareMeshResolver
+                                      : &RealMeshResolver;
+    // ATMOS LIGHTING (opt-in): route resolves through the relight adapter so
+    // each mesh frame is rebuilt against the CURRENT ambient (the day/night
+    // lighting-table rebuild) before it is world-seated and rasterized. The
+    // per-frame budget counters mirror BeginUniverseFrame (0x5b3982/8c); the
+    // frame-end invalidation clear mirrors DrawUniverseAndStats (0x5b3c19).
+    relitThisFrame_ = 0;
+    ++frameCounter_;
+    if (opt.atmosRelight) {
+        ro.meshResolver = &AtmosRelightMeshResolver;
+        // Universe-OBJECT shading: the rasterized vertex shade is the light-
+        // cache byte the rebuild published (NOT the projection's Y-depth term).
+        ro.cacheShade = true;
+        render::LightAtmosBeginUniverseFrame();
+    }
     ro.scanObjects  = opt.scanObjects;
     ro.scanScene    = opt.scanScene;
+    ro.scanPersons  = opt.scanPersons;
     ro.maxObjects   = opt.maxObjects;
+    ro.maxPersons   = opt.maxPersons;
     ro.quadHalf     = opt.quadHalf;
     ro.pixelsPerUnit = opt.pixelsPerUnit;
     ro.eyeX = opt.eyeX; ro.eyeZ = opt.eyeZ;
@@ -218,9 +485,19 @@ RealCityRenderer::Result RealCityRenderer::Render(const Options& opt,
     ro.textured = opt.textured && tex_.mounted();
     ro.texTableResolver = ro.textured ? &ActiveTexTableResolver
                                       : &DefaultTexTableResolver;
-    r.usedRealResolver = (ro.meshResolver == &RealMeshResolver);
+    // The real source adapter is the resolver either way (the person-aware /
+    // atmos-relight adapters delegate objects to RealMeshResolver).
+    r.usedRealResolver = (ro.meshResolver == &RealMeshResolver) ||
+                         (ro.meshResolver == &PersonAwareMeshResolver) ||
+                         (ro.meshResolver == &AtmosRelightMeshResolver);
 
     MeshRenderStats st = renderer.render(ro, fb);
+
+    if (opt.atmosRelight) {
+        render::LightAtmosEndUniverseFrame();   // byte_64A068 = 0 (frame end)
+        r.relitMeshes = relitThisFrame_;
+        r.lightSerial = render::LightAtmos().rebuildSerial;
+    }
 
     // restore the prior install (no global leak across renders).
     g_activeRenderer = nullptr;
@@ -235,6 +512,12 @@ RealCityRenderer::Result RealCityRenderer::Render(const Options& opt,
     r.rasterTris    = st.rasterTris;
     r.textured      = ro.textured;
     r.texturedPolys = st.texturedPolys;
+    r.personMeshes  = st.personMeshes;
+    r.personQuads   = st.personQuads;
+    for (const auto& kv : personDraws_) {
+        if (kv.second.posed) ++r.personPosed;
+        else if (!kv.second.member.empty()) ++r.personRestPose;
+    }
 
     // Count live objects + the distinct resolved mesh vertex extents (proof the
     // real AGF geometry — not a 2-tri quad — was used).

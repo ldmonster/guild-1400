@@ -217,6 +217,13 @@ ChoiceWeights ComputeChoiceWeights(int personWealth, const float dist[3],
                                    const MethodEnv& env) {
     MethodEnv e = Bind(env);
 
+    // gilde.exe dword_4664B8: per-slot 4-byte option rows {base, opt0, opt1, opt2}.
+    static const u8 kChoiceTable[3][4] = {
+        {4, 0, 3, 1},  // dword_4664B8[0]
+        {3, 1, 2, 0},  // dword_4664B8[1]
+        {2, 0, 4, 1},  // dword_4664B8[2]
+    };
+
     double v3 = static_cast<double>(personWealth) * flt_61A2A8;
     int budget = static_cast<int>(TruncToZero(v3));  // v18
 
@@ -227,8 +234,12 @@ ChoiceWeights ComputeChoiceWeights(int personWealth, const float dist[3],
         d[k] = dist[k];
         if (d[k] > maxd)
             maxd = d[k];
-        // each slot picks a random sub-option in [0,3)
-        out.pick[k] = static_cast<u16>(e.rng_mod(3));
+        // out+4: the row's fixed base byte (written before the RNG pick draw).
+        out.base[k] = kChoiceTable[k][0];
+        // out+5: a random sub-option resolved through the per-slot option table:
+        //   pick = row[1 + RandomModulo(3)].
+        int opt = static_cast<u16>(e.rng_mod(3));
+        out.pick[k] = kChoiceTable[k][1 + opt];
     }
 
     for (int k = 0; k < 3; ++k) {
@@ -277,12 +288,17 @@ int EvaluateSessionDecision(const SessionInputs& in, const MethodEnv& env,
                                                in.socBudgetF, in.socFavBA, in.socFavCA, e);
             break;
         case 1:
+            // VIBE_AiMethod_RandomBoolCheck @0x46797c: modulus is hardcoded 2
+            // (mov eax,2; call RandomModulo). NOT a session field.
             if (in.match1)
-                result = (static_cast<u16>(e.rng_mod(in.randModulus)) != 0) ? 1 : 0;  // RandomBoolCheck
+                result = (static_cast<u16>(e.rng_mod(2)) != 0) ? 1 : 0;  // RandomBoolCheck
             break;
         case 2:
+            // VIBE_AiMethod_RandomValue @0x467994: mov eax,7; call RandomModulo; and eax,0FFFFh.
+            // The modulus is unconditionally hardcoded 7 (no session field). Confirmed
+            // by disasm of both 0x467994 and the case-2 call site at 0x4a481c.
             if (in.match2)
-                result = static_cast<u16>(e.rng_mod(in.randModulus));  // RandomValue
+                result = static_cast<u16>(e.rng_mod(7));  // RandomValue
             break;
         case 3:
             if (in.match3) {
@@ -306,8 +322,9 @@ int EvaluateSessionDecision(const SessionInputs& in, const MethodEnv& env,
                                             in.purByte358, in.purByte13, e);
             break;
         case 6:
+            // Binary case 6 @0x4a48e2 hardcodes RandomModulo(2u).
             if (in.match6)
-                result = static_cast<u16>(e.rng_mod(in.randModulus));  // RandomModulo(2)
+                result = static_cast<u16>(e.rng_mod(2));  // RandomModulo(2)
             break;
         default:
             return result;

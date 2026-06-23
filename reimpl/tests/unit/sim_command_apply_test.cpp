@@ -128,7 +128,10 @@ TEST(SimCmdApply, WriteObjectFields_Absolute) {
 }
 
 // ---------------------------------------------------------------------------
-// 0x18 ExApplyNeedDeltas — float need add + clamp [0, 1000] on a Person.
+// 0x18 ExApplyNeedDeltas — float need add + clamp on a Person. gilde.exe
+// 0x497f4d..0x497fa6: lower bound is 0, the overflow THRESHOLD is 1000.0
+// (dbl_61BE74), but the stored clamp value is 1024.0 (0x4090000000000000, hi-dword
+// 1083129856). The asymmetry was confirmed by the live decompile (wave-15).
 // ---------------------------------------------------------------------------
 TEST(SimCmdApply, ApplyNeedDeltas_ClampHigh) {
     SeedWorld();
@@ -137,12 +140,37 @@ TEST(SimCmdApply, ApplyNeedDeltas_ClampHigh) {
     // stat 2 -> offset 144 + 12*2 = 168; seed 990.0f.
     float seed = 990.0f; std::memcpy(base + 144 + 12 * 2, &seed, 4);
 
-    u8 stat = 2; float add = 50.0f; // 990 + 50 = 1040 -> clamps to 1000
+    u8 stat = 2; float add = 50.0f; // 990 + 50 = 1040 >= 1000 -> clamps to 1024.0
     CommandPacket p = MakeNeedDelta(700, &stat, &add, 1);
     AckEntry ack{};
     CHECK_EQ(ApplyPacket(p, &ack), 0);
     float got; std::memcpy(&got, base + 168, 4);
-    CHECK(got == 1000.0f);
+    CHECK(got == 1024.0f);
+}
+
+// Threshold boundary: exactly 1000.0 is NOT in-band (v13 < 1000.0 is false), so it
+// clamps up to 1024.0. Just below (e.g. 999.0) stays unchanged.
+TEST(SimCmdApply, ApplyNeedDeltas_ClampHighThresholdBoundary) {
+    SeedWorld();
+    Person* perA = MakePerson(7, 702);
+    u8* baseA = reinterpret_cast<u8*>(perA);
+    float seedA = 1000.0f; std::memcpy(baseA + 144 + 12 * 1, &seedA, 4);
+    u8 statA = 1; float addA = 0.0f; // 1000.0 -> >= threshold -> 1024.0
+    CommandPacket pa = MakeNeedDelta(702, &statA, &addA, 1);
+    AckEntry acka{};
+    CHECK_EQ(ApplyPacket(pa, &acka), 0);
+    float gotA; std::memcpy(&gotA, baseA + 144 + 12 * 1, 4);
+    CHECK(gotA == 1024.0f);
+
+    Person* perB = MakePerson(8, 703);
+    u8* baseB = reinterpret_cast<u8*>(perB);
+    float seedB = 999.0f; std::memcpy(baseB + 144 + 12 * 1, &seedB, 4);
+    u8 statB = 1; float addB = 0.0f; // 999.0 in-band -> unchanged
+    CommandPacket pb = MakeNeedDelta(703, &statB, &addB, 1);
+    AckEntry ackb{};
+    CHECK_EQ(ApplyPacket(pb, &ackb), 0);
+    float gotB; std::memcpy(&gotB, baseB + 144 + 12 * 1, 4);
+    CHECK(gotB == 999.0f);
 }
 
 TEST(SimCmdApply, ApplyNeedDeltas_ClampLow) {
@@ -385,4 +413,174 @@ TEST(SimCmdApply, UnknownOpcodeIgnored) {
     AckEntry ack{}; ack.status = 3;
     CHECK_EQ(ApplyPacket(p, &ack), -1);
     CHECK_EQ(ack.status, 3); // untouched
+}
+
+// ===========================================================================
+// HARDENING (wave-11): malformed / truncated / oversized packet tests for the
+// command apply + parse pipeline. These drive the real ApplyPacket / dispatch
+// entries with adversarial input so ASAN+UBSAN exercises the parse-cursor and
+// jump-table bounds. Every guard is fail-safe: the valid-input golden behavior
+// in the tests above is unchanged; these only assert "no OOB and no crash".
+// ===========================================================================
+
+// (1) Field-patch (0x16) with a +0x14 field-count far larger than the packet can
+// hold, and bogus oversized (width,count) records. Without the packet-buffer
+// bound the per-field cursor `p`/`vals` would read past the 153-byte record.
+TEST(SimCmdApply, Malformed_PatchFieldsAdd_OverlargeCount) {
+    SeedWorld();
+    ObjectRec* obj = MakeObject(7, 4242);
+    (void)obj;
+    CommandPacket p{};
+    p.opcode() = 0x16;
+    p.put32(0x10, 4242);
+    p.bytes[0x14] = 255;            // claim 255 records — far beyond the 153-byte record
+    // Fill the record region with width=4,count=255 descriptors so each record
+    // claims 1024+4 bytes of values: the cursor would sprint off the buffer.
+    for (u32 off = 0x15; off < kPacketStride; off += 4) {
+        p.bytes[off] = 4;           // width
+        if (off + 1 < kPacketStride) p.bytes[off + 1] = 255; // count
+    }
+    AckEntry ack{};
+    // Must return without reading past the packet (ASAN gate). Result is the
+    // fail-safe apply path; we only require it not corrupt memory.
+    int r = ApplyPacket(p, &ack);
+    CHECK(r == 0 || r == 1);
+}
+
+// (1b) Same shape for 0x17 (absolute write via memcpy).
+TEST(SimCmdApply, Malformed_WriteFields_OverlargeCount) {
+    SeedWorld();
+    MakeObject(3, 99);
+    CommandPacket p{};
+    p.opcode() = 0x17;
+    p.put32(0x10, 99);
+    p.bytes[0x14] = 255;
+    p.bytes[0x15] = 4;              // width
+    p.bytes[0x16] = 255;           // count -> 1020 value bytes claimed
+    p.bytes[0x17] = 0x10;          // offset lo (small dst offset; only src is OOB)
+    AckEntry ack{};
+    int r = ApplyPacket(p, &ack);
+    CHECK(r == 0 || r == 1);
+}
+
+// (2) Need-deltas (0x18): a +0x14 entry count larger than the 5-byte entries the
+// 153-byte record can hold. The parse cursor must stop at the record end.
+TEST(SimCmdApply, Malformed_NeedDeltas_OverlargeCount) {
+    SeedWorld();
+    MakePerson(5, 700);
+    CommandPacket p{};
+    p.opcode() = 0x18;
+    p.put32(0x10, 700);
+    p.bytes[0x14] = 255;           // 255 * 5 = 1275 bytes of entries claimed
+    AckEntry ack{};
+    int r = ApplyPacket(p, &ack);
+    CHECK(r == 0 || r == 1);
+}
+
+// (3) Truncated field record: count byte present but the value bytes run off the
+// physical record end. The vals bound must reject the partial record.
+TEST(SimCmdApply, Malformed_PatchFields_TruncatedRecord) {
+    SeedWorld();
+    MakeObject(1, 1212);
+    CommandPacket p{};
+    p.opcode() = 0x16;
+    p.put32(0x10, 1212);
+    p.bytes[0x14] = 1;             // exactly one record
+    // Place the single record near the very end so its values overrun the buffer.
+    p.bytes[kPacketStride - 4] = 4;     // width  (header straddles the end)
+    p.bytes[kPacketStride - 3] = 8;     // count -> 32 value bytes, none in-buffer
+    AckEntry ack{};
+    int r = ApplyPacket(p, &ack);
+    CHECK(r == 0 || r == 1);
+}
+
+// (4) Opcode out of the jump-table range (>= kNumOpcodes==96) routed through the
+// dispatch table: must be a no-op, never index past handlers_[96].
+TEST(SimCmdApply, Malformed_OpcodeOutOfRange_Dispatch) {
+    SeedWorld();
+    CommandQueue q;
+    q.Init();
+    RegisterApplyHandlers(q);
+    // 0xFF is well past the 96-entry table. StoreReceivedPacket + ExecCommands
+    // must not index handlers_ out of range.
+    CommandPacket p{};
+    p.opcode() = 0xFF;
+    p.set_cmd_id(0xFFFFFFFFu);     // untracked -> no ack entry touched
+    q.StoreReceivedPacket(p);
+    int r = q.ExecCommands();
+    CHECK_EQ(r, 0);
+}
+
+// (4b) Opcode out of range via direct ApplyPacket: returns -1, ack untouched.
+TEST(SimCmdApply, Malformed_OpcodeOutOfRange_Apply) {
+    SeedWorld();
+    CommandPacket p{}; p.opcode() = 200; // > 96, undefined
+    AckEntry ack{}; ack.status = 7;
+    CHECK_EQ(ApplyPacket(p, &ack), -1);
+    CHECK_EQ(ack.status, 7);
+}
+
+// (5) ComputePacketSize on a malformed variable-length (0x16) packet: the size
+// walk reads the field headers from the packet; a bogus +0x14 count must not
+// drive the reader off the 153-byte record.
+TEST(SimCmdApply, Malformed_ComputePacketSize_BadFieldCount) {
+    SeedWorld();
+    CommandPacket p{};
+    p.opcode() = 0x16;
+    p.bytes[0x14] = 255;
+    for (u32 off = 0x15; off + 1 < kPacketStride; off += 2) {
+        p.bytes[off] = 4;   // width
+        p.bytes[off + 1] = 64; // count
+    }
+    u16 sz = ComputePacketSize(p);   // must not OOB-read; value is don't-care
+    CHECK(sz >= 21);                 // never below the header floor
+}
+
+// (6) Field index / slot past 768: the relation handler (0x1B) resolves persons
+// by id; an unknown id must reject (return 1) rather than index the 768x768 grid
+// out of range. (FindPersonIndex returns -1 for a miss.)
+TEST(SimCmdApply, Malformed_RelationUnknownPerson) {
+    SeedWorld();
+    // No persons seeded; any id misses.
+    CommandPacket p{};
+    p.opcode() = 0x1B;
+    p.put32(16, 123456); // row person id (unknown)
+    p.put32(20, 654321); // col person id (unknown)
+    p.put32(24, 5);      // delta
+    p.put32(28, 0);      // mode 0 -> targeted, must reject on missing person
+    AckEntry ack{};
+    // ExComputeObjectCoords lives in command_apply6; route via that module's
+    // direct apply if linked. Here we only assert the entity resolver rejects.
+    int idx = -1;
+    // FindPersonIndex is module-private; emulate the contract: PersonFindRecordById
+    // must miss for an unseeded world.
+    CHECK(PersonFindRecordById(123456) == nullptr);
+    (void)idx; (void)ack;
+}
+
+// (6b) 0x5D fill-level index out of range (>4) must reject without touching the
+// person record (the original bounds index <= 4).
+TEST(SimCmdApply, Malformed_FillLevel_IndexOutOfRange) {
+    SeedWorld();
+    Person* per = MakePerson(2, 77);
+    u8* base = reinterpret_cast<u8*>(per);
+    base[0x80 + 0] = 11;
+    CommandPacket p{};
+    p.opcode() = 0x5D;
+    p.put32(0x10, 77);
+    p.put32(0x14, 0xFFFFFFFFu); // huge index -> reject (index > 4)
+    p.put32(0x18, 10);
+    AckEntry ack{};
+    CHECK_EQ(ApplyPacket(p, &ack), 1);
+    CHECK_EQ(base[0x80 + 0], 11); // untouched
+}
+
+// (7) Zero-length / empty packet (all zero bytes): opcode 0 is in range but
+// unset -> ApplyPacket returns -1, dispatch is a no-op. No OOB.
+TEST(SimCmdApply, Malformed_EmptyPacket) {
+    SeedWorld();
+    CommandPacket p{}; // opcode 0, all zero
+    AckEntry ack{}; ack.status = 5;
+    CHECK_EQ(ApplyPacket(p, &ack), -1);
+    CHECK_EQ(ack.status, 5);
 }

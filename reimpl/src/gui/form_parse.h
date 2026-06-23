@@ -122,6 +122,7 @@ struct FormObjectRecord {
     i32  aux     = 0;   // record +3472+8*o
     i32  x       = 0;   // (record dword@+10+2*o) >> 16
     i32  y       = 0;   // (record dword@+106+2*o) >> 16
+    i32  range   = 0;   // record byte @+3868+o — slider track length (type 69 'E')
     std::string name;   // record +400+64*o (NUL-terminated)
     int  widgetIdx = -1; // slot returned by the create leaf (-1 if none built)
 };

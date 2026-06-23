@@ -5,12 +5,17 @@
 namespace guild::render {
 
 namespace {
-// flt_628BFC == 0.5 — added to each height byte before scaling (cell-centre bias)
-// in WorldToTileWithHeight / AverageAreaHeight.
+// flt_628BFC @0x628BFC = dword 0x3F000000 (EXACTLY 0.5, verified get_int) —
+// added to each height byte before scaling (cell-centre bias) in
+// WorldToTileWithHeight / AverageAreaHeight. 0.5 is exactly representable, so
+// the literal IS the binary's bit pattern.
 constexpr double kHalf = 0.5;
-// flt_6115B4 == 1/64 (0x3C800000) — the 8x8 area-average weight.
+// flt_6115B4 @0x6115B4 = dword 0x3C800000 (EXACTLY 1/64 = 0.015625, verified
+// get_int) — the 8x8 area-average weight. Exactly representable.
 constexpr float  kAreaAvgWeight = 1.0f / 64.0f;
-// VIBE_Heightmap_BuildTerrainMesh scale constant: flt_628BA4 (size bias).
+// flt_628BA4 @0x628BA4 = dword 0xBFE00000 (EXACTLY -1.75, verified get_int) —
+// the VIBE_Heightmap_BuildTerrainMesh @0x5c5610 grid-size bias. Exactly
+// representable.
 constexpr float  kSizeBias = -1.75f;
 } // namespace
 
@@ -92,8 +97,12 @@ int FloodFillTileType(Heightmap* hm, u8 fromType, u8 toType) {
 }
 
 // gilde.exe 0x427468 — VIBE_Terrain_AverageAreaHeight
+//   The running sum `v15` is a FLOAT in the binary: each iteration computes the
+//   add in the x87 stack (double precision) and stores it back to the float
+//   accumulator, so every partial sum is rounded to float. We reproduce that
+//   float-accumulation exactly (a double accumulator would diverge bit-for-bit).
 double AverageAreaHeight(const Heightmap* hm, const float world[3]) {
-    double sum = 0.0;
+    float sum = 0.0f;                  // v15 (float accumulator)
     if (!hm) return 0.0;
     int n = hm->size;
     if (n == 0 || !hm->heights) return 0.0;
@@ -107,16 +116,18 @@ double AverageAreaHeight(const Heightmap* hm, const float world[3]) {
     for (int z = tz - 4; z != tz + 4; ++z) {
         for (int x = tx - 4; x != tx + 4; ++x) {
             if (z >= edge || x >= edge || z <= 0 || x <= 0) {
-                sum += bilinear;       // edge cells -> fall back to bilinear sample
+                sum = (float)((double)sum + (double)bilinear);  // v15 + v10
             } else {
                 // Note: the original sign-extends the height byte ((__int16)v16),
                 // but the byte is 0..255 so this is just the raw value.
                 u8 hb = hm->heights[z * n + x];
-                sum += (double)(i16)(u8)hb * hm->scaleY + hm->originY;
+                sum = (float)((double)(i16)(u8)hb * hm->scaleY + hm->originY
+                              + (double)sum);
             }
         }
     }
-    return sum * (double)kAreaAvgWeight;
+    sum = sum * kAreaAvgWeight;        // v15 = v15 * flt_6115B4 (float*float)
+    return (double)sum;
 }
 
 // gilde.exe 0x5c6438 — VIBE_Heightmap_Free

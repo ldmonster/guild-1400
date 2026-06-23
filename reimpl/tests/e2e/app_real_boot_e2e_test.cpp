@@ -13,6 +13,7 @@
 
 #include "app/real_boot.h"
 
+#include "config/ini.h"
 #include "io/vfs.h"
 #include "io/gamestate.h"
 
@@ -61,7 +62,16 @@ TEST(AppRealBoot, MountAndLoad) {
     CHECK(a.iniLoaded);
     CHECK(a.stadt == "Augsburg");
     CHECK(!a.gfxPath.empty());           // [General] GfxPath present
-    CHECK(a.sound.masterVol == 127);     // [Sound] master_vol from the real file
+    // [Sound] master_vol came from the real file, not the reconstructed default
+    // (0). The exact value is user-mutable — the in-game options screen persists
+    // to this very file (1:1 WritePrivateProfileStringA) — so assert it matches
+    // an independent parse of the file rather than a literal.
+    {
+        config::IniFile ini;
+        CHECK(ini.loadFile(dir + "/Gilde.INI"));
+        CHECK((int)a.sound.masterVol == ini.getInt("Sound", "master_vol", -1));
+        CHECK(ini.getInt("Sound", "master_vol", -1) >= 0);
+    }
 
     // VFS bound, archives mounted.
     CHECK(a.vfsBound);

@@ -84,14 +84,23 @@ TEST(GuiTooltipBuild, BuildingLayoutValues) {
     u8 rec[600];
     std::memset(rec, 0, sizeof(rec));
     rec[583] = 3;                                  // colour selector -> kBuildingColors[3]
-    *reinterpret_cast<std::int32_t*>(rec + 579) = 12345; // extra field (id 41)
+    { std::int32_t v = 12345; std::memcpy(rec + 579, &v, sizeof(v)); } // extra field (id 41), +579 is unaligned
     BuildingTooltipLayout l = Tooltip_BuildingLayout(rec, /*code*/5, /*salePrice*/999);
     CHECK_EQ(l.titleColor, 0x00494949u);
     CHECK_EQ(l.nameTextId, 14 * 5 + 1078);
-    CHECK_EQ(l.iconObjectId, 5 + 1010);
+    CHECK_EQ(l.descTextId, 14 * 5 + 1079);     // 0x4f7995: var_1C(=14*code) + 0x437
     CHECK_EQ(l.descColor, (int)0x00494949u);
     CHECK_EQ(l.salePrice, 999);
     CHECK_EQ(l.extraField, 12345);
+}
+
+// 14*code uses (signed char)code: code=200 -> (i8)200 = -56, 14*-56 + 1078 = 294.
+TEST(GuiTooltipBuild, BuildingLayoutSignedCharCode) {
+    u8 rec[600];
+    std::memset(rec, 0, sizeof(rec));
+    BuildingTooltipLayout l = Tooltip_BuildingLayout(rec, /*code*/200, /*salePrice*/0);
+    CHECK_EQ(l.nameTextId, 14 * (-56) + 1078); // (signed char)200 == -56  (movsx esi,al)
+    CHECK_EQ(l.descTextId, 14 * (-56) + 1079);
 }
 
 TEST(GuiTooltipBuild, UpgradeAppliesSkipsClass29) {

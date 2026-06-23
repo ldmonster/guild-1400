@@ -61,16 +61,24 @@ double LogBase(int code, double x) {
     }
 }
 
+// The three public wrappers reproduce gilde.exe's log thunks exactly. The IDA
+// thunk NAMES are swapped relative to what they compute (verified by disasm):
+//   0x5fca2e VIBE_Math_LogNaturalThunk  mov al,0Ah(10) -> fldln2 -> ln(x)
+//   0x5fca71 VIBE_Math_Log10Thunk       mov al,9       -> fld1   -> log2(x)
+//   0x5fca75 VIBE_Math_Log2Thunk        mov al,0Bh(11) -> fldlg2 -> log10(x)
+// We keep the IDA names for provenance but each reproduces the thunk's actual
+// computed value (so Log10()==log2(x), Log2()==log10(x) — a faithful 1:1 clone
+// of the binary's mislabeled thunks).
 double Log(double x) {
-    return LogBase(kLogCode_Natural, x);  // ln(x)
+    return LogBase(kLogCode_Natural, x);  // thunk 0x5fca2e, code 10 -> ln(x)
 }
 
 double Log10(double x) {
-    return LogBase(kLogCode_Log2, x);  // code 9 -> log2 (see header note)
+    return LogBase(kLogCode_Log2, x);  // thunk 0x5fca71, code 9 -> log2(x)
 }
 
 double Log2(double x) {
-    return LogBase(kLogCode_Log10, x);  // code 11 -> log10 (see header note)
+    return LogBase(kLogCode_Log10, x);  // thunk 0x5fca75, code 11 -> log10(x)
 }
 
 // gilde.exe 0x5f5701 — VIBE_Math_Atan2: defined in math_trig.cpp (its natural

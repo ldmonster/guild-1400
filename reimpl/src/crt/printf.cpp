@@ -100,8 +100,11 @@ const char* ParseSpec(const char* p, FormatSpec& s, std::va_list& ap) {
         s.field_width = w;
         ++p;
     } else {
+        // 2's-complement wrap on the 32-bit accumulate (matches x86); compute in
+        // u32 to avoid signed-overflow UB on a malformed huge-width spec.
         while (*p >= '0' && *p <= '9')
-            s.field_width = s.field_width * 10 + (*p++ - '0');
+            s.field_width = static_cast<int>(
+                static_cast<u32>(s.field_width) * 10u + static_cast<u32>(*p++ - '0'));
     }
 
     // Precision.
@@ -114,8 +117,10 @@ const char* ParseSpec(const char* p, FormatSpec& s, std::va_list& ap) {
             s.precision = (pr < 0) ? -1 : pr;
             ++p;
         } else {
+            // 2's-complement wrap on the 32-bit accumulate (matches x86).
             while (*p >= '0' && *p <= '9')
-                s.precision = s.precision * 10 + (*p++ - '0');
+                s.precision = static_cast<int>(
+                    static_cast<u32>(s.precision) * 10u + static_cast<u32>(*p++ - '0'));
         }
     }
 
@@ -182,7 +187,10 @@ void EmitConversion(Sink& sink, FormatSpec& s, std::va_list& ap) {
                 str_ptr = "(null)";
             int max = (s.precision < 0) ? -1 : s.precision;
             int n = 0;
-            while (str_ptr[n] && (max < 0 || n < max))
+            // Check the precision bound BEFORE dereferencing so a NUL-less
+            // string of exactly `max` bytes is never over-read (%.Ns reads at
+            // most N bytes — same output, no OOB).
+            while ((max < 0 || n < max) && str_ptr[n])
                 ++n;
             body_len = n;
             is_string = true;
@@ -251,15 +259,12 @@ void EmitConversion(Sink& sink, FormatSpec& s, std::va_list& ap) {
             if (s.precision < 0)
                 s.precision = 8;
             body_len = UIntToString(v, body, 16);
-            while (body_len < s.precision) {
-                // left-pad the body with '0' up to precision (zeros prefixed).
-                for (int i = body_len; i > 0; --i)
-                    body[i] = body[i - 1];
-                body[0] = '0';
-                ++body_len;
-            }
             if (conv == 'P')
                 ToUpperRun(body, body_len);
+            // The precision zeros are leading '0' chars; emit them via the
+            // zero_pad count below (see the numeric/pointer zero_pad block)
+            // rather than widening the fixed `body` buffer — identical output,
+            // no stack OOB for a huge (e.g. %.*p) precision.
             break;
         }
         case '%': {
@@ -285,11 +290,12 @@ void EmitConversion(Sink& sink, FormatSpec& s, std::va_list& ap) {
         }
     }
 
-    // Precision-driven zero padding for integers (not %c/%s/%%).
+    // Precision-driven zero padding for integers (not %c/%s/%%) and pointers.
     int zero_pad = 0;
     bool numeric = (conv == 'd' || conv == 'i' || conv == 'u' ||
                     conv == 'o' || conv == 'x' || conv == 'X');
-    if (numeric && s.precision > body_len)
+    bool pointer = (conv == 'p' || conv == 'P');
+    if ((numeric || pointer) && s.precision > body_len)
         zero_pad = s.precision - body_len;
 
     // Width padding: total visible length = prefix + zero_pad + body_len.

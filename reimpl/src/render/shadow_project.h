@@ -14,13 +14,12 @@
 //   0x5f363c  VIBE_Shadow_RenderMeshShadow      (projection inner loops, extracted)
 //
 // PROJECTION MATH (1:1 from VIBE_Shadow_RenderMeshShadow @ 0x5f363c):
-//  - POINT light, with light POSITION L (a8+24..32 holds L copied from a5):
-//        d = L - v
-//        t = (v.y - groundY) / -d.y          // 0x5f3d08
-//        v' = v + t*d                        // 0x5f3d18..0x5f3d39
-//    i.e. the vertex is pushed along the ray from the light through v until it
-//    reaches y == groundY (exactly: v'.y = v.y + t*(L.y - v.y), which equals
-//    groundY since t = (v.y-groundY)/(v.y-L.y)).
+//  - POINT light, with light POSITION L (ecx = L, edx = vertex v in the disasm):
+//        d = L - v                           // 0x5f3ce3..0x5f3cf7
+//        t = (L.y - groundY) / -d.y          // 0x5f3d08  (numerator uses L.y!)
+//        v' = L + t*d                        // 0x5f3d18..0x5f3d39  (built off L!)
+//    i.e. the projected point is L pushed by t*d. v'.y = L.y + t*(L.y - v.y);
+//    with t = (L.y-groundY)/(v.y-L.y) this gives v'.y == groundY.
 //  - DIRECTIONAL light, with light DIRECTION a5 == dir:
 //        t = (v.y - groundY) / -dir.y        // v94 = -dir.y, 0x5f3721
 //        v' = v + t*dir                      // 0x5f372f..0x5f3746
@@ -96,7 +95,7 @@ ShadowVec3 ProjectVertexDirectional(const ShadowVec3& v, const ShadowVec3& dir,
                                     float groundY);
 
 // gilde.exe 0x5f3ce3 — POINT projection (light POSITION `lightPos`).
-//   d = lightPos - v ;  t = (v.y - groundY) / -d.y ;  v' = v + t*d.
+//   d = lightPos - v ;  t = (lightPos.y - groundY) / -d.y ;  v' = lightPos + t*d.
 ShadowVec3 ProjectVertexPoint(const ShadowVec3& v, const ShadowVec3& lightPos,
                               float groundY);
 
@@ -142,5 +141,31 @@ struct CasterHeightQuery {
 // ground height the caster's shadow flattens onto.
 float ComputeCasterHeight(const ShadowCasterSlot table[kCasterTableSlots],
                           bool enabled, const CasterHeightQuery& q);
+
+// ---------------------------------------------------------------------------
+// SHADOW-SURFACE UV MAPPING — the per-vertex map RenderMeshShadow applies after
+// projection + bounds (gilde.exe 0x5f3bb6..0x5f3bf8):
+//   v93  = surfW / (maxX - minX);              // 0x5f3bb6  (a8 width = v96+116)
+//   v113 = surfW / (maxZ - minZ);              // 0x5f3bba
+//   for each projected vertex:
+//     v[4] = (v.x - minX) * v93;               // 0x5f3bea  -> +16 screen X
+//     v[5] = (v.z - minZ) * v113;              // 0x5f3bef  -> +20 screen Y
+// i.e. the projected ground XZ box maps onto the [0,surfW) shadow texture. The
+// rasterizer then reads vertex +16/+20 as screen coordinates.
+struct ShadowUv { float u = 0.0f; float v = 0.0f; };
+inline ShadowUv MapShadowVertexToSurface(const ShadowVec3& p, const ShadowBounds& b,
+                                         float surfW) {
+    float sx = surfW / (b.maxX - b.minX);   // v93
+    float sz = surfW / (b.maxZ - b.minZ);   // v113
+    return ShadowUv{ (p.x - b.minX) * sx, (p.z - b.minZ) * sz };
+}
+
+// gilde.exe 0x5f3857 — the bounds-acceptance guard (after projection, before the
+// surface setup): every accumulated bound and span must be within ±16384.
+inline bool ShadowBoundsAcceptable(const ShadowBounds& b) {
+    auto ok = [](double x) { return (x < 0 ? -x : x) <= kShadowBoundsLimit; };
+    return ok(b.maxX) && ok(b.minX) && ok(b.maxZ) && ok(b.minZ) &&
+           ok((double)b.maxX - b.minX) && ok((double)b.maxZ - b.minZ);
+}
 
 } // namespace guild::render

@@ -240,10 +240,11 @@ int EventPanel_DestroySlot(int objHandle, int arg) {
     }
 
     // Recompute the high-water occupied slot: last index whose widget-id is set.
-    int hi = 0;
+    // gilde.exe 0x4c562c — the original writes dword_632268 ONLY when it finds an
+    // occupied slot (`if (dword_11CB564[v7] != -1) dword_632268 = v6;`).  When the
+    // table is now empty it leaves the high-water value UNCHANGED (verified vs disasm).
     for (int i = 0; i < kEventPanelSlots; ++i)
-        if (g_eventSlots[i].widgetId != -1) hi = i;
-    g_eventHighWater = hi;
+        if (g_eventSlots[i].widgetId != -1) g_eventHighWater = i;
     return last;
 }
 

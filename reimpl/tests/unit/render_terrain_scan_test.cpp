@@ -175,22 +175,23 @@ namespace {
 std::vector<guild::u8> MakeWalk(int size,
                                 const std::vector<std::pair<int,int>>& walk,
                                 const std::vector<std::pair<int,int>>& blocked13) {
-    // cell index = row + col*size, stride 24, type byte at +0.
+    // gilde.exe @0x5c6550: cell index = col + row*size, stride 24, type byte at +0
+    // (imul edx,row; add edx,col; imul 0x18). Pairs below are {col, row}.
     std::vector<guild::u8> cells(24 * size * size, 0);
-    for (auto& rc : walk)      cells[24 * (rc.first + rc.second * size)] = 1;
-    for (auto& rc : blocked13) cells[24 * (rc.first + rc.second * size)] = 13;
+    for (auto& cr : walk)      cells[24 * (cr.first + cr.second * size)] = 1;
+    for (auto& cr : blocked13) cells[24 * (cr.first + cr.second * size)] = 13;
     return cells;
 }
 } // namespace
 
 TEST(RenderTileQuery, WalkableSingleFar) {
-    auto cells = MakeWalk(8, {{5, 6}}, {});
+    auto cells = MakeWalk(8, {{5, 6}}, {});   // walkable at col=5,row=6
     TileWalkGrid g{}; g.size = 8; g.cells = cells.data();
     int fx = -99, fy = -99;
     bool ok = FindNearestWalkableTile(&g, /*centerY*/2, &fx, /*centerX*/2, &fy);
     CHECK(ok);
-    CHECK_EQ(fx, 6);   // foundX == col
-    CHECK_EQ(fy, 5);   // foundY == row
+    CHECK_EQ(fx, 5);   // foundX == col
+    CHECK_EQ(fy, 6);   // foundY == row
 }
 
 TEST(RenderTileQuery, WalkableCenterImmediate) {
@@ -214,13 +215,13 @@ TEST(RenderTileQuery, WalkableNone) {
 }
 
 TEST(RenderTileQuery, WalkableType13IsBlocked) {
-    auto cells = MakeWalk(8, {{2, 3}}, {{2, 2}});  // (row2,col2)=13, (row2,col3)=1
+    auto cells = MakeWalk(8, {{2, 3}}, {{2, 2}});  // walkable col2,row3; blocked col2,row2
     TileWalkGrid g{}; g.size = 8; g.cells = cells.data();
     int fx = -99, fy = -99;
     bool ok = FindNearestWalkableTile(&g, /*centerY*/2, &fx, /*centerX*/2, &fy);
     CHECK(ok);
-    CHECK_EQ(fx, 3);
-    CHECK_EQ(fy, 2);
+    CHECK_EQ(fx, 2);   // foundX == col
+    CHECK_EQ(fy, 3);   // foundY == row
 }
 
 TEST(RenderTileQuery, NullGuards) {
@@ -259,4 +260,79 @@ TEST(RenderSunState, ResetGlobalState) {
     CHECK_EQ(g_lightState5C, 0);
     CHECK_EQ(g_lightState60, 0);
     CHECK_EQ(g_lightState64, 0);
+}
+
+// =============================================================================
+// WAVE-10 HARDENING: degenerate/edge memory-safety coverage for the tile-query
+// diamond search (off-grid centre, full grid corner, border row/col, size 1) and
+// the row-scan span normalisation at the row borders. Run under ASAN+UBSAN.
+// =============================================================================
+
+// FindNearestWalkableTile with the search centre OUTSIDE the grid: the ring scan
+// must clamp every (row,col) it reads to [0,size) and never index cells[] OOB.
+TEST(RenderTileQueryHardening, WalkableOffGridCenter) {
+    auto cells = MakeWalk(8, {{0, 0}, {7, 7}}, {});
+    TileWalkGrid g{}; g.size = 8; g.cells = cells.data();
+    int fx = -99, fy = -99;
+    // Centre way past the high corner: clamped scan still finds (7,7) (or nothing),
+    // never reading outside the 8x8 grid.
+    bool ok = FindNearestWalkableTile(&g, /*centerY*/20, &fx, /*centerX*/20, &fy);
+    if (ok) { CHECK(fx >= 0 && fx < 8); CHECK(fy >= 0 && fy < 8); }
+    // Centre below the low corner (negative): same — clamped, no OOB.
+    fx = fy = -99;
+    ok = FindNearestWalkableTile(&g, /*centerY*/-7, &fx, /*centerX*/-7, &fy);
+    if (ok) { CHECK(fx >= 0 && fx < 8); CHECK(fy >= 0 && fy < 8); }
+}
+
+// Full walkable grid: the immediate centre is returned (ring 0), even at the border
+// corner (0,0) and (size-1,size-1).
+TEST(RenderTileQueryHardening, WalkableFullGridCorners) {
+    const int n = 8;
+    std::vector<guild::u8> cells(24 * n * n, 5);   // every cell walkable (type 5)
+    TileWalkGrid g{}; g.size = n; g.cells = cells.data();
+    int fx = -1, fy = -1;
+    CHECK(FindNearestWalkableTile(&g, 0, &fx, 0, &fy));
+    CHECK_EQ(fx, 0); CHECK_EQ(fy, 0);
+    fx = fy = -1;
+    CHECK(FindNearestWalkableTile(&g, n - 1, &fx, n - 1, &fy));
+    CHECK(fx >= 0 && fx < n); CHECK(fy >= 0 && fy < n);
+}
+
+// Size-1 grid: the single cell is the only candidate; both walkable and blocked.
+TEST(RenderTileQueryHardening, WalkableSizeOne) {
+    std::vector<guild::u8> walk(24, 0); walk[0] = 1;       // the one cell walkable
+    TileWalkGrid g{}; g.size = 1; g.cells = walk.data();
+    int fx = -1, fy = -1;
+    CHECK(FindNearestWalkableTile(&g, 0, &fx, 0, &fy));
+    CHECK_EQ(fx, 0); CHECK_EQ(fy, 0);
+    std::vector<guild::u8> empty(24, 0);                   // type 0 -> not walkable
+    g.cells = empty.data();
+    fx = fy = -7;
+    CHECK(!FindNearestWalkableTile(&g, 0, &fx, 0, &fy));
+}
+
+// ScanRowHeightRange at the row borders: row 0, the last row, and a span straddling
+// both edges. The span is normalised + clamped to [0,width-1]; no OOB read of the
+// height grid, and a fully-clipped row leaves the seeded accumulators untouched.
+TEST(RenderTileQueryHardening, ScanRowBorders) {
+    const int w = 8;
+    std::vector<guild::u8> hgrid((size_t)w * w);
+    for (int r = 0; r < w; ++r)
+        for (int x = 0; x < w; ++x)
+            hgrid[(size_t)r * w + x] = (guild::u8)(r * 8 + x);
+    TerrainHeightGrid grid{}; grid.width = w; grid.heights = hgrid.data();
+
+    // Row 0, span straddling both edges [-3, 99] -> clamps to [0,7], folds all 8.
+    int lo = 255, hi = 0;
+    CHECK_EQ(ScanRowHeightRange(&grid, &lo, -3, &hi, 99, 0), 0);
+    CHECK_EQ(lo, 0); CHECK_EQ(hi, 7);
+    // Last row (w-1), single in-range column.
+    lo = 255; hi = 0;
+    CHECK_EQ(ScanRowHeightRange(&grid, &lo, 4, &hi, 4, w - 1), 0);
+    CHECK_EQ(lo, (w - 1) * 8 + 4);
+    CHECK_EQ(hi, (w - 1) * 8 + 4);
+    // Row == width (out of range): early-out, accumulators untouched.
+    lo = 200; hi = 5;
+    CHECK_EQ(ScanRowHeightRange(&grid, &lo, 0, &hi, 7, w), 1);
+    CHECK_EQ(lo, 200); CHECK_EQ(hi, 5);
 }

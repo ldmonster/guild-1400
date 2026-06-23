@@ -1,7 +1,9 @@
 #include "render/texture_asset.h"
 
 #include "render/bmp.h"
-#include "render/mesh_asset.h"  // VfsSlurp (the shared VFS open+read+close helper)
+#include "render/mesh_asset.h"       // VfsSlurp (the shared VFS open+read+close helper)
+#include "render/texture_bin.h"      // DecodeBmpBuffer (8-bit + 24-bit decode)
+#include "render/texture_palettize.h"// PalettizeDecodedBmp (the @0x5da34c 24-bit arm)
 
 #include <cstring>
 
@@ -50,6 +52,24 @@ TextureDecode DecodeBmpIntoTexture(const std::vector<u8>& bmp, Texture& rec) {
     dec.palette.assign(256 * 3, 0);
     int w = 0, h = 0;
     std::vector<u8> idx = BmpLoadBuffer(bmp, 8, w, h, dec.palette.data());
+
+    // 24-bit source arm (VIBE_Texture_LoadSoftPalettize @0x5da34c): an 8-bit
+    // decode of a 24-bit BMP yields nothing (BmpLoadBuffer(8) does not quantize),
+    // so run the SOFTWARE PALETTIZER the engine runs — VIBE_Quant_BuildPalette
+    // @0x6029f0 (256 colours, dithered) — over the decoded RGB, producing the same
+    // 8-bit indices + 256-colour palette an 8-bit source carries. The floor slot
+    // BMPs (_DYNAMIC/Boden/*.bmp) are 24-bit, so this is the path they take.
+    if (idx.empty()) {
+        DecodedBmp d = DecodeBmpBuffer(bmp);
+        if (d.ok && d.width == side && d.height == side && d.bpp > 8 &&
+            PalettizeDecodedBmp(d) && (int)d.indices.size() == side * side &&
+            d.palette.size() >= 256 * 3) {
+            idx = std::move(d.indices);
+            std::memcpy(dec.palette.data(), d.palette.data(), 256 * 3);
+            w = side;
+            h = side;
+        }
+    }
     if (idx.empty() || w != side || h != side)
         return dec;
 
@@ -81,9 +101,17 @@ int TextureAssetCache::LoadByName(const char* path, const std::string& name) {
         return hit;
     }
 
-    // Open + slurp the BMP through the VFS, decode into a freshly claimed slot.
+    // Open + slurp the BMP. When a BmpFetch override is installed (the archive
+    // resolve the engine's VFS "*"+name+".BMP" wildcard performs over the mounted
+    // .BIN containers), use it by the bare slot name; otherwise the loose-file VFS
+    // slurp of `path`. Either way the same bytes feed the BMP decode below.
     std::vector<u8> bmp;
-    if (!path || !VfsSlurp(path, bmp))
+    bool got = false;
+    if (bmpFetch_)
+        got = bmpFetch_(name, bmp);
+    if (!got)
+        got = (path && VfsSlurp(path, bmp));
+    if (!got)
         return -1;
 
     int side = 0;

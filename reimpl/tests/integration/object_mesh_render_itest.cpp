@@ -125,16 +125,21 @@ TEST(ObjectMeshRenderItest, RealFormatMeshThroughRealPipeline) {
     CHECK_EQ(st.appendedPolys, 4);
     CHECK_EQ(st.rasterTris, 4);
 
-    // NON-BLANK + KNOWN-PIXEL ORACLE: the seated mesh paints two triangle clusters;
-    // (24,18) is a solid interior point of the left cluster (verified against the
-    // real rasterizer). It must differ from the clear colour.
+    // NON-BLANK + KNOWN-PIXEL ORACLE: since the wave-3 surface-format routing
+    // (render/meshlist.cpp RasterTri: a 16bpp target renders untextured polys
+    // through the 1x1 WHITE default binding — BindActive @0x5db564 slot==0 —
+    // instead of the 8bpp shade span), the seated mesh paints its TRUE footprint:
+    // a white diamond centred on the frame, rows ~21..51, widest x 32..63 at
+    // row 36 (verified against the real rasterizer). (48,36) is its solid
+    // interior centre. (The pre-wave-3 oracle (24,18) was calibrated against
+    // the old byte-pair artifact footprint.)
     u16 clear = (u16)render::PackColor(fb->fmt, 0, 0, 64);
     int changed = 0;
     for (int y = 0; y < fbH; ++y)
         for (int x = 0; x < fbW; ++x)
             if (Px16(fb, x, y) != clear) ++changed;
     CHECK(changed > 100);
-    CHECK(Px16(fb, 24, 18) != clear);   // fixed-coordinate oracle
+    CHECK(Px16(fb, 48, 36) != clear);   // fixed-coordinate oracle
 
     render::SurfaceDestroy(fb);
     ResetEntityArrays();

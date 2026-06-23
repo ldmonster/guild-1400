@@ -599,7 +599,9 @@ void ScreenToWorldRay(const float cameraMat[16], float sx, float sy, float cx, f
     outDir[0] = dx;
     outDir[1] = dy;
     outDir[2] = dz;
-    const float k = (zFar - zNear) / focal;
+    // gilde.exe 0x4268ff: fdiv [var_1C] — the divisor is the ROTATED ray's Y component
+    // (dir.y, var_1C), NOT the focal length. The scaled vector is dir * (zFar-zNear)/dir.y.
+    const float k = (zFar - zNear) / dy;
     outScaled[0] = dx * k;
     outScaled[1] = dy * k;
     outScaled[2] = dz * k;

@@ -117,24 +117,25 @@ ScenarioPick PickScenario(u8 modeFlags, bool isProductionType, u8 productionType
                           u8 personKind, u8 taxByte) {
     ScenarioPick p{CombatScenario::None, 10};   // v69 = 10 default warmup edge
 
-    // Mode-flag branch first (the original's `if ((v3 & 1) != 0)` etc.).
+    // Mode-flag branch first (the original @0x489bcc):
+    //   if ((v4 & 1) != 0):  scenario = (v4 & 8) ? STADT : BERGPASS;
+    //   else if ((v4 & 4) != 0): scenario = BERGPASS;
+    //   else: fall through to the economic-raid person-kind switch.
+    // NOTE: bit 0x02 (kBattleAttack) is NOT a scenario branch in the original — it
+    // falls through to the economic-raid case. The &8 indoor bit only matters for
+    // the raid (&1) variant (STADT vs BERGPASS).
+    constexpr u8 kBattleIndoor = 0x08;   // (v4 & 8) — STADT variant of the raid
     if (modeFlags & kBattleRaid) {
-        // raid: STADT (also indoor flag 8) vs BERGPASS; the original picks STADT
-        // for the &8 indoor variant, BERGPASS otherwise — but only when NOT the
-        // economic-raid (no roster) case below. Here flags&1 == open raid.
-        p.scenario = CombatScenario::StadtAttack;
+        p.scenario = (modeFlags & kBattleIndoor) ? CombatScenario::StadtAttack
+                                                 : CombatScenario::Bergpass;
         return p;
     }
     if (modeFlags & kBattleDefend) {
         p.scenario = CombatScenario::Bergpass;
         return p;
     }
-    if (modeFlags & kBattleAttack) {
-        p.scenario = CombatScenario::Bergpass;
-        return p;
-    }
 
-    // No mode flag -> economic raid on a building/object: select by the source
+    // No raid/defend mode flag -> economic raid on a building/object: select by the source
     // person's AiPlayer type byte / kind / tax-byte.
     if (isProductionType) {
         switch (productionTypeByte) {
@@ -259,8 +260,11 @@ DeploymentDecision DecideAiDeployment(int defenderUnitCount, int guardThreshold,
 
     // The original: `if (!v46 /*count*/ || RandomModulo(5) > *(v72+272))` — i.e.
     // either no defenders, or the patrol-strength roll exceeds the guard count.
-    int roll5 = static_cast<int>(static_cast<u16>(Math_RandomModulo(5)));
-    if (defenderUnitCount != 0 && roll5 <= guardThreshold) {
+    // NOTE the SHORT-CIRCUIT: when defenderUnitCount==0 the original never draws
+    // RandomModulo(5) (the `!v46 ||` short-circuits), so the roll must be gated by
+    // defenderUnitCount to keep the RNG stream in sync.
+    if (defenderUnitCount != 0 &&
+        static_cast<int>(static_cast<u16>(Math_RandomModulo(5))) <= guardThreshold) {
         // Defenders present and confident: no will-fight decision branch taken
         // (the original simply leaves dword_6311F8 untouched / falls through to
         // the live battle). willFight stays false, strength -1.

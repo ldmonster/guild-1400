@@ -97,8 +97,13 @@ int TextFileTable::FreeTextFile(const char* name) {
 //       VIBE_Light_SetGrayColorThunk(0,112,&byte_77BEB0[i]);  // zero the record
 //   }
 void TextFileTable::FreeAllTextFiles() {
+    // The original keys SOLELY on the blob pointer (dword_77BF18[i] != 0): a slot
+    // whose blob pointer is null is skipped untouched (its name/indices survive);
+    // only slots that own a blob are freed and have their whole 112-byte record
+    // zeroed. The `used`/name flag is NOT consulted (DISASM @0x44d8b4: the loop
+    // continues while `!*(int*)((char*)dword_77BF18 + i)`).
     for (int i = 0; i < Count(); ++i) {
-        if (slots_[i].blob.empty() && !slots_[i].used)
+        if (slots_[i].blob.empty())
             continue;
         slots_[i] = TextFileSlot();  // free blob + zero the 112-byte record
     }

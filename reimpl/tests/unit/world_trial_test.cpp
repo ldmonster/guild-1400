@@ -7,6 +7,7 @@
 #include "tests/framework/test.h"
 
 #include "world/trial.h"
+#include "world/trial_session.h"   // FSM phase / participant edge tests
 #include "world/council.h"
 #include "world/election.h"
 #include "world/tutorial.h"
@@ -222,6 +223,44 @@ TEST(WorldElection, QuorumNotMet) {
     CHECK(!o.install);
 }
 
+// WAVE-16 fix: the winner loop @0x4812ff SEEDS the running-best wealth with the
+// INCUMBENT's ComputeTotalWealth (or 0 when no incumbent record). The winner
+// pointer (v10) starts NULL and is replaced only when a candidate's wealth is
+// STRICTLY greater than the running best, so a candidate must OUT-EARN the
+// incumbent to win; if none does there is NO winner and NO install. (The prior
+// reconstruction wrongly seeded with candidate[0] and always produced a winner.)
+TEST(WorldElection, IncumbentWealthSeedNoCandidateOutEarns) {
+    // 3 candidates, richest is 5000; incumbent (id 30, also a candidate) is worth
+    // 6000 — nobody out-earns the incumbent -> no winner, no install.
+    ElectionCandidate pool[3] = {
+        Cand(10, 13, 1, false, 1000),
+        Cand(20, 15, 2, false, 3000),
+        Cand(30, 18, 3, false, 5000),
+    };
+    ElectionOutcome o = ElectionRunGuildMaster(pool, 3, /*incumbent*/ 30,
+                                               /*incumbentWealth*/ 6000,
+                                               /*incumbentValid*/ true);
+    CHECK(o.quorumMet);
+    CHECK_EQ(o.winnerIndex, -1);  // v10 stayed NULL
+    CHECK_EQ(o.winnerId, -1);
+    CHECK(!o.install);
+}
+
+TEST(WorldElection, IncumbentWealthSeedChallengerOutEarns) {
+    // A challenger (id 20) worth 8000 beats the incumbent's 6000 -> installs.
+    ElectionCandidate pool[3] = {
+        Cand(10, 13, 1, false, 1000),
+        Cand(20, 15, 2, false, 8000),  // out-earns the incumbent
+        Cand(30, 18, 3, false, 5000),
+    };
+    ElectionOutcome o = ElectionRunGuildMaster(pool, 3, /*incumbent*/ 30,
+                                               /*incumbentWealth*/ 6000,
+                                               /*incumbentValid*/ true);
+    CHECK_EQ(o.winnerId, 20);
+    CHECK_EQ(o.winnerWealth, 8000);
+    CHECK(o.install);             // winner != incumbent
+}
+
 // ===========================================================================
 // Tutorial
 // ===========================================================================
@@ -410,4 +449,127 @@ TEST(WorldPrivilege, SimpleAndBuildCmdResults) {
     CHECK_EQ(PrivilegeBuildCmdResult(7, /*shown*/ false, false), 0);
     CHECK_EQ(PrivilegeBuildCmdResult(0, false, true), 16);
     CHECK_EQ(PrivilegeBuildCmdResult(0, false, false), 96);
+}
+
+// ===========================================================================
+// HARDENING (wave-12): trial verdict/scoring + session FSM edge cases —
+// 0/many participants, empty evidence, out-of-range torture instrument.
+// Clean under -fsanitize=address,undefined.
+// ===========================================================================
+namespace {
+bool TrialHardenLawLookup(u8 /*type*/, LawRecord* out, void* /*ctx*/) {
+    if (out) { *out = LawRecord{}; out->penalty = 2; }
+    return true;
+}
+} // namespace
+
+TEST(TrialHarden, ComputeScoreNullAndEmpty) {
+    // Null crimes / zero count -> empty score, no read.
+    TrialScore a = TrialComputeEvidenceScore(nullptr, 0, 0, TrialHardenLawLookup, nullptr);
+    CHECK_EQ(a.totalCount, 0);
+    CHECK_EQ(a.uniqueCount, 0);
+    CHECK(a.score == 0.0f);
+    CrimeRecord none{};
+    TrialScore b = TrialComputeEvidenceScore(&none, 0, 0, TrialHardenLawLookup, nullptr);
+    CHECK_EQ(b.totalCount, 0);
+    // Negative count is treated as empty.
+    TrialScore c = TrialComputeEvidenceScore(&none, -5, 0, TrialHardenLawLookup, nullptr);
+    CHECK_EQ(c.totalCount, -5);   // totalCount echoes the raw arg
+    CHECK_EQ(c.uniqueCount, 0);
+}
+
+TEST(TrialHarden, ComputeScoreManyCrimesNoOverflow) {
+    // More than the internal dedup mirror (512) — must not overrun consumed[512].
+    std::vector<CrimeRecord> crimes(700);
+    for (auto& c : crimes) c.location = 5;       // all the same law type
+    TrialScore s = TrialComputeEvidenceScore(crimes.data(), 700, 0,
+                                             TrialHardenLawLookup, nullptr);
+    CHECK_EQ(s.totalCount, 700);
+    // Dedup is bounded to the first 512; all share one law type -> 1 unique.
+    CHECK_EQ(s.uniqueCount, 1);
+}
+
+TEST(TrialHarden, TallyVerdictZeroAndManyJurors) {
+    int total = -1;
+    // 0 jurors -> total 0 -> below threshold -> convicted.
+    CHECK((int)TrialTallyVerdict(nullptr, 0, &total) == (int)TrialVerdict::kConvicted);
+    CHECK_EQ(total, 0);
+    // Null votes with positive count must not deref.
+    total = -1;
+    TrialTallyVerdict(nullptr, 5, &total);
+    CHECK_EQ(total, 0);
+    // Many jurors summing past threshold -> acquitted.
+    std::vector<int> votes(100, 1);
+    CHECK((int)TrialTallyVerdict(votes.data(), 100, &total) == (int)TrialVerdict::kAcquitted);
+    CHECK_EQ(total, 100);
+}
+
+TEST(TrialHarden, SessionTortureInstrumentClamped) {
+    int votes[3] = {0, 0, 0};            // convict
+    CrimeRecord ev[1] = {};
+    TrialSetup st;
+    st.juryVotes = votes; st.juryCount = 3;
+    st.evidence = ev; st.evidenceCount = 1;
+    st.torture = true;
+    // Run with an out-of-range and a negative instrument index; the FSM clamps
+    // into [0, kTrialTortureInstrumentCount-1] before indexing the .esc table.
+    for (int inst : {999, -3, 7, 6, 0}) {
+        TrialSession s;
+        st.tortureInstrument = inst;
+        TrialSessionInit(s, st, TrialHardenLawLookup, nullptr);
+        TrialSessionLeaves leaves{};      // all no-op
+        TrialSessionRun(s, leaves);
+        CHECK(s.finished);
+        CHECK((int)s.phase == (int)TrialPhase::kDone);
+    }
+}
+
+TEST(TrialHarden, SessionEmptyParticipantsRunsToDone) {
+    TrialSetup st;                        // all defaults: no jury, no evidence
+    TrialSession s;
+    TrialSessionInit(s, st, TrialHardenLawLookup, nullptr);
+    TrialSessionLeaves leaves{};
+    TrialVerdict v = TrialSessionRun(s, leaves);
+    CHECK(s.finished);
+    (void)v;
+}
+
+// ===========================================================================
+// Wave-14 1:1 value pins (W14-LAW).
+// ===========================================================================
+
+// Pin all 7 torture-instrument .esc scene names (gilde.exe @0x49D658, 16-byte
+// stride). Values traced verbatim to kTrialTortureEsc in src/world/trial_session
+// .cpp (recovered via get_string); the torture phase indexes this table by the
+// clamped instrument selection.
+TEST(WorldTrialW14, TortureEscTableGolden) {
+    CHECK_EQ(kTrialTortureInstrumentCount, 7);
+    const char* expect[7] = {
+        "dschraube.esc",  "stiefel.esc",    "peitsche.esc",  "brandeisen.esc",
+        "eistropfer.esc", "kaefig.esc",     "streckbank.esc",
+    };
+    for (int i = 0; i < kTrialTortureInstrumentCount; ++i)
+        CHECK(std::strcmp(kTrialTortureEsc[i], expect[i]) == 0);
+}
+
+// Pin the wanted-weight table BYTES (dword_49D644[5]) exactly and the full clamp
+// range, so the whole table is asserted (not just the endpoints).
+TEST(WorldTrialW14, WantedWeightTableFullAndBits) {
+    const float expect[5] = {1.4f, 1.2f, 1.0f, 0.8f, 0.6f};
+    for (int i = 0; i < 5; ++i)
+        CHECK(approx(kTrialWantedWeight[i], expect[i]));
+    // clamp covers [<=0 -> 0] .. [>=4 -> 4] inclusive.
+    CHECK(approx(TrialWantedWeight(2), 1.0f));   // exact mid (untested above)
+    CHECK(approx(TrialWantedWeight(0), 1.4f));
+    CHECK(approx(TrialWantedWeight(4), 0.6f));
+}
+
+// Pin the four trial-fine scaling constants and the acquit threshold to their
+// recovered values (the float-bit identities documented in trial.h).
+TEST(WorldTrialW14, FineConstantsAndThreshold) {
+    CHECK(approx(kTrialFineBasisScale, 0.2f));        // flt_61CCF4 0x3E4CCCCD
+    CHECK(approx(kTrialFavorScale, 0.01f));           // flt_61CCF8 0x3C23D70A
+    CHECK(approx(kTrialTortureConfessScale, 1.1f));   // flt_61CCFC 0x3F8CCCCD
+    CHECK(approx(kTrialTortureDenyScale, 0.8f));      // flt_61CD00 0x3F4CCCCD
+    CHECK_EQ(kTrialAcquitThreshold, 2);
 }

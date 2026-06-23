@@ -117,7 +117,7 @@ const HudRenderHooks& GetHudRenderHooks();
 // ===========================================================================
 
 // Bar fill width in pixels for a production `ratio` in [0,1] within a sub-window of
-// `subWinW` pixels (kPlayerBarSubWinW = 80).  Mirrors VIBE_Hud_BuildScaledTiledBar's
+// `subWinW` pixels (kPlayerBarSubWinW = 15).  Mirrors VIBE_Hud_BuildScaledTiledBar's
 // production->pixels scaling (ratio * subWinW), clamped to [0, subWinW].  Uses the
 // reconstructed gui::PlayerBar_OutputRatioPercent (pct = (int)(ratio*100)) so the
 // ratio math is the same the slot's "%i%%" label shows.

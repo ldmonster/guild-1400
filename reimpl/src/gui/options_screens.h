@@ -97,9 +97,12 @@ struct GfxWidgetDesc {
 extern const GfxWidgetDesc kGfxWidgets[kGfxWidgetCount];
 
 // gilde.exe 0x56c5df / 0x56c79d — the brightness/gamma slider stores its value
-// inverted around 50: seed = 100 - (saved + 50); save = 50 - (live - 50).
+// inverted around 50.  Seed (0x56c5df): SetValueOrText(min=50, max=100, value = 100 -
+// byte_123351C).  Save (0x56c79d): byte_123351C = 50 - (live - 50)  (== 100 - live).
+// Disasm-verified: the seed is `100 - saved` (NOT `100 - (saved+50)`); the slider range
+// is [50,100] and the SAVED byte is the symmetric reflection about 50 (== 100-live).
 int Gfx_GammaSeed(int saved);   // 0x56c5df: SetValueOrText(50, 100, 100 - saved)
-int Gfx_GammaSave(int live);    // 0x56c79d: 50 - (live - 50)
+int Gfx_GammaSave(int live);    // 0x56c79d: 50 - (live - 50)  == 100 - live
 
 // ===========================================================================
 // Game options — gilde.exe 0x56cc44.

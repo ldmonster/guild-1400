@@ -78,7 +78,8 @@ TEST(RenderTerrainScanE2E, WalkabilityThenSun) {
     // centerY=3). Golden result verified against the Python reference.
     const int S = 6;
     std::vector<u8> cells(24 * S * S, 0);
-    auto put = [&](int row, int col, u8 t) { cells[24 * (row + col * S)] = t; };
+    // gilde.exe @0x5c6550: engine cell index = col + row*S (stride 24).
+    auto put = [&](int row, int col, u8 t) { cells[24 * (col + row * S)] = t; };
     put(3, 3, 13);   // center blocked (type 13)
     put(2, 3, 13);   // neighbour blocked
     put(4, 4, 1);    // the only walkable cell

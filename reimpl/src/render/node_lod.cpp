@@ -16,7 +16,10 @@ i32 SelectLodFrame(const LodObject& obj, const LodView& view, bool* outSetCullBi
     if (outSetCullBit) *outSetCullBit = false;
 
     // if (!drawData || !*(drawData+2316)) return 0  (no drawable LOD).
-    if (!obj.drawDataReady || obj.lodCount == 0)
+    // (The frames array lives at drawData+244, so drawDataReady && lodCount>0 implies
+    // obj.frames != null in the engine; the extra null check is a memory-safety guard
+    // that never fires for a well-formed object and keeps the in-bounds path identical.)
+    if (!obj.drawDataReady || obj.lodCount == 0 || !obj.frames)
         return -1;
 
     int index;
