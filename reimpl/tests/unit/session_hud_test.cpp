@@ -25,7 +25,11 @@ namespace gui = guild::gui;
 
 namespace {
 
-constexpr int kW = 320, kH = 240, kPitch = kW * 2;
+// kH must cover the player bar's SECOND slot sub-window: barY(48) +
+// slot-1 subWinY(141) + subWinH(80) = 269 (PlayerBar_SlotLayout) — a 240-tall
+// framebuffer made BarFillScalesWithProductionRatio read out of bounds
+// (the long-standing suite segfault).
+constexpr int kW = 320, kH = 320, kPitch = kW * 2;
 
 std::vector<u16> MakeFb() { return std::vector<u16>((size_t)kW * kH, 0); }
 
@@ -388,4 +392,50 @@ TEST(SessionHud, PanelsRenderIsDeterministicAcrossFreshInstances) {
     }
     CHECK(std::memcmp(a.data(), b.data(), a.size() * 2) == 0);
     CHECK(NonZero(a) > 0);
+}
+
+// ---------------------------------------------------------------------------
+// SELECTION-STATE SIDEBAR BUTTONS (live-capture pin): with the real chrome
+// loaded, the button band renders Стройка/Обзор when NOTHING is selected and
+// Информация/Транспорт when a building is (the original's two states). Gated
+// on GUILD_GAME_DIR (clean skip without the assets). The pin is pixel-level:
+// idle and selected frames must DIFFER in the button band, idle must be
+// deterministic, and both must be non-blank (the chrome actually drew).
+// ---------------------------------------------------------------------------
+#include "shim_impl/disk_filesystem.h"
+TEST(SessionHud, SidebarButtonsFollowSelectionState) {
+    const char* dir = std::getenv("GUILD_GAME_DIR");
+    if (!dir || !*dir)
+        return;                                  // clean skip (no assets)
+    guild::shim::DiskFileSystem fs(dir);
+
+    SessionHud hud;
+    if (!hud.Init(&fs))
+        return;                                  // gfx absent -> skip
+    if (!hud.DecodePanelChrome("_PANEL_STEIN", "_STADTWAPPEN_KOELN"))
+        return;                                  // chrome absent -> skip
+
+    // 800x600 frame; the button band lives at (700..792, 404..454) design.
+    const int W = 800, H = 600;
+    std::vector<u16> idleFb((size_t)W * H, 0), selFb((size_t)W * H, 0),
+        idle2((size_t)W * H, 0);
+    guild::sim::GameTime clk = Clock(0, 12, 0);
+    SessionHud::Inputs in;
+    in.clock = &clk;
+    in.selectedId = 0;
+    hud.Render(idleFb.data(), W, H, W * 2, in);
+    hud.Render(idle2.data(), W, H, W * 2, in);
+    in.selectedId = 42;                          // a building selection
+    hud.Render(selFb.data(), W, H, W * 2, in);
+
+    int diff = 0, nonzero = 0;
+    for (int y = 404; y < 454; ++y)
+        for (int x = 700; x < 792; ++x) {
+            const size_t i = (size_t)y * W + x;
+            if (idleFb[i] != selFb[i]) ++diff;
+            if (idleFb[i]) ++nonzero;
+            CHECK_EQ((int)idleFb[i], (int)idle2[i]);   // deterministic
+        }
+    CHECK(nonzero > 500);                        // the band drew chrome text
+    CHECK(diff > 100);                           // the two states differ
 }

@@ -33,17 +33,19 @@ void idleFrame(SessionCamera& cam, float dt = 16.0f) {
 } // namespace
 
 // ---------------------------------------------------------------------------
-// Init: eye where asked, zoom 0 -> pixelsPerUnit 1, the REAL anchor height
-// (terrain 0 + baseHeight 450 at zoom 0), and the dispatcher's early path has
+// Init: eye where asked, the CITY-ENTER anchor zoom 0.33 (gilde.exe boot call
+// site 0x506fe9: `push 0.33f; call Camera_AnchorToTerrain@0x4b2900`, frida-
+// verified live: flt_6316DC == 0.33) -> pixelsPerUnit 1.33, the REAL anchor
+// height 450 + 1150*0.33 = 829.5, and the dispatcher's early path has
 // initialized the screen-edge box (width-8 / height / 0 / 0).
 // ---------------------------------------------------------------------------
 TEST(SessionCamera, InitAnchorsEyeAndEdgeBox) {
     SessionCamera cam = makeCam();
     CHECK(cam.eyeX() == 1000.0f);
     CHECK(cam.eyeZ() == 2000.0f);
-    CHECK(cam.zoom() == 0.0f);
-    CHECK(cam.pixelsPerUnit() == 1.0f);
-    CHECK(std::fabs(cam.obj.posY - 450.0f) < 1e-4f);   // AnchorToTerrain @0x4b2900
+    CHECK(std::fabs(cam.zoom() - 0.33f) < 1e-6f);
+    CHECK(std::fabs(cam.pixelsPerUnit() - 1.33f) < 1e-6f);
+    CHECK(std::fabs(cam.obj.posY - 829.5f) < 1e-3f);   // AnchorToTerrain @0x4b2900
     CHECK_EQ(cam.st2.box0, 640 - 8);                   // dispatcher early path
     CHECK_EQ(cam.st2.box1, 480);
     CHECK_EQ(cam.st2.box2, 0);
@@ -59,7 +61,7 @@ TEST(SessionCamera, IdleFrameIsStationary)  {
     for (int i = 0; i < 5; ++i) idleFrame(cam);
     CHECK(cam.eyeX() == 1000.0f);
     CHECK(cam.eyeZ() == 2000.0f);
-    CHECK(cam.zoom() == 0.0f);
+    CHECK(std::fabs(cam.zoom() - 0.33f) < 1e-6f);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,17 +126,17 @@ TEST(SessionCamera, EdgeScrollPansEye) {
 // ---------------------------------------------------------------------------
 TEST(SessionCamera, WheelZoomScalesAndMovesEyeHeight) {
     SessionCamera cam = makeCam();
-    const float y0 = cam.obj.posY;           // 450
+    const float y0 = cam.obj.posY;           // 829.5 (boot zoom 0.33)
     cam.Frame(centerMouse(), false, false, false, false, /*wheel*/ 1.0f, 16.0f);
-    CHECK(std::fabs(cam.zoom() - 0.1f) < 1e-6f);
-    CHECK(std::fabs(cam.pixelsPerUnit() - 1.1f) < 1e-6f);
-    CHECK(std::fabs(cam.obj.posY - 565.0f) < 1e-3f);   // 450 + 1150*0.1
+    CHECK(std::fabs(cam.zoom() - 0.43f) < 1e-6f);      // 0.33 + one 0.1 notch
+    CHECK(std::fabs(cam.pixelsPerUnit() - 1.43f) < 1e-6f);
+    CHECK(std::fabs(cam.obj.posY - 944.5f) < 1e-3f);   // 450 + 1150*0.43
     CHECK(cam.obj.posY > y0);                 // the eye MOVED on zoom
     CHECK(cam.eyeX() == 1000.0f);             // ground position unchanged
     CHECK(cam.eyeZ() == 2000.0f);
-    // pitch follows the zoom fraction: worldX = baseAngle + span*0.1.
+    // pitch follows the zoom fraction: worldX = baseAngle + span*0.43.
     const float expPitch = cam.cs.baseAngle
-                         + (cam.cs.spanAngle - cam.cs.baseAngle) * 0.1f;
+                         + (cam.cs.spanAngle - cam.cs.baseAngle) * 0.43f;
     CHECK(std::fabs(cam.obj.worldX - expPitch) < 1e-5f);
 }
 
@@ -189,7 +191,7 @@ TEST(SessionCamera, RightDragMovesEyeViaRotateBranch) {
     ms.right = false;
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);   // release frame
     cam.Frame(ms, false, false, false, false, 1.0f, 16.0f);   // wheel: blocked
-    CHECK(cam.zoom() == 0.0f);
+    CHECK(std::fabs(cam.zoom() - 0.33f) < 1e-6f);
     CHECK_EQ(cam.in2.disableMove, 1);
     // The REAL re-attach: VIBE_Camera_EdgeScroll @0x4b2c34 — the cursor on a
     // boundary row (my == bottom = dword_62D0C8 - 1 = 479) steps the edge
@@ -201,7 +203,7 @@ TEST(SessionCamera, RightDragMovesEyeViaRotateBranch) {
     // back inside the box the latch re-arms and the wheel works again.
     ms.y = 240;
     cam.Frame(ms, false, false, false, false, 1.0f, 16.0f);
-    CHECK(std::fabs(cam.zoom() - 0.1f) < 1e-6f);
+    CHECK(std::fabs(cam.zoom() - 0.43f) < 1e-6f);
     CHECK_EQ(cam.st2.edgeSnapLatch, 0);
 }
 
@@ -238,10 +240,12 @@ TEST(SessionCamera, PoseExposesEyeAndRotation) {
     SessionCamera cam = makeCam();
     const guild::play::CameraPose p = cam.pose();
     CHECK(p.eyeX == 1000.0f);
-    CHECK(std::fabs(p.eyeY - 450.0f) < 1e-4f);     // AnchorToTerrain height
+    CHECK(std::fabs(p.eyeY - 829.5f) < 1e-3f);     // AnchorToTerrain height
     CHECK(p.eyeZ == 2000.0f);
     // pitch = baseAngle + span*0 (flt_6316B8) after the zoom-0 anchor.
-    CHECK(std::fabs(p.rotX - cam.cs.baseAngle) < 1e-6f);
+    const float bootPitch = cam.cs.baseAngle
+                          + (cam.cs.spanAngle - cam.cs.baseAngle) * 0.33f;
+    CHECK(std::fabs(p.rotX - bootPitch) < 1e-5f);
     CHECK(p.rotY == 0.0f);
     CHECK(p.rotZ == 0.0f);
     // pose mirrors the node fields and the world-pose mirror (+92/+144).
@@ -252,7 +256,7 @@ TEST(SessionCamera, PoseExposesEyeAndRotation) {
     // wheel zoom changes the exposed pitch exactly like obj.worldX.
     cam.Frame(centerMouse(), false, false, false, false, 1.0f, 16.0f);
     const float expPitch = cam.cs.baseAngle
-                         + (cam.cs.spanAngle - cam.cs.baseAngle) * 0.1f;
+                         + (cam.cs.spanAngle - cam.cs.baseAngle) * 0.43f;
     CHECK(std::fabs(cam.pose().rotX - expPitch) < 1e-5f);
 }
 
@@ -270,8 +274,9 @@ TEST(SessionCamera, RotateInputMutatesExposedRotation) {
     const float yaw0 = cam.pose().rotY;   // 0
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);
     const float yaw1 = cam.pose().rotY;
-    // frame 1: yaw = 0 - (320 - 666) * 0.0035 = 1.211
-    CHECK(std::fabs(yaw1 - (-(320.0f - 666.0f) * 0.0035f)) < 1e-4f);
+    // frame 1: the pan-init snapshot is trunc((1 - zoom) * 666.667) = 446 at
+    // the 0.33 boot zoom; yaw = 0 - (320 - 446) * 0.0035 = 0.441.
+    CHECK(std::fabs(yaw1 - (-(320.0f - 446.0f) * 0.0035f)) < 1e-4f);
     CHECK(yaw1 != yaw0);
     ms.x += 40;                           // drag right
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);
@@ -325,9 +330,10 @@ TEST(SessionCamera, TerrainBindAnchorsEyeToRealHeightmap) {
     SessionCamera cam;
     cam.BindTerrain(&hm);                  // bind BEFORE Init (survives it)
     cam.Init(1000.0f, 2000.0f, 640, 480);
-    // AnchorToTerrain @0x4b2900: posY = terrain(210) + baseHeight(450) = 660.
-    CHECK(std::fabs(cam.obj.posY - 660.0f) < 1e-3f);
-    CHECK(std::fabs(cam.pose().eyeY - 660.0f) < 1e-3f);
+    // AnchorToTerrain @0x4b2900 at the boot zoom 0.33:
+    // posY = terrain(210) + 450 + 1150*0.33 = 1039.5.
+    CHECK(std::fabs(cam.obj.posY - 1039.5f) < 1e-3f);
+    CHECK(std::fabs(cam.pose().eyeY - 1039.5f) < 1e-3f);
 }
 
 TEST(SessionCamera, TerrainClampEasesEyeTowardTerrain) {
@@ -338,11 +344,12 @@ TEST(SessionCamera, TerrainClampEasesEyeTowardTerrain) {
     cam.BindTerrain(&hm);                  // bind AFTER Init (also supported)
     // displaced eye: the per-frame Camera_ClampToTerrainHeight @0x4b2a0c
     // (gated by byte_6316D8, which BindTerrain enables) eases posY toward
-    // terrain + baseHeight = 660 in dy/15 steps (clamped +-10, deadzone 5).
+    // terrain + baseH + span*zoom = 210 + 450 + 1150*0.33 = 1039.5 in dy/15
+    // steps (clamped +-10, deadzone 5). From 600 that's ~44+ frames at max step.
     cam.obj.posY = 600.0f;
-    for (int i = 0; i < 40; ++i) idleFrame(cam);
-    CHECK(cam.obj.posY > 654.0f);
-    CHECK(cam.obj.posY <= 660.0f + 1e-3f);
+    for (int i = 0; i < 120; ++i) idleFrame(cam);
+    CHECK(cam.obj.posY > 1033.0f);
+    CHECK(cam.obj.posY <= 1039.5f + 1e-3f);
     // inside the 5.0 deadzone the clamp stops moving (dword_631DDC = 0).
     const float settled = cam.obj.posY;
     idleFrame(cam);
@@ -355,12 +362,12 @@ TEST(SessionCamera, WheelZoomFollowsBoundTerrain) {
     guild::render::Heightmap hm = makeFlatHeightmap(bytes);
     SessionCamera cam;
     cam.BindTerrain(&hm);
-    cam.Init(1000.0f, 2000.0f, 640, 480);  // posY = 660
+    cam.Init(1000.0f, 2000.0f, 640, 480);  // posY = 1039.5 (boot zoom 0.33)
     // wheel branch -> AnchorToTerrain (h1 forwarded through UpdateMovement):
-    // posY = terrain(210) + 450 + 1150*0.1 = 775.
+    // posY = terrain(210) + 450 + 1150*0.43 = 1154.5.
     cam.Frame(centerMouse(), false, false, false, false, 1.0f, 16.0f);
-    CHECK(std::fabs(cam.zoom() - 0.1f) < 1e-6f);
-    CHECK(std::fabs(cam.obj.posY - 775.0f) < 1e-2f);
+    CHECK(std::fabs(cam.zoom() - 0.43f) < 1e-6f);
+    CHECK(std::fabs(cam.obj.posY - 1154.5f) < 1e-2f);
 }
 
 // scroll_speed 0 (slider minimum) kills the drag motion — the option is the

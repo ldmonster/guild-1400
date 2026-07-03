@@ -19,8 +19,18 @@
 #include "play/sdl_city_screen.h"   // CityScreenConfig / CityScreenResult
 
 namespace guild::shim { class IGraphicsDevice; class IPlatform; }
+namespace guild::render { struct Surface; }
 
 namespace guild::play {
+
+// Render one settled frame of the shared New-Game desk scene (Menu/ChooseCity.ed3) into
+// `outFb` (W x H, 32bpp): the backdrop the New-Game sub-screens overlay their parchment
+// form onto. `camDummy` selects the scene camera locator — "dummy_A2" is the map-desk view
+// (city/difficulty/history/tasks), "dummy_B2" is the shelf view (the player wizard, where
+// gilde.exe pans the camera to the bookshelf). Returns false if scene/device unavailable.
+bool RenderNewGameDeskBackdrop(shim::IGraphicsDevice& device, const std::string& gameDir,
+                               int W, int H, render::Surface* outFb,
+                               const char* camDummy = "dummy_A2");
 
 // Render + run the 3D CHOOSECITY scene. `device` must be init()'d to
 // cfg.fbW x cfg.fbH; `plat`'s window must exist. Falls back to the 2D

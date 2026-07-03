@@ -15,7 +15,7 @@
 // into the next screen.
 //
 //   A FullNewGameFlow   (guarded): RunNativeMainMenu -> New Game -> 3D city pick
-//       (AUGSBURG, Enter) -> difficulty (normal) -> history (factual) -> player
+//       (AUGSBURG, Enter) -> difficulty (normal) -> history (personal) -> player
 //       wizard ("Test"/"Player" via pollText) -> charcreate (profession+confirm)
 //       -> kPlayCity with the AUGSBURG cityPath.
 //   B SessionDeterministic (guarded): RunSdlSession bounded frames on AUGSBURG;
@@ -127,14 +127,17 @@ TEST(PlayableFlowE2E, FullNewGameFlow) {
     int ngX, ngY; MenuButtonCentre(gui::MainMenuItem::kNewGame, ngX, ngY);
     // Difficulty panel: 5 levels + "back" = 6 rows; row 2 = "normal".
     int diffX, diffY; RadioRowCentre(6, 2, diffX, diffY);
-    // History panel: 3 perspectives + "back" = 4 rows; row 0 = factual (flag 1).
-    int histX, histY; RadioRowCentre(4, 0, histX, histY);
-    // Player-wizard private layout (sdl_chooseplayer_screen.cpp, 800x600 design):
-    // panel (128,72,441,490); radio rows y0=py+120, rowH=46, rh=38, x=px+40 w=pw-80.
-    const int rowX = 128 + 40 + (441 - 80) / 2;      // 348 — gender/faith row centre x
-    const int row0Y = 72 + 120 + 38 / 2;             // 211 — row 0 centre y
-    // Wappen grid: gx=px+30=158, gy=py+130=202, cw=(441-60)/4=95 (cell w = cw-8), ch=70.
-    const int wapX = 158 + (95 - 8) / 2, wapY = 202 + 70 / 2;       // (201,237)
+    // History panel: buttons centred at x=W/2, row i top y=324+40*i (height 33). Pick
+    // row 1 = PERSONAL (flag 2): the FACTUAL row (0) branches into the tasks screen;
+    // personal/none go straight to the wizard, keeping this script linear.
+    const int histX = kW / 2;
+    const int histY = (324 + 40) * kH / 600 + (33 * kH / 600) / 2;
+    // Player-wizard layout (sdl_chooseplayer_screen.cpp, 800x600 design): parchment
+    // (px=(800-490)/2=155, py=72, pw=490); radio rows y0=py+170, rowH=46, rh=38, centred.
+    const int rowX = kW / 2;                          // gender/faith rows centre on screen
+    const int row0Y = 72 + 170 + 38 / 2;              // 261 — row 0 centre
+    // Wappen grid: gx=px+30=185, gy=py+130=202, cw=(490-60)/4=107 (cell w = cw-8), ch=70.
+    const int wapX = 185 + (107 - 8) / 2, wapY = 202 + 70 / 2;      // (234,237) cell 0 centre
     // Charcreate profession cell 0 (real geometry helpers; cell 84x68).
     const int profX = gui::Profession_ButtonX(0) + 84 / 2;          // 142
     const int profY = gui::Profession_ButtonY(0) + 68 / 2;          // 134
@@ -151,7 +154,7 @@ TEST(PlayableFlowE2E, FullNewGameFlow) {
     // Difficulty screen (pumps 6..7): hover row 2 ("normal"), click on pump 7.
     plat.scriptAt(6, diffX, diffY, false);
     plat.scriptAt(7, diffX, diffY, true);
-    // History screen (pumps 8..9): hover row 0 (factual account), click on pump 9.
+    // History screen (pumps 8..9): hover row 1 (personal history), click on pump 9.
     plat.scriptAt(8, histX, histY, false);
     plat.scriptAt(9, histX, histY, true);
     // Player wizard (first pump 10). Page 0 (first name): the field is seeded
@@ -202,7 +205,7 @@ TEST(PlayableFlowE2E, FullNewGameFlow) {
     CHECK_EQ(r.params.cityName, "stadt_AUGSBURG");
     CHECK_EQ(r.params.cityFile, "AUGSBURG");      // ReturnedString base name
     CHECK_EQ(r.params.difficulty, 2);             // row 2 = "normal" (byte_12335BA)
-    CHECK_EQ(r.params.historyFlag, 1);            // factual account
+    CHECK_EQ(r.params.historyFlag, 2);            // personal history (skips tasks screen)
     CHECK_EQ(r.params.firstName, "Test");
     CHECK_EQ(r.params.familyName, "Player");
     CHECK_EQ(r.params.gender, 0);

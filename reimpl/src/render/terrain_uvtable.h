@@ -82,7 +82,35 @@ inline int TerrainUvBaseIndex(u32 subTexId) {
 //   subTexId = (cellFlag & 0x40) ? (byte_13DCE58[(quadIdx & 0xFF)+base] & 0x3F) : 0
 // `subTexSrc` mirrors byte_13DCE58+base (the runtime per-cell table; all-zero in
 // the static image -> always 0). Null `subTexSrc` -> 0 (the shipped default).
-u32 TerrainSubTexId(u8 cellFlag, const u8* subTexSrc, i32 quadIdx);
+u32 TerrainSubTexId(u8 cellFlag, const u8* subTexSrc, i32 cellU, i32 cellV);
+
+// ---------------------------------------------------------------------------
+// THE FULL 64-RECORD UV TABLE (flt_13FE540) — VIBE_Render_ComputeFilterWeights
+// @0x5b94cc reconstructed from the LIVE disassembly (frida, gilde.exe in-city):
+//   record 0      : the corner-inset full-tile UVs (BuildTerrainUvTable).
+//   records 1..63 : RANDOM ROTATED SUB-QUADS — per record, four RandNext()
+//                   draws (@0x5cb8bc, the crt LCG):
+//                     centerU = r/32767, centerV = r/32767      (flt_628748)
+//                     scale   = r/98301 + 0.9                    (flt_62874C/754)
+//                     angle   = r/32767 * 2*pi                   (flt_628750)
+//                   R = MatrixFromEuler({0,0,angle}) (@0x5cb1bc); each unit-quad
+//                   corner c in {(0,0),(1,0),(0,1),(1,1)} maps to
+//                   center + (c x R) * scale (row-vector times matrix, exactly
+//                   the fmul/faddp chain @0x5b978a..), filling the same four-
+//                   triangle corner pattern record 0 uses. The engine's anti-
+//                   tiling: each ground quad samples the texture through a
+//                   randomly rotated/scaled/offset mapping (wraps via texelMask).
+// ---------------------------------------------------------------------------
+constexpr int kTerrainUvRecordCount = 64;
+void BuildTerrainUvTable64(float out[kTerrainUvRecordCount * kTerrainUvTableSize],
+                           u32 mipTileSize);
+
+// The 256x256 per-cell sub-record table (byte_13DCE58) — the runtime writer
+// @0x5afedb (frida disassembly): every byte seeded (RandNext() << 8) / 0x7FFF,
+// then 15 full passes of random pairwise swaps (each cell swapped with the cell
+// at (rand-row << 8) | rand-col). The static image is all-zero; the LIVE table
+// is 99.8% non-zero (in-city read) — the sub-record ids ARE runtime data.
+void BuildTerrainSubTexTable(u8 out[65536]);
 
 // Copy tri0's 6-float UV record (poly+16 target == &flt_13FE540[subTexId*0x60]).
 void TerrainQuadUvT0(float out[kTriUvFloats], const float* uvTable, u32 subTexId);

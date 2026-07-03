@@ -350,10 +350,18 @@ void RowLabelKeys(OptionsPage p, const char* const** keys, int* n) {
     }
 }
 
+// The options-page title. The engine renders it via VIBE_Text_RenderRichString
+// (0x1866/0x1867/0x1868 -> _OPTIONEN_UEBERSCHRIFT+2/+3/+4 = "$Z$[Настройки X$]"),
+// i.e. centered rich markup. The IDENTICAL visible text exists markup-free as
+// _OPTIONEN_MENUE_{GAME,GFX,SFX}+0 ("Настройки игры/графики/звука"); use those so
+// no markup parser is needed and every page gets its CORRECT localized title.
+// (The old _OPTIONEN_UEBERSCHRIFT+0/1/2 mapping was wrong: those are the
+//  Load/Save/Settings headings, so Gfx showed "Сохранить игру" and Sfx "Настройки
+//  игры", with the raw $Z$[ ]$ control codes drawn as glyphs.)
 const char* const kTitleKeys[3] = {
-    "_OPTIONEN_UEBERSCHRIFT+0",  // Game (0x1866)
-    "_OPTIONEN_UEBERSCHRIFT+1",  // Gfx  (0x1867)
-    "_OPTIONEN_UEBERSCHRIFT+2",  // Sfx  (0x1868)
+    "_OPTIONEN_MENUE_GAME+0",  // "Настройки игры"
+    "_OPTIONEN_MENUE_GFX+0",   // "Настройки графики"
+    "_OPTIONEN_MENUE_SFX+0",   // "Настройки звука"
 };
 int TitleKeyIndex(OptionsPage p) {
     switch (p) {
@@ -425,7 +433,11 @@ std::vector<OptionRow> OptionsRowsFor(OptionsPage page,
             add("Show Building Info","show_geb_info",OptionKind::kToggle,m.showGebInfo,   0, 1,  1, "_OPTIONEN_STUFEN_AN_AUS"); // child 6
             add("Panel Mode",      "panel_mode",     OptionKind::kCycle, m.panelMode,     0, 4,  1, "_OPTIONEN_STUFEN_PANEL");  // child 9
             add("Help Events",     "help_events",    OptionKind::kToggle,m.helpEvents,    0, 1,  1, "_OPTIONEN_STUFEN_AN_AUS"); // child 10
-            add("Hints",           "hints",          OptionKind::kToggle,m.hints,         0, 1,  1, "_OPTIONEN_STUFEN_AN_AUS"); // child 11
+            // Row 9 (_OPTIONEN_GAME+9) resolves to the localized caption "Уровень
+            // сложности" (difficulty). Hidden per request — the slot is skipped in
+            // layout/draw/hit-test (like Invert Mouse), but the vector index stays
+            // so RowsToConfig's getU8(9) still reads the seed value back unchanged.
+            add("Hints",           "hints",          OptionKind::kToggle,m.hints,         0, 1,  1, "_OPTIONEN_STUFEN_AN_AUS", /*hidden=*/true); // child 11
             add("Panel Help",      "panel_help",     OptionKind::kToggle,m.panelHelp,     0, 1,  1, "_OPTIONEN_STUFEN_AN_AUS"); // child 12
             break;
     }
@@ -462,10 +474,21 @@ namespace {
     return v;
 }
 
-// Pretty-print a row's current value for the panel.
+// Pretty-print a row's current value for the panel. The four SFX volume sliders
+// display as a PERCENTAGE of their max (gilde.exe SFX screen shows "100%", "90%",
+// ... — master 127 -> 100%), not the raw 0..127 amplitude. All other numeric
+// sliders show the raw value ("%i", VIBE_Text default).
 std::string ValueText(const OptionRow& row) {
     char buf[16];
-    std::snprintf(buf, sizeof buf, "%d", row.value);
+    const bool isVol =
+        std::strcmp(row.key, "master_vol") == 0 || std::strcmp(row.key, "sfx_vol") == 0 ||
+        std::strcmp(row.key, "msx_vol")   == 0 || std::strcmp(row.key, "speech_vol") == 0;
+    if (isVol && row.maxV > 0) {
+        const int pct = (row.value * 100 + row.maxV / 2) / row.maxV;
+        std::snprintf(buf, sizeof buf, "%d%%", pct);
+    } else {
+        std::snprintf(buf, sizeof buf, "%d", row.value);
+    }
     return buf;
 }
 
@@ -517,7 +540,7 @@ struct Layout {
     int cancelX, cancelY, cancelW, cancelH;
 };
 
-constexpr int kBtnW = 110;            // OK/Cancel button width (native)
+constexpr int kBtnW = 96;             // OK/Cancel button width (measured from original)
 
 Layout BuildLayout(OptionsPage page, int fbW, int fbH) {
     Layout L;
@@ -531,16 +554,17 @@ Layout BuildLayout(OptionsPage page, int fbW, int fbH) {
     L.valueX   = L.trackX + kSliderTrackW + 10;
 
     // OK/Cancel: the button row sits in the outer panel near the bottom (form
-    // window 3 / Hud_BuildButtonRow @0x4bcdfc). Center the two buttons in the
-    // outer window's lower band.
-    const int win0ScrX = L.ox + L.g.win0X;
+    // window 3 / Hud_BuildButtonRow @0x4bcdfc; frida button-row window = 128,512,
+    // 524,41). GeomFor stores win0W/win0H swapped, so panelW=win0H, panelH=win0W.
+    // The panel is screen-centered (matches the frame), button row centered in it.
+    const int panelW   = L.g.win0H;                  // 575 (game)
+    const int panelH   = L.g.win0W;                  // 449 (game)
+    const int win0ScrX = (fbW - panelW) / 2;         // centered
     const int win0ScrY = L.oy + L.g.win0Y;
-    const int win0W    = L.g.win0W;
-    const int win0H    = L.g.win0H;
-    const int btnY     = win0ScrY + win0H - kBtnH - 24;
-    const int gap      = 24;
+    const int btnY     = win0ScrY + panelH - kBtnH - 21;   // -> ~515 (measured top)
+    const int gap      = 78;                          // measured gap between the two buttons
     const int totalW   = kBtnW * 2 + gap;
-    const int firstX   = win0ScrX + (win0W - totalW) / 2;
+    const int firstX   = win0ScrX + (panelW - totalW) / 2;
     L.okX = firstX;            L.okY = btnY; L.okW = kBtnW; L.okH = kBtnH;
     L.cancelX = firstX + kBtnW + gap; L.cancelY = btnY; L.cancelW = kBtnW; L.cancelH = kBtnH;
     return L;
@@ -605,6 +629,11 @@ OptionsResult RunOptionsScreen(shim::IGraphicsDevice& device, shim::IPlatform& p
     OptionsResult res;
     res.gfx = cfg.gfx; res.sound = cfg.sound; res.game = cfg.game;
 
+    // The screen draws the game's own leather-hand cursor (below). Hide the OS
+    // arrow so it never appears here (the menu already hides it; this also covers
+    // the standalone GUILD_OPEN_OPTIONS path). Harmless if already hidden.
+    plat.showSystemCursor(false);
+
     // ---- live INI binding: seed from the real gilde.INI (PRESERVED) -------
     const std::string iniRoot = cfg.iniDir.empty() ? cfg.gameDir : cfg.iniDir;
     shim::DiskFileSystem iniFs(iniRoot);
@@ -631,10 +660,14 @@ OptionsResult RunOptionsScreen(shim::IGraphicsDevice& device, shim::IPlatform& p
     // ---- real menu artwork + localized labels ----------------------------
     shim::DiskFileSystem assetFs(cfg.gameDir);
     MenuAssets assets;
-    // The _OPTIONEN_PIC background (res variant by framebuffer width).
-    const char* bgName = W >= 1152 ? "_OPTIONEN_PIC_1152"
-                       : W >= 1024 ? "_OPTIONEN_PIC_1024"
-                                   : "_OPTIONEN_PIC";
+    // Background: from the MAIN MENU, the options sub-screen keeps the live title
+    // backdrop (the city _MENUE_BACKGROUND) underneath (doc 08 §1.6 — the 3D title
+    // scene stays live under sub-forms; confirmed against the original: the options
+    // panel sits over the city, NOT the _OPTIONEN_PIC bookshelf). _OPTIONEN_PIC is
+    // the IN-GAME (pause) options background. Pick per context.
+    const char* bgName = cfg.inGame
+        ? (W >= 1152 ? "_OPTIONEN_PIC_1152" : W >= 1024 ? "_OPTIONEN_PIC_1024" : "_OPTIONEN_PIC")
+        : (W >= 1152 ? "_MENUE_BACKGROUND_1152" : W >= 1024 ? "_MENUE_BACKGROUND_1024" : "_MENUE_BACKGROUND");
     const bool haveAssets = !cfg.gameDir.empty() &&
                             assets.Load(assetFs, "gfx/gilde.gfx", bgName);
     const bool haveFont = haveAssets && assets.font().loaded();
@@ -757,33 +790,192 @@ OptionsResult RunOptionsScreen(shim::IGraphicsDevice& device, shim::IPlatform& p
             gui::MenuFillRect(&tgt.surf, 0, 0, W, H, pal.bgR, pal.bgG, pal.bgB);
         }
 
+        // Main-menu options panel, reconstructed from the LIVE original (frida + pixel
+        // sampling). The Window_Create reg map is (x@eax,y@edx,w@ebx,h@ecx) — the green
+        // title bar slot (w=510) proves w=EBX — so WIN0 is 575x449 (the reimpl GeomFor
+        // stores win0W/win0H swapped, hence width=win0H, height=win0W). Elements:
+        //   * dark translucent fill   (sampled interior ~(41,40,24))
+        //   * tan border frame        (sampled ~(165,146,115))
+        //   * green title bar         (frida slot3 x=136,y=128,w=510,h=38; ~(16,50,0))
+        //   * centered title text     "Настройки игры" (font 66, ~(255,255,214))
+        // In-game (pause) options use the _OPTIONEN_PIC bg instead — skip all this.
+        if (haveAssets && !cfg.inGame) {
+            // The REAL options panel frame: GREEN MARBLE title bar + ornate gold
+            // jeweled-corner border, transparent centre. _TOOL_TIP_GREEN* family (the
+            // main-menu counterpart of the in-game _TOOL_TIP_BIG parchment); the game
+            // page (11 rows) uses the BIGGER 574x450 variant.
+            // ALL three option panels are the SAME size — the form WIN0 is ~574x450
+            // for game/gfx/sfx alike (GeomFor: 575x449 / 574x452 / 575x449), which is
+            // exactly _TOOL_TIP_GREEN_BIGGER (574x450). The smaller _TOOL_TIP_GREEN
+            // (475x301) / _BIG (475x441) are OTHER in-game tooltips, not the options
+            // frame — using them made the Sfx/Gfx panel too small (and pushed the
+            // OK/Cancel row below the frame). Use the big jeweled green frame for all.
+            const char* frameName = "_TOOL_TIP_GREEN_BIGGER";
+            const render::DecodedShape* frame = assets.SpriteByName(frameName, 0);
+            if (frame && frame->width > 0 && frame->height > 0) {
+                const int fw = frame->width, fh = frame->height;
+                // Panel is horizontally CENTERED (measured: original green-bar centre ==
+                // screen centre); top at win0Y (center-translated). The asset's interior
+                // (transparent centre) is x[25..fw-25], below the green bar (~y42) to
+                // above the bottom border (~fh-25).
+                const int px0 = (W - fw) / 2;
+                const int py0 = L.oy + L.g.win0Y;
+                // The dark interior must follow the gold border EXACTLY on every side.
+                // A per-row "between first/last opaque" fill bleeds below the bottom
+                // border because the jeweled corner tips stick out under the bottom gold
+                // line. So flood-fill the ENCLOSED transparent region from the centre
+                // (bounded by the continuous gold frame + green bar) — that is precisely
+                // the interior, with no bleed past any border. (Mask cached per frame
+                // pointer; recomputed only if the asset changes.)
+                const std::uint32_t* fa = frame->argb.data();
+                static const render::DecodedShape* s_maskFor = nullptr;
+                static std::vector<unsigned char> s_interior;
+                if (s_maskFor != frame) {
+                    s_maskFor = frame;
+                    s_interior.assign((std::size_t)fw * fh, 0);
+                    std::vector<int> stk;
+                    const int seed = (fh / 2) * fw + (fw / 2);
+                    if (!(fa[seed] & 0xFF000000u)) { s_interior[seed] = 1; stk.push_back(seed); }
+                    while (!stk.empty()) {
+                        const int p = stk.back(); stk.pop_back();
+                        const int x = p % fw, y = p / fw;
+                        const int nb[4] = { (x + 1 < fw) ? p + 1 : -1,
+                                            (x > 0)      ? p - 1 : -1,
+                                            (y + 1 < fh) ? p + fw : -1,
+                                            (y > 0)      ? p - fw : -1 };
+                        for (int k = 0; k < 4; ++k) {
+                            const int q = nb[k];
+                            if (q < 0 || s_interior[q]) continue;
+                            if (fa[q] & 0xFF000000u) continue;   // gold/green frame = boundary
+                            s_interior[q] = 1; stk.push_back(q);
+                        }
+                    }
+                }
+                for (int ry = 0; ry < fh; ++ry) {
+                    const int dy = py0 + ry; if (dy < 0 || dy >= H) continue;
+                    std::uint32_t* drow = scratch.data() + (std::size_t)dy * W;
+                    for (int rx = 0; rx < fw; ++rx) {
+                        const int dx = px0 + rx; if (dx < 0 || dx >= W) continue;
+                        const std::size_t fi = (std::size_t)ry * fw + rx;
+                        const std::uint32_t ap = fa[fi];
+                        if (ap & 0xFF000000u) {
+                            drow[dx] = ap;                       // gold frame / green bar
+                        } else if (s_interior[fi]) {             // enclosed interior -> dark
+                            const std::uint32_t c = drow[dx];
+                            const int r = ((((c >> 16) & 0xFF) * 82) + 22 * 174) >> 8;
+                            const int g = ((((c >> 8) & 0xFF) * 82) + 26 * 174) >> 8;
+                            const int b = (((c & 0xFF) * 82) + 16 * 174) >> 8;
+                            drow[dx] = 0xFF000000u | ((std::uint32_t)r << 16) | ((std::uint32_t)g << 8) | (std::uint32_t)b;
+                        }
+                    }
+                }
+                // Group delimiters, rendered 1:1 from the original game page: a 3px
+                // horizontal rule (dark / gold / dark) across the enclosed interior, with
+                // the centre 4-bead ornament reproduced from the original's EXACT pixels
+                // (there is no delimiter sprite in gilde.gfx — the engine draws it). The
+                // two delimiters are at frame-y 107 and 243 (screen y 227/363 @800x600).
+                // Per-page group-separator Y positions (frame-relative), measured
+                // from the original: Game splits {money/speeds | toggles | help},
+                // Sfx splits {master | channel volumes | music quality}. Each is the
+                // SAME 3px gold rule + 4-bead ornament.
+                int delimFy[2] = { -1, -1 }; int nDelim = 0;
+                switch (cfg.page) {
+                    case OptionsPage::kGame: delimFy[0] = 107; delimFy[1] = 243; nDelim = 2; break;
+                    case OptionsPage::kSfx:  delimFy[0] = 131; delimFy[1] = 299; nDelim = 2; break;
+                    case OptionsPage::kGfx:  delimFy[0] = 134; delimFy[1] = 278; nDelim = 2; break;
+                    default: break;
+                }
+                if (nDelim > 0) {
+                    // The 4-bead ornament, 27x7, captured pixel-for-pixel from the original
+                    // (0 == transparent; the dark line passes through it at row index 3).
+                    static const int kBeadW = 27, kBeadH = 7;
+                    static const std::uint32_t kBeadPx[189] = {
+  0,0x080000u,0x080000u,0x080000u,0x524531u,0x4A3C21u,0x423821u,0x423821u,0,0x080000u,0x080000u,0,0,0,0,0,0,0x080000u,0x080000u,0,0x423829u,0,0,0,0x080000u,0x080000u,0x080000u,
+  0x100000u,0x84694Au,0xA59273u,0x73614Au,0x080000u,0x423821u,0,0,0x080000u,0x847152u,0x6B5D42u,0x080000u,0,0,0,0,0x080000u,0x6B6139u,0x7B714Au,0x080000u,0,0,0,0x080000u,0x635D31u,0xA59663u,0x84794Au,
+  0x847139u,0xCEB67Bu,0xFFFBC6u,0xE7D7A5u,0x84714Au,0x080000u,0x080000u,0x080000u,0x847142u,0xF7E7B5u,0xE7D7A5u,0xA59663u,0x080000u,0x080000u,0x080000u,0x080000u,0xA5966Bu,0xE7D7A5u,0xF7E7B5u,0x847142u,0x080000u,0x080000u,0x080000u,0x7B7152u,0xE7DBA5u,0xFFFBBDu,0xC6B673u,
+  0xA59252u,0xFFFBB5u,0xFFFBB5u,0xFFFFC6u,0xE7D3A5u,0xE7D7B5u,0xC6B694u,0xA5966Bu,0x736129u,0xFFFBC6u,0xFFFFC6u,0xE7D7A5u,0xBDB28Cu,0xA59273u,0xA59273u,0xBDB28Cu,0xE7D7A5u,0xFFFFC6u,0xFFFBC6u,0x736129u,0xA5966Bu,0xC6B694u,0xE7D7B5u,0xE7D3A5u,0xFFFFC6u,0xFFFBB5u,0xFFFBB5u,
+  0x847539u,0xC6B673u,0xFFFBBDu,0xE7DBA5u,0x7B7152u,0x080000u,0x080000u,0x080000u,0x847142u,0xF7E7B5u,0xE7D7A5u,0xA5966Bu,0x080000u,0x080000u,0x080000u,0x080000u,0xA59663u,0xE7D7A5u,0xF7E7B5u,0x847142u,0x080000u,0x080000u,0x080000u,0x84714Au,0xE7D7A5u,0xFFFBC6u,0xCEB67Bu,
+  0x080000u,0x84794Au,0xA59663u,0x635D31u,0x080000u,0,0,0,0x080000u,0x7B714Au,0x6B6139u,0x080000u,0,0,0,0,0x080000u,0x6B5D42u,0x847152u,0x080000u,0,0,0,0x080000u,0x73614Au,0xA59273u,0x84694Au,
+  0,0x080000u,0x080000u,0x080000u,0,0,0,0,0,0x080000u,0x080000u,0,0,0,0,0,0,0x080000u,0x080000u,0,0,0,0,0,0x080000u,0x080000u,0x080000u,
+                    };
+                    const std::uint32_t LINE = 0xFFA59273u, DARK = 0xFF080000u;
+                    for (int di = 0; di < nDelim; ++di) {
+                        const int fy = delimFy[di];
+                        if (fy < 1 || fy + 1 >= fh) continue;
+                        // 3px rule (dark / gold / dark), clipped to the interior mask.
+                        for (int dyo = -1; dyo <= 1; ++dyo) {
+                            const int row = fy + dyo, Y = py0 + row;
+                            if (Y < 0 || Y >= H) continue;
+                            std::uint32_t* drow = scratch.data() + (std::size_t)Y * W;
+                            const std::uint32_t col = (dyo == 0) ? LINE : DARK;
+                            for (int rx = 0; rx < fw; ++rx) {
+                                if (!s_interior[(std::size_t)row * fw + rx]) continue;
+                                const int dx = px0 + rx; if (dx >= 0 && dx < W) drow[dx] = col;
+                            }
+                        }
+                        // 1:1 bead ornament (its line row index 3 aligns to fy).
+                        const int bx = px0 + 281;          // original cluster x394 - frame x113
+                        const int by = py0 + fy - 3;
+                        for (int yy = 0; yy < kBeadH; ++yy) {
+                            const int Y = by + yy; if (Y < 0 || Y >= H) continue;
+                            std::uint32_t* drow = scratch.data() + (std::size_t)Y * W;
+                            for (int xx = 0; xx < kBeadW; ++xx) {
+                                const std::uint32_t px = kBeadPx[yy * kBeadW + xx];
+                                if (!px) continue;
+                                const int X = bx + xx; if (X >= 0 && X < W) drow[X] = px;
+                            }
+                        }
+                    }
+                }
+                // Title centered on the GREEN MARBLE BAR. The bar occupies frame-y
+                // 11..41 in _TOOL_TIP_GREEN_BIGGER (measured from the asset; vertical
+                // centre = frame-y 26). Centre the title box on exactly that band so
+                // the text is centred on the bar both horizontally (in the frame) and
+                // vertically (matches the original, whose ink centre is y~145.5).
+                if (haveFont) {
+                    const char* tt = !title.empty() ? title.c_str()
+                                                     : PageTitleFallback(cfg.page);
+                    DrawFontCentered(scratch.data(), W, H, assets.font(), px0, py0 + 11, fw, 31,
+                                     tt, 255, 255, 214);
+                }
+            }
+        }
+
         shim::MouseState ms{};
         plat.getMouse(ms);
         res.hoveredRow = rowAt(ms.x, ms.y);
 
         if (haveAssets) {
-            // ---- 1:1 view: parchment panel + sliders + title + buttons -----
-            // Parchment body panel: _TOOL_TIP_BIG shape0 (475x301) placed in the
-            // body window. The two _TOOL_TIP_BIG+1 trim sprites bracket the rows.
-            if (const render::DecodedShape* parch = assets.SpriteByName("_TOOL_TIP_BIG", 0)) {
-                Blit(scratch.data(), W, H, *parch,
-                     L.win1ScrX - 24, L.win1ScrY - 24);
-            }
-            if (const render::DecodedShape* trim = assets.SpriteByName("_TOOL_TIP_BIG", 1)) {
-                Blit(scratch.data(), W, H, *trim, L.win1ScrX + L.g.parchX, L.win1ScrY + L.g.parchY0);
-                Blit(scratch.data(), W, H, *trim, L.win1ScrX + L.g.parchX, L.win1ScrY + L.g.parchY1);
+            // ---- 1:1 view: panel + sliders + title + buttons -----
+            // The _TOOL_TIP_BIG parchment is the IN-GAME options body; the main-menu
+            // options uses the dark WIN0 fill drawn above (no parchment).
+            if (cfg.inGame) {
+                if (const render::DecodedShape* parch = assets.SpriteByName("_TOOL_TIP_BIG", 0)) {
+                    Blit(scratch.data(), W, H, *parch,
+                         L.win1ScrX - 24, L.win1ScrY - 24);
+                }
+                if (const render::DecodedShape* trim = assets.SpriteByName("_TOOL_TIP_BIG", 1)) {
+                    Blit(scratch.data(), W, H, *trim, L.win1ScrX + L.g.parchX, L.win1ScrY + L.g.parchY0);
+                    Blit(scratch.data(), W, H, *trim, L.win1ScrX + L.g.parchX, L.win1ScrY + L.g.parchY1);
+                }
             }
 
-            // Title (centered in the title band above the body window).
-            const std::string& titleStr = !title.empty() ? title : std::string();
-            const char* titleC = !titleStr.empty() ? titleStr.c_str() : PageTitleFallback(cfg.page);
-            const int titleY = L.oy + L.g.win0Y + 24;
-            if (haveFont)
-                DrawFontCentered(scratch.data(), W, H, assets.font(),
-                                 L.ox + L.g.win0X, titleY, L.g.win0W, 24,
-                                 titleC, 255, 226, 150);
-            else
-                DrawLabel(tgt.surf, L.ox + L.g.win0X + L.g.win0W / 2 - 40, titleY, titleC, 255, 226, 150);
+            // Title: the main-menu path draws it in the green title bar above; the
+            // in-game (pause) path draws it here in the body band.
+            if (cfg.inGame) {
+                const std::string& titleStr = !title.empty() ? title : std::string();
+                const char* titleC = !titleStr.empty() ? titleStr.c_str() : PageTitleFallback(cfg.page);
+                const int titleY = L.oy + L.g.win0Y + 24;
+                // Center on the PANEL center, not within win0W: GeomFor stores win0W/win0H
+                // swapped (win0W=449 is really the panel HEIGHT), so centering within it
+                // put the title ~64px left of center. The panel is screen-centered, so
+                // center the title on the framebuffer center.
+                if (haveFont)
+                    DrawFontCentered(scratch.data(), W, H, assets.font(),
+                                     0, titleY, W, 24, titleC, 255, 226, 150);
+                else
+                    DrawLabel(tgt.surf, W / 2 - 40, titleY, titleC, 255, 226, 150);
+            }
 
             // Rows. EVERY options control is the SAME gold horizontal slider widget
             // (type 'E'), rendered by the 1:1 reconstruction of the engine draw
@@ -940,6 +1132,17 @@ OptionsResult RunOptionsScreen(shim::IGraphicsDevice& device, shim::IPlatform& p
             if (canHov) Outline(scratch.data(), W, H, L.cancelX - 2, L.cancelY - 2, L.cancelW + 4, L.cancelH + 4, 0xFFFFFF00u);
             DrawLabel(tgt.surf, L.okX + 12, L.okY + 10, "OK", 255, 255, 255);
             DrawLabel(tgt.surf, L.cancelX + 8, L.cancelY + 10, "Cancel", 255, 255, 255);
+        }
+
+        // ---- mouse cursor: the game's leather-hand pointer (_MOUSE_CURSOR), not
+        // the Windows arrow. The main menu hides the OS cursor and blits this each
+        // frame; the options screen must do the same or the cursor "changes to the
+        // default Windows cursor" on entry. Hotspot (2,1) and the press dip match
+        // native_main_menu's cursor model exactly.
+        if (const render::DecodedShape* cur = assets.cursor()) {
+            const int pdx = ms.left ? -1 : 0;
+            const int pdy = ms.left ?  1 : 0;
+            BlitDecodedSprite(&tgt.surf, ms.x - 2 + pdx, ms.y - 1 + pdy, *cur);
         }
 
         MaybeDump(scratch.data(), W, H);

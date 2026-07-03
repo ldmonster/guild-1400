@@ -131,7 +131,9 @@ struct LoadGameScreenResult {
 // alignment is irrelevant; English fallbacks otherwise).
 struct LoadGameTexts {
     std::string title;     // _OPTIONEN_MENUE_LOAD+0                    (rich id 0x1864)
-    std::string emptyFmt;  // _OPTIONEN_LOAD_GAME_SLOT_INFO_LEER+0/+1   (dword_8C9A04 fmt)
+    std::string emptyFmt;  // _OPTIONEN_LOAD_GAME_SLOT_INFO_LEER (the %i name row)
+    std::string emptyInfo; // _OPTIONEN_LOAD_GAME_SLOT_INFO_LEER (the field labels; RAW,
+                           // "Город:$2T$AДата:$2T$A..." — $A = line break)
     std::string slotInfo0; // _OPTIONEN_LOAD_GAME_SLOT_INFO+0          (occupied row caption)
     std::string slotInfo1; // _OPTIONEN_LOAD_GAME_SLOT_INFO+1          (occupied row caption)
     std::string confirm;   // _OPTIONEN_LOAD_GAME_SICHERHEITS_ABFRAGE+0 (box 257 text)
@@ -165,7 +167,10 @@ struct LoadGameScreenLayout {
     int rowH;                      // 130 (AddChildWindow y-stride @0x569e92)
     int rowX, rowW;                // row left + width (screen px)
     int thumbW, thumbH, nameDX;    // 160x120 thumbnail + name x-offset (168)
-    int scrollX, scrollW;          // scrollbar track (Hud_BuildSliderPanel x=532)
+    int scrollX, scrollW;          // (legacy scrollbar track — unused; see buttons)
+    // Scroll up/down buttons at the bottom-right of the panel (the original's
+    // Hud_BuildSliderPanel arrows + the count label between them). No scrollbar.
+    int btnX, upBtnY, downBtnY, btnW, btnH, countY;
     int backX, backY, backW, backH;
     int ox, oy;                    // center-translate offset ((W-800)/2,(H-600)/2)
     int W, H;                      // framebuffer
@@ -174,6 +179,8 @@ struct LoadGameScreenLayout {
     void RowRect(int i, int scroll, int& rx, int& ry, int& rw, int& rh) const; // i:0..15
     // 0..15 = slot row, kLoadGameSlotCount (16) = the back row, -1 = none.
     int  HitRow(int mx, int my, int scroll) const;
+    // Scroll buttons: -1 none, 0 = up (scroll toward top), 1 = down.
+    int  HitScrollBtn(int mx, int my) const;
     // Total scrollable content height (16 rows) and the max scroll offset.
     int  contentH() const { return kLoadGameSlotCount * rowH; }
     int  maxScroll() const { int m = contentH() - viewH; return m > 0 ? m : 0; }

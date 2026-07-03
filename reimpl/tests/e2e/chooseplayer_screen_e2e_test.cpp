@@ -31,13 +31,13 @@ struct FramePlatform : shim::IPlatform {
 
 TEST(ChoosePlayerScreen, ScriptedWalkthroughCommits) {
     shim::MemoryGraphicsDevice dev; CHECK(dev.init(800, 600, 32, false));
-    // Row/cell hit coords matching the screen's 800x600 layout (panel 128,72,441,490).
-    const int rowX=168, rowMidX=348, rowsY=192, rowH=46;       // radio rows
+    // Row/cell hit coords matching the screen's 800x600 layout: parchment px=(800-490)/2=155,
+    // py=72, pw=490; radio rows y0=py+170, rowH=46, centred (rowMidX=cx=400); wappen gx=px+30.
+    const int rowMidX=400, rowsY=72+170, rowH=46;              // radio rows
     auto rowY=[&](int r){ return rowsY + r*rowH + (rowH-8)/2; };
-    const int gx=158, gy=202, cw=95, chh=70;                   // wappen cells (4 cols)
+    const int gx=185, gy=202, cw=107, chh=70;                  // wappen cells (4 cols)
     auto cellX=[&](int i){ return gx+(i%4)*cw+(cw-8)/2; };
     auto cellY=[&](int i){ return gy+(i/4)*(chh+10)+chh/2; };
-    (void)rowX;
 
     FramePlatform plat;
     plat.frames = {

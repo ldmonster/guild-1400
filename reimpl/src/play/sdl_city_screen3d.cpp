@@ -3,12 +3,15 @@
 
 #include "io/archive_mount.h"
 #include "play/city_info.h"
+#include "play/menu_assets.h"
 #include "play/real_texture_source.h"
 #include "play/scene_view.h"
 #include "render/font.h"
 #include "render/perf_overlay.h"
 #include "render/surface.h"
+#include "render/bmp.h"
 #include "render/text_raster.h"
+#include "render/text_cp1251.h"
 #include "render/types.h"
 #include "shim/IFileSystem.h"
 #include "shim/IGraphicsDevice.h"
@@ -18,6 +21,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -82,6 +87,81 @@ void BlitSurfaceToDevice(render::Surface* src, shim::IGraphicsDevice& dev) {
 }
 
 } // namespace
+
+// Render ONE settled frame of the New-Game desk scene (Menu/ChooseCity.ed3 at the A2
+// pick camera) into `outFb` (W x H, 32bpp). No city pick markers / tower / camera
+// flight — just the desk + map, the shared backdrop the New-Game sub-screens (difficulty
+// / history / character) overlay their own parchment form onto. Returns false if the
+// scene/textures/device render are unavailable (caller falls back to a flat backdrop).
+bool RenderNewGameDeskBackdrop(shim::IGraphicsDevice& device, const std::string& gameDir,
+                               int W, int H, render::Surface* outFb, const char* camDummy) {
+    if (gameDir.empty() || !outFb) return false;
+    shim::DiskFileSystem fs(gameDir);
+    io::ArchiveMount scenes, objects;
+    std::vector<u8> ed3;
+    if (!scenes.Mount(&fs, "Resources/scenes.BIN", /*caseInsensitive=*/true) ||
+        !objects.Mount(&fs, "Resources/Objects.BIN", /*caseInsensitive=*/true) ||
+        !scenes.OpenMember("Menu/ChooseCity.ed3", ed3) || ed3.empty())
+        return false;
+    std::vector<SceneObjectInst> scene = ParseSceneObjects(ed3.data(), ed3.size());
+    if (scene.size() < 5) return false;
+
+    RealTextureSource tex;
+    const bool haveTex = fs.exists("Resources/Textures.BIN") &&
+                         tex.Mount(&fs, "Resources/Textures.BIN");
+
+    PerspCamera cam;                                   // settled camera (A2 = map desk, B2 = shelf)
+    if (const char* e = std::getenv("GUILD_CAM_DUMMY")) camDummy = e;  // investigation override
+    if (!BuildSceneCamera(ed3.data(), ed3.size(), scene, camDummy, cam) &&
+        !BuildSceneCamera(ed3.data(), ed3.size(), scene, "dummy_A1", cam)) {
+        cam.eye[0] = -90; cam.eye[1] = 78; cam.eye[2] = 172;
+        cam.target[0] = -90; cam.target[1] = 40; cam.target[2] = 240;
+        cam.engineProjection = true;
+    }
+
+    PerspRenderOptions ropt;
+    ropt.clearFirst = true; ropt.clearR = 0x10; ropt.clearG = 0x12; ropt.clearB = 0x20;
+    {
+        render::SkyAmbient amb = ComputeSceneAmbient(ed3.data(), ed3.size(), 0, 0.0f, 1.0f);
+        ropt.bakedLighting = true;
+        ropt.ambientRGB[0] = amb.r; ropt.ambientRGB[1] = amb.g; ropt.ambientRGB[2] = amb.b;
+    }
+    ropt.shadows = true; ropt.bilinear = true; ropt.backfaceCull = 1;
+
+    constexpr int kSS = 2;
+    const int W2 = W * kSS, H2 = H * kSS;
+    render::Surface* ssFb = render::SurfaceCreate(W2, H2, 32);
+    render::Scene3DDrawList dl =
+        BuildSceneDrawList(scene, objects, cam, W2, H2, ropt, haveTex ? &tex : nullptr);
+    dl.geometryId = 1;
+    UpdateSceneDrawListCamera(dl, cam, W2, H2);
+    bool ok = true;
+    if (!device.renderScene3D(dl, outFb)) {            // CPU fallback: rasterise 2x -> downsample
+        if (!ssFb) { ok = false; }
+        else {
+            render::RasterizeDrawList(dl, ssFb);
+            for (int y = 0; y < H; ++y) {
+                auto* d = reinterpret_cast<std::uint32_t*>(
+                    static_cast<std::uint8_t*>(outFb->pixels) + (std::size_t)y * outFb->pitch);
+                for (int x = 0; x < W; ++x) {
+                    int r = 0, g = 0, b = 0;
+                    for (int j = 0; j < kSS; ++j) {
+                        auto* s = reinterpret_cast<std::uint32_t*>(
+                            static_cast<std::uint8_t*>(ssFb->pixels) + (std::size_t)(y * kSS + j) * ssFb->pitch);
+                        for (int i = 0; i < kSS; ++i) {
+                            const std::uint32_t p = s[x * kSS + i];
+                            r += (p >> 16) & 0xFF; g += (p >> 8) & 0xFF; b += p & 0xFF;
+                        }
+                    }
+                    const int n = kSS * kSS;
+                    d[x] = 0xFF000000u | ((std::uint32_t)(r / n) << 16) | ((std::uint32_t)(g / n) << 8) | (b / n);
+                }
+            }
+        }
+    }
+    if (ssFb) render::SurfaceDestroy(ssFb);
+    return ok;
+}
 
 CityScreenResult RunCityScreen3D(shim::IGraphicsDevice& device, shim::IPlatform& plat,
                                  const CityScreenConfig& cfg) {
@@ -173,6 +253,10 @@ CityScreenResult RunCityScreen3D(shim::IGraphicsDevice& device, shim::IPlatform&
     cityText.Load(&fs);
     CityInfoGfx cityGfx;
     cityGfx.Load(&fs);   // gilde.gfx parchment panel + crest + _AUSWAHL button
+    // The baked-gold _FONT (the main-menu button font) for the title + info + button.
+    MenuFont menuFont;
+    if (!cfg.gameDir.empty()) menuFont.Load(fs, "gfx/gilde.gfx", "_FONT");
+    const MenuFont* mfp = menuFont.loaded() ? &menuFont : nullptr;
 
     PerspRenderOptions ropt;
     ropt.clearFirst = true; ropt.clearR = 0x10; ropt.clearG = 0x12; ropt.clearB = 0x20;
@@ -315,12 +399,69 @@ CityScreenResult RunCityScreen3D(shim::IGraphicsDevice& device, shim::IPlatform&
         const int infoCity = (hovCity >= 0) ? hovCity : selected;
         if (infoCity >= 0 && infoCity < (int)cfg.cities.size())
             infoLayout = RenderCityInfoWindow(fb, W, H, cityText, cityGfx,
-                                              cfg.cities[infoCity].first);
+                                              cfg.cities[infoCity].first, mfp);
+
+        // Top title bar — a DARK semi-transparent box (same width/x as the bottom
+        // info box: 548 wide at x=120, frida) with the screen title (_M0_STADT+0)
+        // centered in GOLD (the same gold as the button captions).
+        {
+            const float sx = W / 800.0f, sy = H / 600.0f;
+            const int bx0 = (int)(120 * sx), by0 = (int)(8 * sy);
+            const int bw0 = (int)(548 * sx), bh0 = (int)(38 * sy);
+            const int rw = fb->widthPx ? fb->widthPx : fb->width;
+            for (int yy = by0; yy < by0 + bh0; ++yy) {
+                if (yy < 0 || yy >= fb->height) continue;
+                auto* row = reinterpret_cast<std::uint32_t*>(
+                    static_cast<std::uint8_t*>(fb->pixels) + (std::size_t)yy * fb->pitch);
+                for (int xx = bx0; xx < bx0 + bw0; ++xx) {
+                    if (xx < 0 || xx >= rw) continue;
+                    const std::uint32_t c = row[xx];
+                    const int r = (((c >> 16) & 0xFF) * 72) / 256 + (18 * 184) / 256;
+                    const int g = (((c >> 8)  & 0xFF) * 72) / 256 + (14 * 184) / 256;
+                    const int b = (((c)       & 0xFF) * 72) / 256 + (10 * 184) / 256;
+                    row[xx] = 0xFF000000u | ((std::uint32_t)r << 16) | ((std::uint32_t)g << 8) | (std::uint32_t)b;
+                }
+            }
+            const std::string title = cityText.ScreenTitle();
+            if (!title.empty()) {
+                if (mfp) {
+                    const int tw = mfp->MeasureWidth(title.c_str());
+                    const int th = mfp->lineHeight() > 0 ? mfp->lineHeight() : 17;
+                    mfp->DrawText(reinterpret_cast<std::uint32_t*>(fb->pixels),
+                                  fb->widthPx ? fb->widthPx : fb->width, fb->height,
+                                  bx0 + (bw0 - tw) / 2, by0 + (bh0 - th) / 2, title.c_str(),
+                                  1, 0, 0, 0, /*modulate=*/false);   // baked gold
+                } else {
+                    const int estW = (int)title.size() * 6;
+                    render::DrawTextCp1251(fb, bx0 + (bw0 - estW) / 2, by0 + (bh0 - 7) / 2, title.c_str(), 235, 200, 100);
+                }
+            }
+        }
 
         // In-game performance overlay (Steam-style FPS/frametime), composited last so
         // it sits on top of the scene + HUD. Off unless GUILD_PERF_OVERLAY / F11.
         render::GlobalPerfOverlay().Frame(plat.timeMs());
         render::GlobalPerfOverlay().Draw(fb);
+
+        // One-shot framebuffer dump for visual verification (GUILD_CITY_DUMP=path).
+        // Fires only after GUILD_CITY_DUMP_AT frames (default 300 ≈ 5 s at 60 fps),
+        // so the intro/camera animation has played out before the snapshot.
+        if (const char* mp = std::getenv("GUILD_CITY_DUMP")) {
+            static bool s_dumped = false;
+            int dumpAt = 300;
+            if (const char* da = std::getenv("GUILD_CITY_DUMP_AT")) { int v = std::atoi(da); if (v > 0) dumpAt = v; }
+            if (!s_dumped && res.framesPresented >= dumpAt) {
+                s_dumped = true;
+                std::vector<std::uint8_t> rgb((std::size_t)W * H * 3);
+                const std::uint32_t* px = reinterpret_cast<const std::uint32_t*>(fb->pixels);
+                for (std::size_t i = 0; i < (std::size_t)W * H; ++i) {
+                    const std::uint32_t c = px[i];
+                    rgb[i*3] = (c>>16)&0xFF; rgb[i*3+1] = (c>>8)&0xFF; rgb[i*3+2] = c&0xFF;
+                }
+                std::vector<std::uint8_t> bmp = render::BmpSave24Bit(W, H, rgb.data());
+                if (FILE* f = std::fopen(mp, "wb")) { std::fwrite(bmp.data(), 1, bmp.size(), f); std::fclose(f); }
+            }
+        }
 
         BlitSurfaceToDevice(fb, device);
         device.present();

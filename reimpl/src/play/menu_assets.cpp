@@ -171,12 +171,14 @@ int MenuFont::MeasureWidth(const char* s) const {
 }
 
 void MenuFont::DrawText(u32* dst, int W, int H, int x, int y, const char* s,
-                        int scale, u8 r, u8 g, u8 b) const {
+                        int scale, u8 r, u8 g, u8 b, bool modulate) const {
     // VIBE_Property_Set @0x4159dc pen advance, 1:1 (no clip-right bound here; the
-    // menu labels always fit the button). Glyph bitmaps recoloured to (r,g,b).
+    // menu labels always fit the button). The _FONT (record 66) glyphs are BAKED
+    // gold with anti-aliasing (pixel colours run dark-gold -> cream), so we blit
+    // each glyph pixel's NATIVE colour — recolouring to a flat (r,g,b) would lose
+    // both the gold tint AND the AA (every edge pixel snaps to solid), which is the
+    // blocky/white look. r,g,b are kept for the API but unused for this baked font.
     if (!s || !*s || !dst || scale < 1) return;
-    const std::uint32_t col = 0xFF000000u | ((std::uint32_t)r << 16) |
-                              ((std::uint32_t)g << 8) | (std::uint32_t)b;
     const unsigned char* p = (const unsigned char*)s;
     const int len = (int)std::strlen(s);
     int pen = x;  // design-space pen (already scaled in by the caller's x)
@@ -194,13 +196,34 @@ void MenuFont::DrawText(u32* dst, int W, int H, int x, int y, const char* s,
                     for (int sy = 0; sy < sh.height; ++sy) {
                         const std::uint32_t* srow = sh.argb.data() + (std::size_t)sy * sh.width;
                         for (int sx = 0; sx < sh.width; ++sx) {
-                            if ((srow[sx] & 0xFF000000u) == 0u) continue;  // transparent
+                            const std::uint32_t gp = srow[sx];
+                            if ((gp & 0xFF000000u) == 0u) continue;  // transparent
+                            // Modulate mode: RECOLOUR to a flat (r,g,b) but keep the
+                            // gold AA by deriving per-pixel coverage from the glyph's
+                            // brightness (core = solid colour, dim edges blend with the
+                            // background). Otherwise blit the native baked-gold pixel.
+                            int cov = 255;
+                            if (modulate) {
+                                // Coverage = the glyph pixel's brightness (the baked-gold
+                                // luminance IS the original glyph's alpha). No saturation
+                                // boost, so the strokes stay THIN (only bright stroke cores
+                                // go fully to the target colour; edges blend with the bg).
+                                const int gr = (gp >> 16) & 0xFF, gg = (gp >> 8) & 0xFF, gb = gp & 0xFF;
+                                int mx = gr > gg ? gr : gg; if (gb > mx) mx = gb;
+                                cov = mx;
+                            }
                             for (int dy = 0; dy < scale; ++dy)
                                 for (int dx = 0; dx < scale; ++dx) {
                                     const int X = pen + sx * scale + dx;
                                     const int Y = y + sy * scale + dy;
-                                    if (X >= 0 && X < W && Y >= 0 && Y < H)
-                                        dst[(std::size_t)Y * W + X] = col;
+                                    if (X < 0 || X >= W || Y < 0 || Y >= H) continue;
+                                    std::uint32_t& d = dst[(std::size_t)Y * W + X];
+                                    if (!modulate) { d = gp; continue; }
+                                    const int dr = (d >> 16) & 0xFF, dg = (d >> 8) & 0xFF, db = d & 0xFF;
+                                    const int orr = (r * cov + dr * (255 - cov)) / 255;
+                                    const int og  = (g * cov + dg * (255 - cov)) / 255;
+                                    const int ob  = (b * cov + db * (255 - cov)) / 255;
+                                    d = 0xFF000000u | ((std::uint32_t)orr << 16) | ((std::uint32_t)og << 8) | (std::uint32_t)ob;
                                 }
                         }
                     }
@@ -308,6 +331,8 @@ bool MenuAssets::Load(shim::IFileSystem& fs, const char* archivePath, const char
     // Decode the real `_FONT` (gfx record 66) for label text. Best effort: an
     // absent font leaves font_.loaded()==false and the caller falls back.
     font_.Load(fs, archivePath, "_FONT");
+    // The small font `_FONT+1` (record 67) — slider value/option text uses it.
+    smallFont_.Load(fs, archivePath, "_FONT+1");
 
     loaded_ = true;
     return true;

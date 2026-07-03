@@ -151,15 +151,18 @@ TEST(OneOneScreensW14, ChooseHistoryRowToFlagPinned) {
 
 // ---------------------------------------------------------------------------
 // 5) Difficulty screen form window — VIBE_Menu_ChooseCharacterIntroVariant
-//    @0x52e4e0: form menu\choosecharacter_intro window (128,72,441,490).
-//    At native 800x600 the layout panel rect passes through unchanged.
+//    @0x52e4e0: form menu\choosecharacter_intro window. frida Window_Create ground
+//    truth (this build): (x=128,y=72,w=490,h=441). The form is center-translated, so
+//    the parchment FORM rect is x=(800-490)/2=155, y=72, 490x441 (matches the measured
+//    on-screen parchment sheet). The 6 buttons + title sit on it at screen centre.
 // ---------------------------------------------------------------------------
 TEST(OneOneScreensW14, CharIntroFormWindowPinned) {
     play::CharIntroLayout L = play::CharIntroComputeLayout(800, 600, /*rowCount=*/6);
-    CHECK_EQ(L.px, 128);
+    CHECK_EQ(L.pw, 490);
+    CHECK_EQ(L.ph, 441);
+    CHECK_EQ(L.px, 155);       // center-translated: (800-490)/2
     CHECK_EQ(L.py, 72);
-    CHECK_EQ(L.pw, 441);
-    CHECK_EQ(L.ph, 490);
+    CHECK_EQ(L.cx, 400);       // buttons + title centre on screen
     CHECK_EQ(L.rowCount, 6);   // five difficulty levels + the back row
 }
 

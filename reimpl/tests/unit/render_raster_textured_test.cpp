@@ -73,10 +73,13 @@ TEST(RenderRasterTex, InterpolateEdgeRgbzShortPath) {
     rs.vx[1] = 4 << 16;  rs.vy[1] = 0x8000;  rs.vu[1] = 2 << 16; rs.vv[1] = 1 << 16;
     InterpolateEdgeRgbz(rs, 0, 1);
     // recip = 0x40000000/0x8000 = 0x8000. step = (recip*num)>>14.
-    long recip = 0x40000000L / 0x8000L;
-    CHECK_EQ(rs.xLeftStep, (int)(((long long)(recip * (4 << 16))) >> 14));
-    CHECK_EQ(rs.uLeftStep, (int)(((long long)(recip * (2 << 16))) >> 14));
-    CHECK_EQ(rs.vLeftStep, (int)(((long long)(recip * (1 << 16))) >> 14));
+    // The product must be computed in 64-bit (recip*(4<<16) = 2^33 overflows a
+    // 32-bit `long` on LLP64 Windows; the implementation multiplies in i64
+    // exactly like the original's edx:eax imul). PORTABILITY fix.
+    long long recip = 0x40000000LL / 0x8000LL;
+    CHECK_EQ(rs.xLeftStep, (int)((recip * (long long)(4 << 16)) >> 14));
+    CHECK_EQ(rs.uLeftStep, (int)((recip * (long long)(2 << 16)) >> 14));
+    CHECK_EQ(rs.vLeftStep, (int)((recip * (long long)(1 << 16)) >> 14));
 }
 
 // --- InterpolateEdgeRgbz: nonzero sub-scanline accumulator advance ----------

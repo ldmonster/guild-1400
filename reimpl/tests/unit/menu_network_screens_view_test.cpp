@@ -70,16 +70,18 @@ TEST(NetView, HubLayoutHeadless) {
 
     CHECK(!L.usedArt);                 // no assets -> flat fallback
     CHECK_EQ(L.buttonCount, 3);        // host / search / profile (decompile 0x529a64)
-    // window rect == native form (800x600 => ox=oy=0)
-    CHECK_EQ(L.window.x, kHubWinX);
-    CHECK_EQ(L.window.y, kHubWinY);
-    CHECK_EQ(L.window.w, kHubWinW);
-    // buttons stacked, equal width, inside the window, increasing y
+    // window rect == the centered parchment panel (432x256 @ y168; 800x600 => ox=oy=0).
+    // Matches the original: _PERGAMENT_KARTE sheet centered, title + buttons on it.
+    constexpr int kPanelX = (800 - 400) / 2, kPanelY = 160, kPanelW = 400;
+    CHECK_EQ(L.window.x, kPanelX);
+    CHECK_EQ(L.window.y, kPanelY);
+    CHECK_EQ(L.window.w, kPanelW);
+    // buttons stacked, equal width, inside the panel, increasing y
     for (int i = 0; i < L.buttonCount; ++i) {
         CHECK(L.buttons[i].w > 0);
         CHECK_EQ(L.buttons[i].h, 33);  // _BUTTON_RED native height
-        CHECK(L.buttons[i].x >= kHubWinX);
-        CHECK(L.buttons[i].x + L.buttons[i].w <= kHubWinX + kHubWinW);
+        CHECK(L.buttons[i].x >= kPanelX);
+        CHECK(L.buttons[i].x + L.buttons[i].w <= kPanelX + kPanelW);
         if (i > 0) CHECK(L.buttons[i].y > L.buttons[i - 1].y);
     }
     // all buttons share one uniform width (main-menu equalization)
@@ -115,22 +117,23 @@ TEST(NetView, SearchLayoutHeadless) {
     play::NetSearchLayout L = play::RenderNetworkSearchView(fb.data(), ctx, servers);
 
     CHECK(!L.usedArt);
-    CHECK_EQ(L.window.x, kSrchWinX);
-    CHECK_EQ(L.window.y, kSrchWinY);
-    CHECK_EQ(L.window.w, kSrchWinW);
+    // The green frame is centered (_TOOL_TIP_GREEN_BIGGER, 574 wide): x=(800-574)/2.
+    CHECK_EQ(L.window.x, (800 - 574) / 2);
+    CHECK_EQ(L.window.y, 120);
     CHECK_EQ(L.rowCount, 3);
-    // rows stacked top->bottom, inside the window
+    // rows stacked top->bottom, inside the frame
     for (int i = 0; i < L.rowCount; ++i) {
-        CHECK(L.rows[i].x >= kSrchWinX);
+        CHECK(L.rows[i].x >= L.window.x);
         if (i > 0) CHECK(L.rows[i].y > L.rows[i - 1].y);
     }
-    // four-button row near the bottom, left->right
+    // four-button row left->right, INSIDE the frame's dark interior (between borders)
     CHECK(L.connectButton.x < L.refreshButton.x);
     CHECK(L.refreshButton.x < L.directButton.x);
     CHECK(L.directButton.x < L.cancelButton.x);
-    CHECK(L.connectButton.y >= kSrchWinY + kSrchWinH - 60);
+    CHECK(L.connectButton.x >= L.window.x);
+    CHECK(L.cancelButton.x + L.cancelButton.w <= L.window.x + 574);
+    CHECK(L.connectButton.y < kSrchWinY + kSrchWinH);   // inside, not off-screen
     CHECK_EQ(L.connectButton.h, 33);
-    CHECK_EQ(L.connectButton.w, L.cancelButton.w);  // uniform width
 }
 
 // Center-translate: a 1024x768 framebuffer offsets every rect by ((W-800)/2,(H-600)/2)

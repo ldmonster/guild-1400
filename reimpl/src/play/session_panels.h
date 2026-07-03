@@ -122,6 +122,11 @@ struct SessionPanelsInputs {
 
     // Optional localized strings (text ids resolve to real strings when set).
     const gui::text::TextDb* textDb = nullptr;
+    // The selected building's scene TYPE NAME (e.g. "SCHMUGGLERLOCH" from the
+    // owner-matched node's gb_<type> model). When set, the building panel name
+    // resolves through the localized keyed record "_GEB_<TYPE>_NAME+0" (the
+    // textbin key namespace) — the engine's own name text for the type.
+    const char* selBuildingTypeName = nullptr;
 };
 
 // Observable per-frame results.
@@ -159,8 +164,25 @@ public:
         int pad            = 3;    // box inner padding
         int panelX = 4, panelY = 200;        // info-panel box top-left
         int panelW = 200, panelH = 120;      // info-panel box size
+        // Draw the grey fill + outline behind the panel content. With the real
+        // sidebar chrome the panel sits in the sidebar CARD slot (the stone art
+        // IS the background), so the box is skipped (content only).
+        bool drawBox = true;
     };
     Layout layout;
+
+    // Optional card-text renderer (the sidebar-card small gold face). When set
+    // and drawBox is off, panel text lines draw through this hook centred at
+    // (cx, y) instead of the built-in 5x7 debug face. Returns the drawn width
+    // (0 = declined -> fall back to the 5x7 face).
+    struct CardTextHook {
+        // Draw `text` centred at (cx, y), word-wrapped to `maxW` px. Returns
+        // the number of lines drawn (0 = declined -> 5x7 fallback).
+        int (*draw)(render::Surface& s, int cx, int y, int maxW,
+                    const char* text, void* user) = nullptr;
+        void* user = nullptr;
+    };
+    CardTextHook cardText;
 
     SessionPanels();
     ~SessionPanels();   // out-of-line (vector<Op> with nested Op)

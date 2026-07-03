@@ -256,6 +256,17 @@ public:
     // slot index so repeated calls (per tile) don't re-scan the cache.
     const Texture* LoadSlot(int slot);
 
+    // SEASON (VIBE_GameTime_GetSeasonFromDay @0x58339c: day % 4 -> 0 spring,
+    // 1 summer, 2 autumn, 3 winter). The shipped _DYNAMIC/Boden set carries
+    // per-season floor variants named <slot>_fruehling / <base> / <slot>_herbst
+    // / <slot>_snow, each optionally with a 256x256 "_high" detail layer (the
+    // live original at spring binds the Wiese_fruehling family — the greener,
+    // finer grass of the day capture). LoadSlot tries, in order:
+    //   <name><season>_high, <name><season>, <name>_high, <name>
+    // A season change invalidates the resolved slots (textures re-resolve).
+    void SetSeason(int season);
+    int  season() const { return season_; }
+
     // The getTileTexture hook body: a tile's dominant type byte (the per-cell
     // texture id, 0..7) -> the loaded slot texture. typeByte's high bit (0x80,
     // "hole/unlit") yields nullptr (untextured), matching ComputeTileIllumination's
@@ -273,6 +284,7 @@ private:
     TextureAssetCache* cache_ = nullptr;
     int   slotRecord_[8];                       // resolved slot index cache (-2 = unknown)
     bool  triedSlot_[8] = {};                    // slot was attempted (avoid re-load)
+    int   season_ = 0;                           // day%4 (0 spring .. 3 winter)
 };
 
 // Process-active resolver the GetTileTextureHook trampoline reads (the terrain

@@ -1,4 +1,6 @@
 #include "play/terrain_render.h"
+#include <map>
+#include <memory>
 
 #include "render/terrain_render.h"  // SelectTileMeshLod, TileSubdivCount, Floor LOD
 #include "render/raster.h"          // RasterizeTexturedTriangle, RasterVertex
@@ -405,7 +407,21 @@ i32 GroundAlwaysRebuild(render::TerrainFloor*) { return 1; }
 // that, single ground render at a time — the same pattern as g_groundFrustum).
 struct GroundTexState {
     const GroundTexBinder* binder = nullptr;  // CityView3D's per-type record source
-    const float*           uvTable = nullptr; // flt_13FE540 (24 floats)
+    const float*           uvTable = nullptr; // flt_13FE540 (64 x 24 floats)
+    // Per-tile poly->UV-record ranges: the walk stamps each quad poly's OWN
+    // corner UVs (subTexId record) into the tile's polyUv array; the span
+    // resolves the poly's slot by pointer range. Stitch/blank slots (all-zero
+    // record) fall back to the parity + record-0 pick.
+    struct TileUvRange {
+        const render::Polygon* base = nullptr;
+        const render::Polygon* end = nullptr;
+        const float* uv = nullptr;
+    };
+    TileUvRange tileUv[64];
+    int tileUvCount = 0;
+    // (The interim ambient tint/gain approximation was REPLACED by the
+    // engine's own per-vertex RGB terrain light — BuildTileVertex's
+    // scale*l + ambient triple, consumed as the D3D 2x modulate in the span.)
     // WAVE-7 W7-WATERTEX: the loaded EF_WASS water texture record (WaterMesh+4 handle,
     // null == headless / white default). A water poly (flags38 & 0x02, uvZ>0) samples
     // THIS record + the scroll (poly.uvX/uvY = mesh[82]/[83]) instead of a ground slot.
@@ -415,6 +431,177 @@ struct GroundTexState {
     const render::FogState* fog = nullptr;
 };
 GroundTexState g_groundTex{};
+
+// ===========================================================================
+// TRANSITION TILE BAKE — gilde.exe VIBE_TextureCache_GetOrBuildTile @0x5ba1e8
+// (live disassembly). The engine keys its tile-texture cache on the WHOLE
+// NEIGHBOURHOOD BLOCK of tile-type bytes (the 0x5ba25e loop copies the
+// (lod+1)^2 type block into the cache key at entry+0x23), creates an empty
+// texture record for a new pattern (0x5db928) and lazily BAKES it by
+// compositing the neighbour slot textures through the filter-weight quad
+// (entry+0x40 flag; the 0x5ba37c bake driver renders with the 0x13fd4c0
+// weight quad + ComputeFilterWeights). Road->grass transitions ARE these
+// baked blends.
+//
+// HOST REALISATION (documented approximation of the bake kernel): a quad
+// whose four corner cells carry mixed types bakes a bilinear corner-weight
+// composite of the four slot textures (w00/w10/w01/w11 per texel), quantised
+// to a 256-colour palette (popularity pick + nearest map — the engine bakes
+// through its renderer + the @0x603180 octree quantiser, a named gap). The
+// baked record carries paletteStore, so the ground binder's existing
+// palette565() ramp builder serves it unchanged.
+// ===========================================================================
+struct BakedTileCache {
+    std::map<u64, int> byKey;                       // 3x3 type-block key -> index
+    std::vector<std::unique_ptr<render::Texture>> recs;
+};
+BakedTileCache g_bakeCache;
+
+const render::Texture* BakedTileRecord(int idx) {
+    if (idx < 0 || idx >= (int)g_bakeCache.recs.size())
+        return nullptr;
+    return g_bakeCache.recs[(std::size_t)idx].get();
+}
+
+// Bake the transition tile for cell (u,v) from its 3x3 neighbourhood type
+// block `blk` (row-major, blk[4] = the cell itself) — the same block the
+// engine keys its cache on (@0x5ba25e). KERNEL: each quad VERTEX takes the
+// average of its four adjacent cells' types (vertex weight per type =
+// adjacent-count/4), bilinear across the quad — half-tile-wide bands centred
+// on the cell boundaries, continuous across quads.
+int BakeTransitionTile(const u8 blk[9]) {
+    u64 key = 1469598103934665603ull;               // FNV-1a 64
+    for (int i = 0; i < 9; ++i) key = (key ^ blk[i]) * 1099511628211ull;
+    auto it = g_bakeCache.byKey.find(key);
+    if (it != g_bakeCache.byKey.end())
+        return it->second;
+
+    const auto& hooks = GetTerrainRenderHooks();
+    if (!hooks.getTileTexture)
+        return -1;
+
+    // Distinct participating types + their textures.
+    u8 types[9];
+    int nTypes = 0;
+    for (int i = 0; i < 9; ++i) {
+        bool seen = false;
+        for (int j = 0; j < nTypes; ++j)
+            if (types[j] == blk[i]) { seen = true; break; }
+        if (!seen) types[nTypes++] = blk[i];
+    }
+    const render::Texture* src[9];
+    for (int j = 0; j < nTypes; ++j) {
+        src[j] = static_cast<const render::Texture*>(
+            hooks.getTileTexture(types[j]));
+        if (!src[j] || src[j]->mipWidth <= 0 || src[j]->texels.empty() ||
+            src[j]->paletteStore.size() < 768)
+            return -1;
+    }
+
+    // EDGE-BAND OVERLAY weights (replaces the corner-bilinear kernel, which
+    // washed the whole cell — a 1-cell road blended 50/50 with grass over its
+    // entire width). Each differing EDGE neighbour feathers IN over the outer
+    // `kBand` of the tile, ramping 0.5 (at the shared edge — continuous with
+    // the neighbour's own mirrored ramp) down to 0; differing DIAGONAL-only
+    // corners ramp radially. The cell's own texture keeps everything else —
+    // road interiors stay pure cobble, exactly the live capture's look.
+    const u8 tOwn = blk[4];
+    const u8 tN = blk[1], tW = blk[3], tE = blk[5], tS = blk[7];
+    const u8 tNW = blk[0], tNE = blk[2], tSW = blk[6], tSE = blk[8];
+    constexpr float kBand = 0.45f;
+    auto ramp = [](float d) {
+        return (d < kBand) ? 0.5f * (1.0f - d / kBand) : 0.0f;
+    };
+
+    int W = src[0]->mipWidth;
+    if (W > 128) W = 128;
+    if (W < 4) W = 4;
+
+    std::vector<u8> rgb((std::size_t)W * W * 3);
+    for (int y = 0; y < W; ++y) {
+        const float fy = (float)y / (float)(W - 1);
+        for (int x = 0; x < W; ++x) {
+            const float fx = (float)x / (float)(W - 1);
+            // Per-type accumulated neighbour weights.
+            float wj[9] = {};
+            auto addW = [&](u8 type, float w) {
+                if (w <= 0.0f || type == tOwn) return;
+                for (int j = 0; j < nTypes; ++j)
+                    if (types[j] == type) { wj[j] += w; return; }
+            };
+            addW(tW, ramp(fx));
+            addW(tE, ramp(1.0f - fx));
+            addW(tN, ramp(fy));
+            addW(tS, ramp(1.0f - fy));
+            // Diagonal-only corners (edges same as own): radial ramp.
+            auto rad = [&](float dx2, float dy2) {
+                return ramp(std::sqrt(dx2 * dx2 + dy2 * dy2));
+            };
+            if (tNW != tOwn && tN == tOwn && tW == tOwn) addW(tNW, rad(fx, fy));
+            if (tNE != tOwn && tN == tOwn && tE == tOwn) addW(tNE, rad(1 - fx, fy));
+            if (tSW != tOwn && tS == tOwn && tW == tOwn) addW(tSW, rad(fx, 1 - fy));
+            if (tSE != tOwn && tS == tOwn && tE == tOwn) addW(tSE, rad(1 - fx, 1 - fy));
+
+            float sum = 0.0f;
+            for (int j = 0; j < nTypes; ++j) sum += wj[j];
+            float own = 1.0f - sum;
+            if (own < 0.0f) {           // clamp + renormalise the neighbours
+                const float inv = 1.0f / sum;
+                for (int j = 0; j < nTypes; ++j) wj[j] *= inv;
+                own = 0.0f;
+            }
+            for (int j = 0; j < nTypes; ++j)
+                if (types[j] == tOwn) { wj[j] += own; break; }
+
+            float r = 0, g = 0, b = 0;
+            for (int j = 0; j < nTypes; ++j) {
+                const float w = wj[j];
+                if (w <= 0.0f) continue;
+                const render::Texture* t = src[j];
+                const int sx = x * t->mipWidth / W;
+                const int sy = y * t->mipWidth / W;
+                const u8 idx =
+                    t->texels[(std::size_t)sy * t->mipWidth + sx];
+                r += w * t->paletteStore[3 * idx + 0];
+                g += w * t->paletteStore[3 * idx + 1];
+                b += w * t->paletteStore[3 * idx + 2];
+            }
+            u8* px = &rgb[((std::size_t)y * W + x) * 3];
+            px[0] = (u8)(r + 0.5f);
+            px[1] = (u8)(g + 0.5f);
+            px[2] = (u8)(b + 0.5f);
+        }
+    }
+
+    // Quantise: 256 evenly-spaced sample seeds + nearest-colour map.
+    auto rec = std::make_unique<render::Texture>();
+    render::TextureSetSize(*rec, W);
+    rec->paletteStore.assign(768, 0);
+    const std::size_t n = (std::size_t)W * W;
+    for (int i = 0; i < 256; ++i) {
+        const std::size_t sIdx = n * (std::size_t)i / 256;
+        rec->paletteStore[3 * i + 0] = rgb[sIdx * 3 + 0];
+        rec->paletteStore[3 * i + 1] = rgb[sIdx * 3 + 1];
+        rec->paletteStore[3 * i + 2] = rgb[sIdx * 3 + 2];
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        const int r = rgb[i * 3 + 0], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+        int best = 0, bestD = 1 << 30;
+        for (int c = 0; c < 256; ++c) {
+            const int dr = r - rec->paletteStore[3 * c + 0];
+            const int dg = g - rec->paletteStore[3 * c + 1];
+            const int db = b - rec->paletteStore[3 * c + 2];
+            const int d = dr * dr + dg * dg + db * db;
+            if (d < bestD) { bestD = d; best = c; }
+        }
+        rec->texels[i] = (u8)best;
+    }
+
+    const int idxOut = (int)g_bakeCache.recs.size();
+    g_bakeCache.recs.push_back(std::move(rec));
+    g_bakeCache.byKey.emplace(key, idxOut);
+    return idxOut;
+}
 
 // WAVE-7 W7-FOGPIX — seed the per-vertex fog factor (ComputeFogFactor over the
 // vertex squared view-space distance, the engine's @0x5beb0b terrain pass) when the
@@ -438,12 +625,31 @@ u32 GroundGetOrBuildTile(const u8* texSrc, i32 width, i32 u, i32 v, i32 lod,
         return 0;
     (void)lod;
     const u32 mask = (u32)width * (u32)width - 1u;
-    const u32 idx  = (((u32)v * (u32)width) + (u32)u) & mask;
-    const u8  typeByte = texSrc[idx];
+    auto cellType = [&](i32 cu, i32 cv) -> u8 {
+        return texSrc[(((u32)cv * (u32)width) + (u32)cu) & mask];
+    };
+    const u8 t00 = cellType(u, v);
     const auto& hooks = GetTerrainRenderHooks();
-    if (!hooks.getTileTexture || !hooks.getTileTexture(typeByte))
+    if (!hooks.getTileTexture || !hooks.getTileTexture(t00))
         return 0;
-    return (u32)typeByte + 1u;   // texId carried in poly.uvZ
+    // TRANSITION CELL (@0x5ba1e8: the cache key is the neighbour TYPE BLOCK):
+    // when the 3x3 neighbourhood carries mixed types, bind the baked blend
+    // tile instead of the single slot texture. Ids >= 0x101 select the bake
+    // cache (poly.uvZ carries texId; 1..0x100 stay the plain slot path).
+    u8 blk[9];
+    bool mixed = false;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            const u8 t = cellType(u + dx, v + dy);
+            blk[(dy + 1) * 3 + (dx + 1)] = t;
+            if (t != t00) mixed = true;
+        }
+    if (mixed) {
+        const int bakeId = BakeTransitionTile(blk);
+        if (bakeId >= 0)
+            return 0x101u + (u32)bakeId;
+    }
+    return (u32)t00 + 1u;   // texId carried in poly.uvZ
 }
 
 // The ground textured span (custom SpanDispatch slot 3/4). Decodes the poly's
@@ -481,8 +687,18 @@ int GroundSpanTextured(render::Surface* fb, const render::Polygon& tri) {
                 rv[i].y = vp[i]->screenY;
                 rv[i].u = (kCellUV[i][0] + sU) * w;
                 rv[i].v = (kCellUV[i][1] + sV) * w;
-                u32 L = vp[i]->lightIdx;
-                rv[i].light = (u8)(L > 62u ? 62u : L);
+                // The ENGINE's per-vertex RGB terrain light (BuildTileVertex:
+                // scale*l + ambient at +66/+65/+64) consumed as the D3D vertex
+                // diffuse with the era-standard MODULATE2X. Row 62 = the raw
+                // texture; the RGB modulate carries ALL illumination + the
+                // day-cycle colour (live-validated: noon amb (79,63,38), night
+                // (26,17,69) -> the purple night ground).
+                rv[i].light = 62;
+                u32 lr = 2u * vp[i]->lightIdx, lg = 2u * vp[i]->_pad41,
+                    lb = 2u * vp[i]->color0;
+                rv[i].shadeR = (u8)(lr > 255u ? 255u : lr);
+                rv[i].shadeG = (u8)(lg > 255u ? 255u : lg);
+                rv[i].shadeB = (u8)(lb > 255u ? 255u : lb);
                 SeedSpanFogFactor(rv[i], *vp[i]);   // W7-FOGPIX
             }
             if (render::RasterizeTexturedTriangleRgbz(fb, rv, *rec, palBase, tri.flags38))
@@ -491,8 +707,11 @@ int GroundSpanTextured(render::Surface* fb, const render::Polygon& tri) {
     }
     if (fb && fb->bpp != 8 && vp[0] && vp[1] && vp[2] && gs.binder && gs.uvTable &&
         gs.binder->getTileTextureRec && gs.binder->palette565 && tri.uvZ > 0.0f) {
-        const u8 typeByte = (u8)((i32)tri.uvZ - 1);
-        const render::Texture* rec = gs.binder->getTileTextureRec(typeByte);
+        const i32 texId = (i32)tri.uvZ - 1;
+        const bool baked = texId >= 0x100;
+        const render::Texture* rec =
+            baked ? BakedTileRecord(texId - 0x100)
+                  : gs.binder->getTileTextureRec((u8)texId);
         if (rec && !rec->texels.empty() && rec->mipWidth > 0) {
             // palette565 returns the record's HiColTab block (63 light-ramp rows of
             // 256 entries == *(tex+72) palBase); the textured span indexes it as
@@ -502,10 +721,28 @@ int GroundSpanTextured(render::Surface* fb, const render::Polygon& tri) {
             // * L/62), reproducing VIBE_HiColTab ramp semantics.
             const u16* palBase = gs.binder->palette565(rec);
             if (palBase) {
-                // UV record: even poly of the quad -> T0 (floats 0..5), odd -> T1
-                // (floats 6..11). The selector lives in poly.uvX (set post-walk).
-                const int sel = (tri.uvX != 0.0f) ? 6 : 0;
-                const float* uv = gs.uvTable + sel;
+                // UV record: the poly's OWN stamped corner UVs (the walk wrote
+                // flt_13FE540[subTexId*0x60] tri0/tri1 into the tile's polyUv —
+                // the random rotated sub-quad). All-zero slot (a Pass-B stitch
+                // poly) falls back to parity + record 0.
+                const float* uv = nullptr;
+                // Baked transition tiles map the quad 1:1 (the blend IS the
+                // orientation): always record 0, never the random sub-quad.
+                if (!baked)
+                for (int t2 = 0; t2 < gs.tileUvCount; ++t2) {
+                    const GroundTexState::TileUvRange& r2 = gs.tileUv[t2];
+                    if (&tri >= r2.base && &tri < r2.end) {
+                        const float* cand = r2.uv + 6 * (&tri - r2.base);
+                        if (cand[0] != 0.0f || cand[1] != 0.0f ||
+                            cand[2] != 0.0f || cand[3] != 0.0f)
+                            uv = cand;
+                        break;
+                    }
+                }
+                if (!uv) {
+                    const int sel = (tri.uvX != 0.0f) ? 6 : 0;
+                    uv = gs.uvTable + sel;
+                }
                 const float w = (float)rec->mipWidth;
                 render::RgbzVertex rv[3];
                 for (int i = 0; i < 3; ++i) {
@@ -518,8 +755,13 @@ int GroundSpanTextured(render::Surface* fb, const render::Polygon& tri) {
                     // HiColTab has 63 ramp rows, so clamp the row to [0,62] (a row
                     // beyond the ramp count is the engine's degenerate region; the
                     // block only provisions 63 rows + the direct row at 0x7E00).
-                    u32 L = vp[i]->lightIdx;
-                    rv[i].light = (u8)(L > 62u ? 62u : L);
+                    // Engine per-vertex RGB terrain light, MODULATE2X (above).
+                    rv[i].light = 62;
+                    u32 lr = 2u * vp[i]->lightIdx, lg = 2u * vp[i]->_pad41,
+                        lb = 2u * vp[i]->color0;
+                    rv[i].shadeR = (u8)(lr > 255u ? 255u : lr);
+                    rv[i].shadeG = (u8)(lg > 255u ? 255u : lg);
+                    rv[i].shadeB = (u8)(lb > 255u ? 255u : lb);
                     SeedSpanFogFactor(rv[i], *vp[i]);   // W7-FOGPIX
                 }
                 if (render::RasterizeTexturedTriangleRgbz(fb, rv, *rec, palBase,
@@ -534,6 +776,55 @@ int GroundSpanTextured(render::Surface* fb, const render::Polygon& tri) {
 }
 } // namespace
 
+void GroundFrame::BuildTerrainLightMap(const u8* heights, i32 n,
+                                       std::vector<u8>& out) {
+    // (See the Bind banner: the LIVE Floor+0x1C capture model — 3-pass box
+    // smooth, then l = clamp(26.19 + 0.698*dH/dx - 0.341*dH/dy, 0, 127); the
+    // constants are the lstsq fit against the frida in-city dump. The flat
+    // interior — the visible city ground — reproduces the capture exactly.)
+    std::vector<float> hs(heights, heights + (std::size_t)n * n);
+    std::vector<float> tmp(hs.size());
+    for (int pass = 0; pass < 3; ++pass) {
+        for (i32 y = 0; y < n; ++y)
+            for (i32 x = 0; x < n; ++x) {
+                const i32 xm = (x + n - 1) % n, xp = (x + 1) % n;
+                const i32 ym = (y + n - 1) % n, yp = (y + 1) % n;
+                tmp[(std::size_t)y * n + x] =
+                    (hs[(std::size_t)y * n + x] + hs[(std::size_t)y * n + xm] +
+                     hs[(std::size_t)y * n + xp] + hs[(std::size_t)ym * n + x] +
+                     hs[(std::size_t)yp * n + x]) / 5.0f;
+            }
+        hs.swap(tmp);
+    }
+    out.assign((std::size_t)n * n, 26);
+    for (i32 y = 0; y < n; ++y)
+        for (i32 x = 0; x < n; ++x) {
+            const i32 xm = (x + n - 1) % n, xp = (x + 1) % n;
+            const i32 ym = (y + n - 1) % n, yp = (y + 1) % n;
+            const float gx = hs[(std::size_t)y * n + xp] - hs[(std::size_t)y * n + xm];
+            const float gy = hs[(std::size_t)yp * n + x] - hs[(std::size_t)ym * n + x];
+            float l = 26.19f + 0.698f * gx - 0.341f * gy;
+            if (l < 0.0f) l = 0.0f;
+            if (l > 127.0f) l = 127.0f;
+            out[(std::size_t)y * n + x] = (u8)l;
+        }
+}
+
+int GroundFrame::TestBakeTransitionTile(const u8 blk[9]) {
+    return BakeTransitionTile(blk);
+}
+const render::Texture* GroundFrame::TestBakedTileRecord(int idx) {
+    return BakedTileRecord(idx);
+}
+u32 GroundFrame::TestGetOrBuildTile(const u8* texSrc, i32 width, i32 u, i32 v) {
+    return GroundGetOrBuildTile(texSrc, width, u, v, /*lod=*/1, nullptr);
+}
+
+void GroundFrame::InvalidateTransitionBakes() {
+    g_bakeCache.byKey.clear();
+    g_bakeCache.recs.clear();
+}
+
 bool GroundFrame::Bind(const FloorGround* g) {
     g_ = nullptr;
     if (!g || !g->valid())
@@ -547,11 +838,14 @@ bool GroundFrame::Bind(const FloorGround* g) {
     tiles_.assign(64, render::TerrainTile{});
     vbufs_.assign(64, {});
     pbufs_.assign(64, {});
+    polyUvBufs_.assign(64, {});
     for (int i = 0; i < 64; ++i) {
         vbufs_[(std::size_t)i].assign(maxV, render::Vertex{});
         pbufs_[(std::size_t)i].assign(maxP, render::Polygon{});
+        polyUvBufs_[(std::size_t)i].assign(6u * maxP, 0.0f);
         tiles_[(std::size_t)i].vertexBuf = vbufs_[(std::size_t)i].data();
         tiles_[(std::size_t)i].polyBuf   = pbufs_[(std::size_t)i].data();
+        tiles_[(std::size_t)i].polyUv    = polyUvBufs_[(std::size_t)i].data();
         tiles_[(std::size_t)i].lod = 0;
         tiles_[(std::size_t)i].prevLod = 0;
     }
@@ -578,9 +872,16 @@ bool GroundFrame::Bind(const FloorGround* g) {
     floor_.mask     = g->size * g->size - 1;
     floor_.heights  = g->heights.data();
     floor_.texSrc   = g->texGrid.data();
-    // Floor+0x1C per-cell type/light bytes: the AllocLightBuffers @0x5bced8 fill
-    // was not captured — HOST SEED: the normalized texture grid (header note).
-    floor_.types    = g->texGrid.data();
+    // Floor+0x1C per-cell LIGHT bytes. LIVE-CAPTURED from gilde.exe in-city
+    // (frida, Floor+0x1C dump): a smoothed HILLSHADE over the heightfield —
+    // flat ground ~26, sun-facing slopes to ~100, computed at load (the
+    // shipped .cty light layer is all-zero; the exact builder is the
+    // remaining named gap). HOST MODEL fitted against the capture:
+    //   l = clamp(26.19 + 0.698*dH/dx - 0.341*dH/dy, 0, 127)
+    // over a 3-pass box-smoothed height grid (base/coefs = the lstsq fit; the
+    // city's flat interior — the visible ground — reproduces exactly).
+    GroundFrame::BuildTerrainLightMap(g->heights.data(), g->size, lightBytes_);
+    floor_.types    = lightBytes_.data();
     for (int l = 0; l < 4; ++l)
         floor_.mipTexSrc[l] = g->texGrid.data();
     floor_.tiles = tiles_.data();
@@ -591,16 +892,23 @@ bool GroundFrame::Bind(const FloorGround* g) {
     // +7281 low nibble (minimum LOD): the loader writes byte_64A02D & 0xF
     // (@0x5bd4c8..0x5bd4e4), a TextureCache_Setup runtime byte — seed 0.
     floor_.minLodNibble = 0;
-    for (int c = 0; c < 3; ++c)
-        floor_.lightSunScale[c] = 1.0f;   // Floor+208 writer: named gap (host 1.0)
+    // Floor+208/212/216 — LIVE-READ from gilde.exe in-city (flt_13FD510/4/8):
+    // (1.0, 0.7086, 0.2969) — the warm sun colour scaling the tile type term.
+    floor_.lightSunScale[0] = 1.0f;
+    floor_.lightSunScale[1] = 0.708627462f;
+    floor_.lightSunScale[2] = 0.296862751f;
 
     // Per-tile min/max elevation summary (ComputeSlopeFlags @0x5bbdb0 third pass)
     // — feeds the 8-corner tile bound the LOD pick uses.
     render::SummarizeTileElevations(g->heights.data(), nullptr, g->size,
                                     g->size - 1, g->tileSpan, &elev_);
-    // The flt_13FE540 UV-table image (BuildTerrainUvTable @0x5b94cc); 64 is the
-    // shipped dword_64A038 mip tile size (SetMipFilterLevel @0x5b9e74 clamp top).
-    render::BuildTerrainUvTable(uvTable_, 64);
+    // The FULL flt_13FE540 UV-table image (ComputeFilterWeights @0x5b94cc): 64
+    // records — corner-inset record 0 + 63 random rotated sub-quads (the anti-
+    // tiling variation). 64 is the shipped dword_64A038 mip tile size.
+    render::BuildTerrainUvTable64(uvTable_, 64);
+    // byte_13DCE58: the per-cell sub-record ids (@0x5afedb runtime writer).
+    subTex_.assign(65536, 0);
+    render::BuildTerrainSubTexTable(subTex_.data());
 
     std::memset(pendingLod_, 0, sizeof(pendingLod_));
     std::memset(lodCounter_, 0, sizeof(lodCounter_));
@@ -718,8 +1026,13 @@ GroundRenderStats GroundFrame::Render(render::Surface* fb, const GroundViewParam
     const bool wantTex = texBinder_.getTileTextureRec != nullptr &&
                          texBinder_.palette565 != nullptr &&
                          GetTerrainRenderHooks().getTileTexture != nullptr;
-    if (wantTex)
+    if (wantTex) {
         hooks.getOrBuildTile = &GroundGetOrBuildTile;
+        // wave-18 flt_13FE540: the walk stamps each quad poly's UV record
+        // (subTexId picks one of the 64 records; byte_13DCE58 image).
+        st.uvTable   = uvTable_;
+        st.subTexSrc = subTex_.data();
+    }
 
     g_groundFrustum = vp.frustum;
     stats.appended = render::RenderTerrain(&floor_, st, hooks, frameFlags != 0);
@@ -797,6 +1110,13 @@ GroundRenderStats GroundFrame::Render(render::Surface* fb, const GroundViewParam
     if (wantTex || wantWaterSpan) {
         g_groundTex.binder   = &texBinder_;
         g_groundTex.uvTable  = uvTable_;
+        g_groundTex.tileUvCount = 64;
+        for (int t = 0; t < 64; ++t) {
+            g_groundTex.tileUv[t].base = pbufs_[(std::size_t)t].data();
+            g_groundTex.tileUv[t].end  = pbufs_[(std::size_t)t].data() +
+                                         pbufs_[(std::size_t)t].size();
+            g_groundTex.tileUv[t].uv   = polyUvBufs_[(std::size_t)t].data();
+        }
         g_groundTex.waterTex = wantWaterSpan ? waterTexRec : nullptr;
         g_groundTex.fog      = (vp.fog && vp.fog->enabled) ? vp.fog : nullptr;  // W7-FOGPIX
         dispatch.slot[4] = &GroundSpanTextured;   // opaque (key>>24 == 4)
@@ -807,6 +1127,7 @@ GroundRenderStats GroundFrame::Render(render::Surface* fb, const GroundViewParam
     stats.rasterTris = render::RasterizeMeshList(list, fb, dispatch, ctx, proj, scratch);
     if (wantTex || wantWaterSpan) {
         g_groundTex.binder = nullptr; g_groundTex.uvTable = nullptr;
+        g_groundTex.tileUvCount = 0;
         g_groundTex.waterTex = nullptr; g_groundTex.fog = nullptr;
     }
     return stats;

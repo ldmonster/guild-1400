@@ -373,6 +373,26 @@ class GroundFrame {
 public:
     // Bind the walk buffers to `g` (kept by pointer; must outlive the frame).
     bool Bind(const FloorGround* g);
+
+    // Drop every baked transition tile (a SEASON change swaps the slot
+    // textures — stale bakes would blend last season's art).
+    static void InvalidateTransitionBakes();
+
+    // The Floor+0x1C per-cell LIGHT map (LIVE-CAPTURED model, see Bind): a
+    // smoothed hillshade over the N*N height grid — flat ground 26, slopes
+    // shaded by the fitted gradient response. Exposed for tests.
+    static void BuildTerrainLightMap(const u8* heights, i32 n,
+                                     std::vector<u8>& out);
+
+    // TEST SEAMS for the transition-tile bake (the @0x5ba1e8 reconstruction —
+    // the implementations live behind this module's internal linkage):
+    //   TestBakeTransitionTile: bake (or fetch) the tile for a 3x3 type block
+    //     (row-major, blk[4] = the cell) -> bake index, -1 = unresolvable.
+    //   TestBakedTileRecord: the baked 8-bit texture record for an index.
+    //   TestGetOrBuildTile: the walk hook body (type grid fetch + bake gate).
+    static int TestBakeTransitionTile(const u8 blk[9]);
+    static const render::Texture* TestBakedTileRecord(int idx);
+    static u32 TestGetOrBuildTile(const u8* texSrc, i32 width, i32 u, i32 v);
     bool bound() const { return g_ != nullptr; }
     const FloorGround* ground() const { return g_; }
     const float* uvTable() const { return uvTable_; }   // flt_13FE540 image (24)
@@ -419,7 +439,12 @@ private:
     // (wave-5: the row-mirror lattice copies were removed — the floor is fed in
     //  its true row order now that the @0x5bf22c winding is reconstructed 1:1.)
     render::TileElevationSummary elev_{};   // 0x5bbdb0 per-tile min/max
-    float uvTable_[24] = {};
+    // The FULL flt_13FE540 image: 64 records x 24 floats (record 0 = the
+    // corner-inset full tile; 1..63 = the random rotated sub-quads).
+    float uvTable_[64 * 24] = {};
+    std::vector<u8> subTex_;                    // byte_13DCE58 image (65536)
+    std::vector<std::vector<float>> polyUvBufs_; // per-tile poly UV records (6/poly)
+    std::vector<u8> lightBytes_;                 // Floor+0x1C per-cell light map
     u8  pendingLod_[64] = {};               // tile+97 debounce state
     int lodCounter_[64] = {};               // tile+88
     GroundTexBinder texBinder_{};           // wave-5 W5-TX (default: untextured)

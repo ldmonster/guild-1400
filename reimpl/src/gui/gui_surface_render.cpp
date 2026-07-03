@@ -157,23 +157,25 @@ int GuiSurface::DrawText(int x, int y, const char* s, ShapeMode /*shadow*/,
     // (engine draws at native size). MenuFont clips to the surface bounds; it does
     // not consult the GUI clip box (the engine's text pen path is a separate leaf).
     if (!target_ || target_->bpp != 32 || !target_->pixels || !assets_) return 0;
-    const play::MenuFont& font = assets_->font();
+    // Slider value/option text uses the SMALL engine font (_FONT+1 / record 67) per
+    // the original (frida: font id 67). RenderHSlider passes the vertical CENTRE anchor
+    // (H3/2 + node.y); the original offsets up by lineHeight/2-1 to centre the glyph row
+    // on the track — apply that here (the seam owns the font line-height).
+    const play::MenuFont& font = assets_->smallFont();
     if (!font.loaded()) return 0;
     const int W = target_->widthPx ? target_->widthPx : target_->width;
     const int H = target_->height;
     auto* base = reinterpret_cast<std::uint32_t*>(target_->pixels);
-    // The engine's text colour is ambient (State_Finalize(font)), not a per-call
-    // argument — the widget draws (RenderHSlider) pass 0,0,0 as a placeholder. When
-    // an ambient colour is set, use it; else honour the passed r/g/b (tests).
     if (ambientSet_) { r = ambR_; g = ambG_; b = ambB_; }
-    font.DrawText(base, W, H, x, y, s, /*scale=*/1, r, g, b);
+    const int lh = font.lineHeight() > 0 ? font.lineHeight() : 11;
+    font.DrawText(base, W, H, x, y - lh / 2 + 1, s, /*scale=*/1, r, g, b);
     return font.MeasureWidth(s);
 }
 
 int GuiSurface::TextWidth(const char* s) {
-    // VIBE_Property_Get @0x4152cc — delegate to MenuFont::MeasureWidth (1:1).
+    // VIBE_Property_Get @0x4152cc — slider text uses the small font (record 67).
     if (!assets_) return 0;
-    const play::MenuFont& font = assets_->font();
+    const play::MenuFont& font = assets_->smallFont();
     if (!font.loaded()) return 0;
     return font.MeasureWidth(s);
 }

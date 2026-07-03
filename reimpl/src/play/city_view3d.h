@@ -258,6 +258,11 @@ class CityView3D {
 public:
     struct Options {
         int   fbW = 160, fbH = 120;
+        // 3D projection viewport width (0 == fbW). The engine's in-city view
+        // projects into the LEFT 694px of the 800px surface (centre 347,300;
+        // the right 106px belong to the HUD sidebar) — SetupViewTransform
+        // @0x5af5f8 receives the viewport width, not the surface width.
+        int   viewportW = 0;
         u8    clearR = 0, clearG = 0, clearB = 64;   // sky clear
         // Near/far clip planes (flt_13FC76C / flt_13FCAFC). The original reads
         // them from the runtime gfx config block (13ECEBC/13ECEC0, Gilde.INI
@@ -267,6 +272,11 @@ public:
         // flt_13FCD0C — the view scale. 0 => fbW*0.5 (the engine's value: the
         // projection/pick consumers all store width*flt_6280DC == W*0.5).
         float viewScale = 0.0f;
+        // Per-pixel Gouraud RGB diffuse (the D3D hardware path's texture
+        // modulate, realised in the software span): vertices carry the RGB
+        // shade (+68/69/70) instead of the luma row, so lantern pools render
+        // warm and the night ambient tints. Default off (byte-identical).
+        bool gouraudLight = false;
         int   maxInstances = 0;    // 0 == draw every instance (the whole city)
         bool  textured = true;     // bind Textures.BIN materials when mounted
         // GROUND PASS (terrain-ground wave 4): draw the REAL parsed city floor
@@ -371,6 +381,11 @@ public:
         u32  skyColor          = 0;      // the time-of-day sky colour used (0=off)
         int  sunBand           = -1;     // ComputeSunState band (-1 == sun off)
         int  sunBrightness     = 0;      // ComputeSunState 0..600 brightness
+        float sunBlend         = 0.0f;   // ComputeSunState band fraction [0,1)
+        // The frame's global ambient triple (flt_64A074/78/7C): rebuilt per band
+        // (BlendBandLighting over the scene's 7-band rig when loaded, else the
+        // brightness ramp). Objects AND the ground pass consume it.
+        float ambient[3]       = {200.0f, 200.0f, 200.0f};
         int  litObjects        = 0;      // objects re-lit via LightMeshVertices
         int  sunLitVerts       = 0;      // (W8) per-vertex sun-NdotL shades applied
         int  sceneLightCount   = 0;      // (W8) scene light nodes collected this frame
@@ -549,7 +564,8 @@ public:
     // stores in AnimalRec+0 (so DestroyAnimal can remove it), or 0 when the model is
     // not shipped. The session's CityAnimalWorld::SpawnAnimal calls this; the animal
     // then renders through the character path each frame (Options::animals).
-    i32 AddAnimalInstance(const char* model, const CityPlacement& place);
+    i32 AddAnimalInstance(const char* model, const CityPlacement& place,
+                      bool fullbright = false);
     // Remove a previously seated animal by its actor token (AddAnimalInstance ret).
     void RemoveAnimalInstance(i32 actorToken);
     // Drop every seated animal (city unload).
@@ -623,6 +639,9 @@ public:
     struct BoundTex {
         const render::Texture* tex = nullptr;
         const u16*             palette = nullptr;
+        // Material +194 bit 1 ("flag0 BYTE2 |= 2" alpha route): draw through
+        // the 50/50 blend span (foliage crowns/canopy shadow polys).
+        bool                   blend = false;
         // RGB (24-bit) BMP fallback bind (person character textures: the shipped
         // _DYNAMIC/Character/*.bmp are 24-bit, no palette/indices). Sampled via
         // the in-tree affine textured kernel (play::RasterTexturedTriangleAffine,
@@ -769,6 +788,11 @@ private:
     struct Wave6FrameState {
         bool skyDrawn = false; u32 skyColor = 0;
         int  sunBand = -1; int sunBrightness = 0;
+        float sunBlend = 0.0f;         // ComputeSunState band fraction [0,1)
+        bool  nightLights = false;     // sun regime raise==1 -> lanterns lit
+        // The frame's global ambient triple (flt_64A074/78/7C): band blend /
+        // brightness ramp under dynamicLight; constant 200s otherwise.
+        float ambient[3] = {200.0f, 200.0f, 200.0f};
         float sunDir[3] = {0, 0, 1};   // ComputeSunState elevation -> direction
         int  litObjects = 0, lodObjects = 0;
         int  shadowCasters = 0, shadowPixels = 0;
@@ -776,6 +800,8 @@ private:
         int  weatherDrops = 0; bool fogApplied = false;
     } w6_{};
     i32  w6Time_ = 0;                  // monotonic ms clock for weather animation
+    u32  flickerTick_ = 0;             // per-frame lantern flicker counter
+    int  season_ = -1;                 // applied season (day%4; -1 = not yet)
     // ---- WAVE-8 OBJECT LIGHTING (W8-NORMALS + W8-SCENELIGHTS) ---------------
     // The 1024-entry angular falloff LUT (render::BuildFalloffLUT @0x5c88f8) the
     // per-vertex light accumulation indexes; built once, lazily.
@@ -811,6 +837,7 @@ private:
         CityPlacement place;
         render::Mat3 l2w{};
         bool         alive = false;  // false == removed slot (reusable)
+        bool         fullbright = false; // marker meshes (HAUSPFEIL) ignore night ambient
     };
     std::vector<AnimalInst> animals_;
     int lastAnimalInstances_ = 0;

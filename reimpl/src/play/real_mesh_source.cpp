@@ -29,8 +29,18 @@ RealMeshSource::Cached* RealMeshSource::loadFromArchive(const char* memberName) 
     if (!mount_->OpenMember(memberName, bytes) || bytes.empty()) return nullptr;
 
     auto cached = std::make_unique<Cached>();
-    if (!render::LoadAgfModel(bytes.data(), bytes.size(), cached->model))
-        return nullptr;
+    // The engine's loader order (VIBE_Mesh_LoadBgfFile @0x5D2348): the binary
+    // FAST CHUNK first — the pre-baked (Y-up) cooked mesh — and only on failure
+    // the AGF token-script fallback. The AGF stream is the RAW authoring data
+    // (Z-up; the engine's fallback path bakes the up-conversion — the documented
+    // morph-rotation-bake gap), so preferring the fast chunk both matches the
+    // engine and yields upright geometry.
+    if (!render::LoadFastChunk(bytes.data(), bytes.size(), cached->model) ||
+        cached->model.polyCount == 0) {
+        cached->model = render::BgfModel{};
+        if (!render::LoadAgfModel(bytes.data(), bytes.size(), cached->model))
+            return nullptr;
+    }
     if (!render::BuildGeometry(cached->model, cached->geom))
         return nullptr;
     cached->valid = true;

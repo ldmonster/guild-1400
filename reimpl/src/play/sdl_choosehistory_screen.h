@@ -62,4 +62,33 @@ ChooseHistoryScreenResult RunChooseHistoryScreen(shim::IGraphicsDevice& device,
                                                  shim::IPlatform& plat,
                                                  const ChooseHistoryConfig& cfg);
 
+// =============================================================================
+// "Ваши задания" (task/mission difficulty) screen — shown after the FACTUAL history
+// pick. Form markup `_M0_AUFTRAEGE+0`: $[heading]$N$B<body>$N$L then six `%ia[%s]`
+// option slots filled with `_M0_AUFTRAEGE_MODUS+0..5` (Свободная игра + 5 task levels),
+// plus an appended "Назад". Same radio-of-N layout as choose-history but the longer
+// column starts higher (button-0 top y=246). Reuses the render primitives.
+// =============================================================================
+struct ChooseTasksScreenResult {
+    bool confirmed = false;       // a task mode was picked -> proceed
+    bool back      = false;       // back row / ESC / window-close -> cancel
+    int  taskMode  = -1;          // picked _M0_AUFTRAEGE_MODUS index (0..5); -1 = none
+    int  framesPresented = 0;
+    int  hoveredRow = -1;
+    bool quitByWindow = false;
+    bool usedRealText = false;
+};
+
+// Load `_M0_AUFTRAEGE+0` + the `_M0_AUFTRAEGE_MODUS+k` names into screen content (heading
+// + body + the task-mode rows + a "back" row). Returns false if the text entry is absent.
+bool LoadChooseTasksContent(const std::string& gameDir, CharIntroContent& out);
+
+// Render + run the tasks screen (reuses ChooseHistoryConfig). Returns the picked task mode.
+ChooseTasksScreenResult RunChooseTasksScreen(shim::IGraphicsDevice& device,
+                                             shim::IPlatform& plat,
+                                             const ChooseHistoryConfig& cfg);
+
+// Design-space top y of button 0 on the tasks screen (the longer 7-button column).
+constexpr int kChooseTasksBtnTop0 = 246;
+
 } // namespace guild::play

@@ -7,6 +7,8 @@
 #include <SDL.h>
 #include <SDL_vulkan.h>
 
+#include <cstdio>
+
 namespace guild::shim {
 
 // ----------------------------- IPlatform -----------------------------------
@@ -16,23 +18,31 @@ bool SdlVulkanPlatform::createMainWindow(const char* title, int w, int h,
     // Start the timer regardless of whether the window comes up, so headless
     // timing still works after a failed (degraded) window creation.
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+        std::fprintf(stderr, "[window] SDL_InitSubSystem(VIDEO) failed: %s\n", SDL_GetError());
         if (!started_) { start_ = SDL_GetTicks(); started_ = true; }
         return false; // No video driver available — degrade cleanly.
     }
     if (!started_) { start_ = SDL_GetTicks(); started_ = true; }
+    std::fprintf(stderr, "[window] SDL video driver = %s\n",
+                 SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "(none)");
 
     if (w <= 0 || h <= 0)
         return false;
 
     // Loading the Vulkan loader can fail under some headless drivers; treat it
     // as a clean degrade rather than proceeding to create a doomed window.
-    if (SDL_Vulkan_LoadLibrary(nullptr) != 0)
+    if (SDL_Vulkan_LoadLibrary(nullptr) != 0) {
+        std::fprintf(stderr, "[window] SDL_Vulkan_LoadLibrary failed: %s\n", SDL_GetError());
         return false;
+    }
 
     Uint32 flags = SDL_WINDOW_VULKAN;
     flags |= fullscreen ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_SHOWN;
     window_ = SDL_CreateWindow(title ? title : "Guild", SDL_WINDOWPOS_CENTERED,
                                SDL_WINDOWPOS_CENTERED, w, h, flags);
+    if (!window_)
+        std::fprintf(stderr, "[window] SDL_CreateWindow(VULKAN %dx%d) failed: %s\n",
+                     w, h, SDL_GetError());
     // Under the dummy/offscreen video drivers a SDL_WINDOW_VULKAN window cannot
     // be realized; SDL returns null. That is the documented headless behavior:
     // return false, no crash.

@@ -679,10 +679,12 @@ void SessionPanels::DrawPanelBox(render::Surface& s,
     const int px = layout.panelX, py = layout.panelY;
     const int pw = layout.panelW, ph = layout.panelH;
 
-    gui::MenuFillRect(&s, px, py, pw, ph, pal.barTrackR, pal.barTrackG,
-                      pal.barTrackB);
-    render::SurfaceDrawRectOutline(&s, px, py, pw, ph, pal.barFrameR,
-                                   pal.barFrameG, pal.barFrameB);
+    if (layout.drawBox) {
+        gui::MenuFillRect(&s, px, py, pw, ph, pal.barTrackR, pal.barTrackG,
+                          pal.barTrackB);
+        render::SurfaceDrawRectOutline(&s, px, py, pw, ph, pal.barFrameR,
+                                       pal.barFrameG, pal.barFrameB);
+    }
 
     int line = 0;
     for (const Op& o : panelOps_) {
@@ -693,6 +695,17 @@ void SessionPanels::DrawPanelBox(render::Surface& s,
             std::string t = !o.literal.empty()
                                 ? o.literal
                                 : SynthesizePanelLine(o.fmt ? o.fmt : "", in);
+            // Sidebar-card mode: the small gold face, centred, word-wrapped.
+            if (!layout.drawBox && cardText.draw) {
+                const int lines = cardText.draw(
+                    s, px + pw / 2, py + layout.pad + line * (layout.lineH + 5),
+                    pw + 8, t.c_str(), cardText.user);
+                if (lines > 0) {
+                    ++last_.panelTextOps;
+                    line += lines;
+                    break;
+                }
+            }
             if (DrawLine16(s, px + layout.pad,
                            py + layout.pad + line * layout.lineH, t.c_str(),
                            pal.textR, pal.textG, pal.textB))
@@ -702,9 +715,17 @@ void SessionPanels::DrawPanelBox(render::Surface& s,
         }
         case Op::K::Icon: {
             ++last_.panelIconOps;
+            // Sidebar-card mode (drawBox off): the op's x/y are relative to the
+            // engine's full-width info-panel form; in the narrow card slot the
+            // thumbnail (the ~48px GEB building shape) centres horizontally in
+            // the card's middle band, like the original's card.
+            int ix = px + o.x, iy = py + o.y;
+            if (!layout.drawBox) {
+                ix = px + (pw - 48) / 2;
+                iy = py + ph / 3;
+            }
             if (hooks.drawSprite &&
-                hooks.drawSprite(&s, px + o.x, py + o.y, o.objId,
-                                 hooks.userData))
+                hooks.drawSprite(&s, ix, iy, o.objId, hooks.userData))
                 ++last_.panelIconBlits;
             break;
         }
@@ -747,8 +768,23 @@ std::string SessionPanels::SynthesizePanelLine(const char* fmt,
     const gui::text::TextDb* db = in.textDb;
     std::string name;
     if (in.selBuilding) {
-        name = ResolveTextId(db, gui::kNameTextStride * in.selBuilding->code +
-                                     gui::kNameTextBias);
+        // Keyed localized name first: "_GEB_<TYPE>_NAME+0" (the textbin key
+        // namespace; '~' is the engine's soft wrap hint -> space here, the
+        // card renderer word-wraps on width).
+        if (db && in.selBuildingTypeName && in.selBuildingTypeName[0]) {
+            std::string key = "_GEB_";
+            key += in.selBuildingTypeName;
+            key += "_NAME+0";
+            const int ki = db->FindIndex(key.c_str());
+            if (ki >= 0 && db->Text(ki)) {
+                name = db->Text(ki);
+                for (char& c : name)
+                    if (c == '~') c = ' ';
+            }
+        }
+        if (name.empty())
+            name = ResolveTextId(db, gui::kNameTextStride * in.selBuilding->code +
+                                         gui::kNameTextBias);
         if (in.selBuilding->customName && in.selBuilding->customName[0]) {
             name += " >";
             name += in.selBuilding->customName;

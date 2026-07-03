@@ -1318,7 +1318,7 @@ void VulkanGraphicsDevice::destroySceneFrameResources() {
 void VulkanGraphicsDevice::destroyScenePipeline() {}
 void VulkanGraphicsDevice::destroySceneFrameResources() {}
 bool VulkanGraphicsDevice::ensureScenePipeline() { return false; }
-bool VulkanGraphicsDevice::createSceneTexture(int, int, const std::uint32_t*, VkImage&, VkDeviceMemory&, VkImageView&) { return false; }
+bool VulkanGraphicsDevice::createSceneTexture(int, int, const std::uint32_t*, const std::vector<std::vector<std::uint32_t>>*, VkImage&, VkDeviceMemory&, VkImageView&) { return false; }
 bool VulkanGraphicsDevice::renderScene3D(const render::Scene3DDrawList&, render::Surface*) { return false; }
 #endif // GUILD_HAVE_SCENE_SHADERS
 

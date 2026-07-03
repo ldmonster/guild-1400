@@ -179,8 +179,11 @@ void RenderHSlider(IGuiSurface& gs, const HSliderWidget& wgt) {
         const char* str =
             wgt.hasOptionText ? wgt.optionText : wgt.numberText;   // node+0xD8 select
         if (str) {
-            const int textX = ThumbAnchorX(x, filled, W0, W3);
-            const int textY = Half(H3) + y;   // anchor; -lineHeight/2+1 is font-runtime
+            // Centre the value/option text within the thumb (shape 3) box, like the
+            // original (the box is wider than the value glyphs).
+            const int anchorX = ThumbAnchorX(x, filled, W0, W3);
+            const int textX = anchorX + (W3 - gs.TextWidth(str)) / 2;
+            const int textY = Half(H3) + y;   // vertical centre anchor (DrawText offsets up)
             const ShapeMode mode =
                 wgt.hasOptionText ? ShapeMode::kAdvanced : ShapeMode::kAdvanced; // mode 8
             gs.DrawText(textX, textY, str, mode, 0, 0, 0);

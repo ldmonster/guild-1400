@@ -68,6 +68,12 @@ struct RgbzRasterState {
     i32 vf[3];      // per-vertex FOG FACTOR (the vertex+79 FVF specular byte
                     //   from ComputeFogFactor @0x5ac9aa/@0x5beb0b), promoted <<16
                     //   into 16.16 — interpolated as a THIRD span channel (wave-7).
+    i32 vr[3], vg[3], vb[3];  // per-vertex RGB DIFFUSE shade bytes (vertex +70/
+                    //   +69/+68, the software COLOUR branch of FinalizeVertexShade
+                    //   @0x5c8218), promoted <<16. Interpolated per pixel and
+                    //   texel-MODULATED — the D3D hardware path's Gouraud diffuse
+                    //   (lantern pools / tinted night ambient) realised in the
+                    //   software span. All-255 == modulate off (gouraudPerPixel).
 
     // -- left-edge accumulators (output of InterpolateEdgeRgbz) ---------------
     i32 xLeft;      // dword_13FC5D8  left edge X, 16.16
@@ -78,6 +84,9 @@ struct RgbzRasterState {
     i32 vLeftStep;  // dword_13FC5D0  d(vLeft)/dy, 16.16
     i32 fLeft;      // left-edge FOG FACTOR accumulator, 16.16 (wave-7)
     i32 fLeftStep;  // d(fLeft)/dy, 16.16 (wave-7)
+    i32 rLeft, rLeftStep;   // left-edge RGB shade accumulators, 16.16 (gouraud)
+    i32 gLeft, gLeftStep;
+    i32 bLeft, bLeftStep;
 
     // -- right-edge accumulators (output of InterpolateEdgeZ, X only) ---------
     i32 xRight;     // dword_13FC5BC  right edge X, 16.16
@@ -87,10 +96,15 @@ struct RgbzRasterState {
     i32 uGrad;      // dword_13FC5E4  dU/dx, 16.16
     i32 vGrad;      // dword_13FC598  dV/dx, 16.16
     i32 fGrad;      // horizontal dF/dx for the fog-factor channel, 16.16 (wave-7)
+    i32 rGrad, gGrad, bGrad;  // horizontal RGB shade gradients, 16.16 (gouraud)
     bool fogPerPixel;     // when set, the span carries the interpolated fog
                     //   factor (the engine's per-pixel D3D vertex fog); when clear
                     //   the textured spans run with no fog (or the per-triangle
                     //   SpanFog() constant). Set only when SpanFog().enabled.
+    bool gouraudPerPixel; // when set, the span modulates each texel by the
+                    //   interpolated RGB shade (auto-set by the triangle setup
+                    //   when any vertex shade byte != 255; clear == the exact
+                    //   original span, byte-identical).
 
     // -- per-span scratch -----------------------------------------------------
     i32 spanLen;    // dword_13FC588  pixel count of the current span
@@ -188,6 +202,9 @@ struct RgbzVertex {
     u8 light = 0; // vertex +66 light byte: the span palette row is
                   // ((l0+l1+l2)/3) << 8 (dword_13FC5E0). 0 == row 0, which
                   // keeps a plain 256-entry palette valid.
+    u8 shadeR = 255, shadeG = 255, shadeB = 255; // vertex +70/+69/+68 RGB diffuse
+                  // shade (the software COLOUR branch). All-255 = modulate off;
+                  // anything else arms the per-pixel Gouraud texel modulate.
     int fogFactor = 255; // the per-vertex D3D fog factor (vertex+79 FVF specular
                   // byte from ComputeFogFactor; 255 == no fog, 0 == full fog).
                   // Interpolated linearly across the triangle and applied per

@@ -117,9 +117,35 @@ void InterpolateEdgeZ(RasterState& rs, int a, int b) {
 // reduction (the mask is contiguous low bits) that commutes with the adds. The
 // separate full-16.16 U/V accumulators below produce the identical masked
 // address on every pixel.
+// Gouraud RGB texel modulate (the D3D diffuse multiply) on a packed 565 pixel:
+// channel * (shade+1) >> 8 (the classic /255 approximation; shade 255 == 1.0).
+static inline u16 Modulate565(u16 col, int R, int G, int B) {
+    if (R < 0) R = 0; else if (R > 255) R = 255;
+    if (G < 0) G = 0; else if (G > 255) G = 255;
+    if (B < 0) B = 0; else if (B > 255) B = 255;
+    const u32 r5 = ((u32)((col >> 11) & 0x1F) * (u32)(R + 1)) >> 8;
+    const u32 g6 = ((u32)((col >> 5) & 0x3F) * (u32)(G + 1)) >> 8;
+    const u32 b5 = ((u32)(col & 0x1F) * (u32)(B + 1)) >> 8;
+    return (u16)((r5 << 11) | (g6 << 5) | b5);
+}
+
 void FillSpanTextured(RasterState& rs, u16* dst, i32 u, i32 v,
                       const SpanTexParams& p) {
     int n = rs.spanLen;
+    // GOURAUD (default off == byte-identical): the per-pixel RGB diffuse
+    // modulate channel (rs.rStart.. seeded by the textured triangle setup).
+    const bool gou = rs.gPerPixel;
+    i32 r16 = rs.rStart, g16 = rs.gStart, b16 = rs.bStart;
+    auto shadePixel = [&](u16 col) -> u16 {
+        return gou ? Modulate565(col, r16 >> 16, g16 >> 16, b16 >> 16) : col;
+    };
+    auto stepShade = [&]() {
+        if (gou) {
+            r16 = WrapAddI32(r16, rs.rGrad);
+            g16 = WrapAddI32(g16, rs.gGrad);
+            b16 = WrapAddI32(b16, rs.bGrad);
+        }
+    };
     // wave-6/wave-7: the per-pixel fog blend — the software realisation of D3D
     // fixed-function VERTEX fog (rule 3). DEFAULT DISABLED (SpanFog().enabled ==
     // false) so this whole branch is bypassed and the span is byte-identical.
@@ -143,10 +169,12 @@ void FillSpanTextured(RasterState& rs, u16* dst, i32 u, i32 v,
                 i32 vInt = v >> 16;
                 u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
                 u8  idx = p.texBase[addr];
-                dst[i] = BlendFog565(p.palBase[p.lightRow8 | idx], fogColor, factor);
+                dst[i] = BlendFog565(shadePixel(p.palBase[p.lightRow8 | idx]),
+                                     fogColor, factor);
                 u = WrapAddI32(u, p.uStepFrac);
                 v = WrapAddI32(v, p.vStep);
                 f16 = WrapAddI32(f16, rs.fGrad);                            // step the 3rd channel
+                stepShade();
             }
             rs.fStart = f16;                                // (mirrors the original
             return;                                         //  edge-walk persistence)
@@ -158,9 +186,11 @@ void FillSpanTextured(RasterState& rs, u16* dst, i32 u, i32 v,
                 i32 vInt = v >> 16;
                 u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
                 u8  idx = p.texBase[addr];
-                dst[i] = BlendFog565(p.palBase[p.lightRow8 | idx], fogColor, factor);
+                dst[i] = BlendFog565(shadePixel(p.palBase[p.lightRow8 | idx]),
+                                     fogColor, factor);
                 u = WrapAddI32(u, p.uStepFrac);
                 v = WrapAddI32(v, p.vStep);
+                stepShade();
             }
             return;
         }
@@ -171,9 +201,10 @@ void FillSpanTextured(RasterState& rs, u16* dst, i32 u, i32 v,
         u32 addr = (((u32)vInt) << p.widthShift) + (u32)uInt;// (V<<shift)+U
         addr &= p.texelMask;                                 // and ebx, mask
         u8  idx = p.texBase[addr];                           // mov dl,[ebx+base]
-        dst[i] = p.palBase[p.lightRow8 | idx];               // mov cx,pal[edx*2]
+        dst[i] = shadePixel(p.palBase[p.lightRow8 | idx]);   // mov cx,pal[edx*2]
         u = WrapAddI32(u, p.uStepFrac);                                    // add edx (U step)
         v = WrapAddI32(v, p.vStep);                                        // add ebx (V step)
+        stepShade();
     }
 }
 
@@ -205,6 +236,21 @@ void FillSpanTextured(RasterState& rs, u16* dst, i32 u, i32 v,
 void FillSpanTexturedMasked(RasterState& rs, u16* dst, i32 u, i32 v,
                             const SpanTexParams& p) {
     int n = rs.spanLen;
+    // GOURAUD (default off == byte-identical): per-pixel RGB diffuse modulate.
+    // The channel steps at EVERY covered pixel (like fog) so it stays in phase
+    // across masked (transparent) texels.
+    const bool gou = rs.gPerPixel;
+    i32 r16 = rs.rStart, g16 = rs.gStart, b16 = rs.bStart;
+    auto shadePixel = [&](u16 col) -> u16 {
+        return gou ? Modulate565(col, r16 >> 16, g16 >> 16, b16 >> 16) : col;
+    };
+    auto stepShade = [&]() {
+        if (gou) {
+            r16 = WrapAddI32(r16, rs.rGrad);
+            g16 = WrapAddI32(g16, rs.gGrad);
+            b16 = WrapAddI32(b16, rs.bGrad);
+        }
+    };
     // wave-6/wave-7: per-pixel fog (default disabled == byte-identical). Fog only
     // touches WRITTEN (non-transparent) pixels — transparent texels keep the
     // existing destination untouched, exactly as without fog. The interpolated
@@ -235,10 +281,11 @@ void FillSpanTexturedMasked(RasterState& rs, u16* dst, i32 u, i32 v,
             u8  idx = p.texBase[addr];
             u16 col = p.palBase[p.lightRow8 | idx];          // resolved 16bpp
             if (col != p.colorKey565)                        // DDraw KEYSRC == key
-                dst[i] = fogPixel(col);
+                dst[i] = fogPixel(shadePixel(col));
             u = WrapAddI32(u, p.uStepFrac);
             v = WrapAddI32(v, p.vStep);
             f16 = WrapAddI32(f16, rs.fGrad);
+            stepShade();
         }
         rs.fStart = f16;
         return;
@@ -249,10 +296,11 @@ void FillSpanTexturedMasked(RasterState& rs, u16* dst, i32 u, i32 v,
         u32 addr = ((((u32)vInt) << p.widthShift) + (u32)uInt) & p.texelMask;
         u8  idx = p.texBase[addr];
         if (idx != 0)                                        // test dl,dl; jz
-            dst[i] = fogPixel(p.palBase[p.lightRow8 | idx]);
+            dst[i] = fogPixel(shadePixel(p.palBase[p.lightRow8 | idx]));
         u = WrapAddI32(u, p.uStepFrac);
         v = WrapAddI32(v, p.vStep);
         f16 = WrapAddI32(f16, rs.fGrad);
+        stepShade();
     }
     rs.fStart = f16;
 }

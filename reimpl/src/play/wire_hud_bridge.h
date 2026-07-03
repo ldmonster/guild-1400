@@ -92,6 +92,15 @@ void SetHudSpriteBank(const u8* bank);
 // release the converted bank and revert to the prior SetHudSpriteBank state.
 const u8* SetHudSpriteBankFromGfx(const u8* bankBlob, std::size_t blobSize);
 
+// Sprite-id -> bank-shape mapping for the installed hook. The default (base < 0)
+// keeps the legacy single-shape behaviour: every gfx id blits shape 0. With a
+// base set, the hook blits shape (gfxId - base) and DECLINES ids outside
+// [base, base + bankShapeCount) — the real multi-shape indexing the engine's
+// icon-object ids use (building icon object id = building code + 1010, the
+// gui/infopanel_build kIconObjBias).
+void SetHudSpriteIdBase(int base);
+int  HudSpriteIdBase();
+
 // Blit one shape of the active bank straight into a 16bpp pixel buffer via the
 // REAL render::ShapeShowFromBank leaf (the exact call the installed hook makes).
 // `pixels`/`widthPx` describe the destination 16bpp surface; `fmt` is its colour

@@ -34,6 +34,7 @@ namespace guild::shim { class IGraphicsDevice; class IPlatform; }
 namespace guild::play {
 
 class MenuAssets;  // play/menu_assets.h (real gilde.gfx backdrop, optional)
+class MenuFont;    // play/menu_assets.h (the baked-gold _FONT / black _FONT+2)
 
 struct CharIntroConfig {
     std::string gameDir;          // mounted game dir (textbin + gfx); empty = no assets
@@ -75,9 +76,10 @@ bool LoadCharIntroContent(const std::string& gameDir, CharIntroContent& out);
 // Per-row layout of the difficulty panel (design 800x600 form window 128,72,441,490,
 // scaled to W x H). Shared by the renderer and the hit-test so they never drift.
 struct CharIntroLayout {
-    int px, py, pw, ph;            // panel rect
-    int cx, titleY, promptY;       // centre x + title/prompt baselines
-    int rowsY0, rowH, rowX, rowW;  // option-row grid
+    int px, py, pw, ph;            // panel rect (form window backing; unused for art path)
+    int cx, titleY, promptY;       // centre x + title/prompt CENTRE-y
+    int rowsY0, rowH, rowX, rowW;  // option-row grid (rowsY0 = top of button 0; rowH = pitch)
+    int btnH = 0;                  // button face height (rowH is the row pitch)
     int rowCount = 0;
     void RowRect(int i, int& rx, int& ry, int& rw, int& rh) const;
     int  HitRow(int mx, int my) const;  // -1 if none
@@ -85,15 +87,68 @@ struct CharIntroLayout {
 CharIntroLayout CharIntroComputeLayout(int W, int H, int rowCount);
 
 // Render one frame of the difficulty screen into a 32bpp ARGB scratch (W*H), pure (no
-// device/input) so tests + tooling can capture it. `assets` (may be null) supplies the
-// real menu backdrop; `hoveredRow`/`seedVariant` drive the row highlight.
+// device/input) so tests + tooling can capture it. `backdrop` (may be null, W*H ARGB) is
+// the pre-rendered New-Game desk scene drawn behind the parchment form; when absent the
+// `assets` menu backdrop (or a flat fill) is used. `gameDir` supplies the parchment-form
+// texture (Textures.BIN). `hoveredRow`/`seedVariant` drive the row highlight.
 void RenderCharIntroFrame(std::uint32_t* scratch, int W, int H, const CharIntroContent& content,
-                          int hoveredRow, int seedVariant, MenuAssets* assets);
+                          int hoveredRow, int seedVariant, MenuAssets* assets,
+                          const std::uint32_t* backdrop = nullptr,
+                          const std::string& gameDir = std::string());
 
 // Render + run the difficulty screen until the user picks a difficulty (confirm) or
 // presses the back row / ESC / closes the window (cancel). `device` MUST be init()'d to
 // cfg.fbW x cfg.fbH; `plat`'s window MUST exist.
 CharIntroResult RunCharIntroScreen(shim::IGraphicsDevice& device, shim::IPlatform& plat,
                                    const CharIntroConfig& cfg);
+
+// ---------------------------------------------------------------------------
+// Choose-history screen (VIBE_Menu_RunChooseHistory) — the New-Game sub-screen reached
+// after the difficulty pick. Same desk backdrop + parchment form + black _FONT+2 title,
+// but with a multi-line WRAPPED body paragraph and N per-label-width red buttons.
+// ---------------------------------------------------------------------------
+struct NewGameButtonRect { int x = 0, y = 0, w = 0, h = 0; };
+
+// Per-button rects for a New-Game radio screen (choose-history / tasks): every button
+// equalized to the WIDEST gold-_FONT label, centred on screen, stacked from `btnTop0Design`
+// (design-space top y of button 0) at a 40px pitch. Shared by the renderer and the run-loop
+// hit-test so they never drift. `assets` supplies the gold _FONT metrics. The default
+// `btnTop0Design` (324) is the choose-history column; the tasks screen passes 246.
+std::vector<NewGameButtonRect>
+ChooseHistoryButtonRects(int W, int H, const CharIntroContent& content, MenuAssets* assets,
+                         int btnTop0Design = 324);
+
+// Hit-test the radio buttons; returns the row index under (mx,my) or -1.
+int ChooseHistoryHitRow(const std::vector<NewGameButtonRect>& rects, int mx, int my);
+
+// Render one frame of a New-Game radio screen into a 32bpp ARGB scratch (W*H). Same
+// backdrop/parchment/title conventions as RenderCharIntroFrame; `content.heading` is the
+// title, `content.prompt` the wrapped body, `content.options` the equal-width buttons
+// stacked from `btnTop0Design` (324 = history, 246 = tasks).
+void RenderChooseHistoryFrame(std::uint32_t* scratch, int W, int H,
+                              const CharIntroContent& content, int hoveredRow, int seedRow,
+                              MenuAssets* assets, const std::uint32_t* backdrop = nullptr,
+                              const std::string& gameDir = std::string(),
+                              int btnTop0Design = 324);
+
+// Shared New-Game parchment chrome (history/tasks/player): composite `backdrop` (or the
+// `assets` menu bg), draw the parchment sheet to the centred form rect (top/height in
+// 800x600 design units), then an optional black _FONT+2 `title` (centre-y) + wrapped `body`
+// (top-y, line pitch, wrap width). Page-specific widgets are the caller's job afterward.
+void RenderNewGameParchmentChrome(std::uint32_t* scratch, int W, int H,
+                                  const std::uint32_t* backdrop, MenuAssets* assets,
+                                  const std::string& gameDir, int parchTopDesign, int parchHDesign,
+                                  int parchWDesign,
+                                  const std::string& title, int titleCyDesign,
+                                  const std::string& body, int bodyTopDesign,
+                                  int bodyLineHDesign, int bodyWrapWDesign);
+
+// Draw a single red _BUTTON_RED 3-slice bar + centred gold _FONT label (e.g. the wizard's back).
+void DrawNewGameButton(std::uint32_t* dst, int W, int H, MenuAssets& assets,
+                       int x, int y, int w, int h, bool hover, const std::string& label);
+
+// The parchment title font (_FONT+2, natively black) for callers needing matching gothic
+// text (e.g. the player wizard's "Имя: …" input line). Null if assets absent. Cached.
+const MenuFont* NewGameTitleFont(const std::string& gameDir);
 
 } // namespace guild::play

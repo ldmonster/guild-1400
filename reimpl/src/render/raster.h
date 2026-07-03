@@ -129,6 +129,16 @@ struct RasterState {
     i32  fGrad;     // horizontal dF/dx, 16.16
     bool fPerPixel; // drive the per-pixel factor from fStart/fGrad
 
+    // -- PER-PIXEL GOURAUD RGB shade channel (D3D diffuse modulate) -----------
+    // The per-vertex RGB diffuse shade (vertex +70/+69/+68, the software COLOUR
+    // branch of FinalizeVertexShade @0x5c8218) interpolated across the span and
+    // MULTIPLIED into each resolved texel — the hardware path's Gouraud texture
+    // modulate realised in the software span (lantern pools / tinted night
+    // ambient). All zero/false on a default RasterState -> byte-identical spans.
+    i32  rStart, gStart, bStart;   // left-edge shade accumulators, 16.16
+    i32  rGrad,  gGrad,  bGrad;    // horizontal gradients, 16.16
+    bool gPerPixel;                // arm the per-pixel modulate
+
     // -- destination -----------------------------------------------------------
     u8* fbBase;     // dword_13FC5DC  framebuffer cursor (start-of-frame row 0)
     i32 fbPitch;    // a2 / stride in pixels (passed to span fillers)

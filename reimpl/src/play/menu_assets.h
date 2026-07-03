@@ -84,8 +84,13 @@ public:
     // by `scale` (>=1) for the menu's design->framebuffer upscale, using text colour
     // (r,g,b). Pen advance is VIBE_Property_Set @0x4159dc 1:1. The glyph bitmap is
     // recoloured to (r,g,b) and alpha-keyed by the shape's opaque pixels.
+    // When `modulate` is false the glyphs are blitted in their NATIVE baked-gold
+    // colour (r,g,b ignored — the menu buttons/titles). When true, each glyph pixel
+    // is MULTIPLIED by (r,g,b)/255, which preserves the gold AA gradient while
+    // tinting toward the target — used for the recoloured labels (e.g. the network
+    // hub title is dark brown on parchment via Object_SetColor in the original).
     void DrawText(u32* dst, int W, int H, int x, int y, const char* s,
-                  int scale, u8 r, u8 g, u8 b) const;
+                  int scale, u8 r, u8 g, u8 b, bool modulate = false) const;
 
     int lineHeight() const { return lineHeight_; }
 
@@ -143,6 +148,11 @@ public:
     // menu label text. Valid (font().loaded()) when the archive carried _FONT.
     const MenuFont& font() const { return font_; }
 
+    // The small engine font `_FONT+1` (gfx record 67) — used by the options sliders
+    // for the value/option text (frida: those draw with font id 67). Falls back to
+    // the big font if the small one is absent.
+    const MenuFont& smallFont() const { return smallFont_.loaded() ? smallFont_ : font_; }
+
     // Decode an arbitrary record-by-gfx-id sprite (shape 0) on demand; returns
     // nullptr on failure.  Cached so the render hook is allocation-free per frame.
     const render::DecodedShape* SpriteForGfxId(int gfxId);
@@ -184,6 +194,7 @@ private:
     std::vector<render::DecodedShape> buttons_;
     render::DecodedShape cursor_;
     MenuFont font_;
+    MenuFont smallFont_;
 
     // gfxId -> decoded shape0 cache (for the generic sprite hook).
     // std::deque: push_back keeps references to existing elements VALID, so the

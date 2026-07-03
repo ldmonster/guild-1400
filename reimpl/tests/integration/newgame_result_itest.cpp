@@ -62,14 +62,17 @@ TEST(NewGameResultItest, ChainFillsEveryNewGameParamsField) {
     const int cityY = 126 + 40 / 2;      // kRowY0 + kRowH/2
     // Difficulty fallback panel: 5 levels + back = 6 rows; row 2 = "normal".
     int diffX, diffY; RadioRowCentre(6, 2, diffX, diffY);
-    // History fallback panel: 3 + back = 4 rows; row 0 = factual (flag 1).
-    int histX, histY; RadioRowCentre(4, 0, histX, histY);
+    // History panel: buttons centred at x=W/2, row i top y=324+40*i (height 33). Pick
+    // row 1 = PERSONAL (flag 2): the FACTUAL row (0) branches into the tasks screen;
+    // personal/none go straight to the wizard, keeping this script linear.
+    const int histX = kW / 2;
+    const int histY = (324 + 40) * kH / 600 + (33 * kH / 600) / 2;
     // Player wizard private layout (sdl_chooseplayer_screen.cpp, 800x600):
     // panel (128,72,441,490); radio rows y0=py+120, rowH=46, rh=38.
-    const int rowX = 128 + 40 + (441 - 80) / 2;      // gender/faith row centre x
-    const int row0Y = 72 + 120 + 38 / 2;             // row 0 centre y
-    // Wappen grid: gx=158, gy=202, cw=95 (cell w = cw-8), ch=70 -> cell 0.
-    const int wapX = 158 + (95 - 8) / 2, wapY = 202 + 70 / 2;
+    const int rowX = kW / 2;                          // gender/faith rows centre on screen
+    const int row0Y = 72 + 170 + 38 / 2;              // rowsY=py+170, row 0 centre
+    // Wappen grid: gx=px+30=185, gy=202, cw=(490-60)/4=107 (cell w = cw-8), ch=70 -> cell 0.
+    const int wapX = 185 + (107 - 8) / 2, wapY = 202 + 70 / 2;
     // Charcreate profession cell 0 (real geometry; cell 84x68) + confirm.
     const int profX = gui::Profession_ButtonX(0) + 84 / 2;
     const int profY = gui::Profession_ButtonY(0) + 68 / 2;
@@ -88,7 +91,7 @@ TEST(NewGameResultItest, ChainFillsEveryNewGameParamsField) {
     plat.scriptAt(8, 10, 10, false);
     plat.scriptAt(9, diffX, diffY, false);
     plat.scriptAt(10, diffX, diffY, true);
-    // History (first pump 11): release, hover row 0, click -> flag 1.
+    // History (first pump 11): release, hover row 1 (personal), click -> flag 2.
     plat.scriptAt(11, 10, 10, false);
     plat.scriptAt(12, histX, histY, false);
     plat.scriptAt(13, histX, histY, true);
@@ -145,7 +148,8 @@ TEST(NewGameResultItest, ChainFillsEveryNewGameParamsField) {
     CHECK_EQ(p.cityFile, "AUGSBURG");             // ReturnedString base name
     CHECK(!p.network);
     CHECK_EQ(p.difficulty, 2);                    // byte_12335BA pick ("normal")
-    CHECK_EQ(p.historyFlag, 1);                   // factual account -> flag 1
+    CHECK_EQ(p.historyFlag, 2);                   // personal history -> flag 2 (skips tasks)
+    CHECK_EQ(p.taskMode, -1);                      // tasks screen only for factual (flag 1)
     CHECK_EQ(p.firstName, "Test");                // String @0x122F4AA
     CHECK_EQ(p.familyName, "Player");             // byte_122F4CA
     CHECK_EQ(p.gender, 0);                        // byte_122F4A8

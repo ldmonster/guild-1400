@@ -125,12 +125,31 @@ int CV3D_SpanTextured(render::Surface* fb, const render::Polygon& tri) {
             // when SpanFog().enabled; default 255 keeps fog-off tris byte-identical.
             const render::FogState* fog =
                 d->fogStateForSpan().enabled ? &d->fogStateForSpan() : nullptr;
+            // Gouraud armed for this triangle when any vertex carries a
+            // non-neutral RGB diffuse: the palette row goes FULL BRIGHT (255)
+            // and the per-pixel modulate does the shading. Neutral shades keep
+            // the luma-row path (and the untextured fallback always uses the
+            // vertex +66 luma, so props never render fullbright).
+            const bool gouTri =
+                (vp[0]->shadeR & vp[0]->shadeG & vp[0]->shadeB &
+                 vp[1]->shadeR & vp[1]->shadeG & vp[1]->shadeB &
+                 vp[2]->shadeR & vp[2]->shadeG & vp[2]->shadeB) != 0xFF;
             render::RgbzVertex rv[3];
             for (int i = 0; i < 3; ++i) {
                 rv[i].x = vp[i]->screenX;
                 rv[i].y = vp[i]->screenY;
                 rv[i].u = vp[i]->u * w;
                 rv[i].v = vp[i]->v * w;
+                // Vertex +66 light byte -> the span's palette light row
+                // (lightRow8 = avg << 8): the day/night ambient + per-vertex
+                // sun/point shade the frame wrote into lightIdx now actually
+                // scales the texel colours (the 256-row shade-ramp palette).
+                rv[i].light = gouTri ? (u8)255 : vp[i]->lightIdx;
+                // Gouraud RGB diffuse (+68/69/70): all-255 leaves the span
+                // byte-identical; the gouraudLight frame writes real shades.
+                rv[i].shadeR = vp[i]->shadeR;
+                rv[i].shadeG = vp[i]->shadeG;
+                rv[i].shadeB = vp[i]->shadeB;
                 if (fog) {
                     const float dx = vp[i]->x, dy = vp[i]->y, dz = vp[i]->z;
                     rv[i].fogFactor = render::ComputeFogFactor(*fog, dx*dx + dy*dy + dz*dz);
@@ -149,10 +168,24 @@ int CV3D_SpanTextured(render::Surface* fb, const render::Polygon& tri) {
             const bool keyed =
                 render::ColourKeyEnabled() && render::TextureIsColourKeyed(*bt->tex);
             const i32 blackKey565 = 0;  // 565 encoding of (0,0,0)
-            const int drew = keyed
-                ? render::RasterizeTexturedTriangleRgbzMasked(fb, rv, *bt->tex, bt->palette,
-                                                              /*polyFlags38=*/0, blackKey565)
-                : render::RasterizeTexturedTriangleRgbz(fb, rv, *bt->tex, bt->palette);
+            static int dbgKeyed = 0, dbgPlain = 0, dbgOnce = 0;
+            if (std::getenv("GUILD_DEBUG_BIND")) {
+                keyed ? ++dbgKeyed : ++dbgPlain;
+                if (++dbgOnce % 2000 == 0)
+                    std::printf("[span] keyed=%d plain=%d\n", dbgKeyed, dbgPlain);
+            }
+            int drew;
+            // NOTE: material +194 bit 1 (b2 & 2) is NOT the alpha route — an
+            // A/B against the original showed foliage/bark drawing OPAQUE
+            // (50/50-blending them ghosts the crowns). Bit 0 alone keys.
+            if (keyed) {
+                drew = render::RasterizeTexturedTriangleRgbzMasked(
+                    fb, rv, *bt->tex, bt->palette, tri.flags38, blackKey565);
+            } else {
+                drew = render::RasterizeTexturedTriangleRgbz(fb, rv, *bt->tex,
+                                                             bt->palette,
+                                                             tri.flags38);
+            }
             if (drew) {
                 d->addTexturedPoly();
                 return 1;
@@ -1215,19 +1248,54 @@ const CityView3D::MatBind* CityView3D::bindFor(const std::string& member,
         // the "_NM" mip flag, NOT the colour key.
         if (bmp->bpp > 8)
             T.flags |= render::kTexFlagColourKey;
+        // Material BLEND bit (+194 & 1, mesh_load's mat.blendBit -> the flag0
+        // BYTE2 |= 2 alpha path): foliage/fence materials mark transparency at
+        // the MATERIAL, not the source bpp. Those texels key on black exactly
+        // like the 24-bit DDBLT_KEYSRC path, so route them through the masked
+        // span (fixes trees/bushes rendering on opaque black quads).
+        if (mi < (int)model->materials.size() && (model->materials[(std::size_t)mi].b2 & 1))
+            T.flags |= render::kTexFlagColourKey;
+        if (std::getenv("GUILD_DEBUG_BIND") && (member.find("LAUBKRONE") != std::string::npos || member.find("TANNE_KRONE") != std::string::npos))
+            std::printf("[bind] %s mat%d tex=%d bpp=%d b2=%02x flags=%02x\n",
+                        member.c_str(), mi, texId, bmp->bpp,
+                        mi < (int)model->materials.size()
+                            ? model->materials[(std::size_t)mi].b2 : 0xEE,
+                        (unsigned)T.flags);
         const std::size_t cnt = std::min(T.texels.size(), bmp->indices.size());
         std::copy(bmp->indices.begin(), bmp->indices.begin() + cnt, T.texels.begin());
         std::vector<u16>& pal = mb.pal[(std::size_t)mi];
-        pal.assign(256, 0);
+        // The FULL 256-row light palette the textured span indexes with
+        // palBase[lightRow8 | texel] (raster_textured: lightRow8 = avg vertex
+        // +66 << 8). Row L is the source palette scaled by L/255 — exactly the
+        // render::BuildShadeRamp table (VIBE_Light shade ramps), packed 565.
+        // Row 0 = black, row 255 = full colour; the day/night ambient byte the
+        // frame writes into each vertex's lightIdx picks the row.
+        pal.assign(256 * 256, 0);
         if (bmp->palette.size() >= 768) {
-            for (int i2 = 0; i2 < 256; ++i2) {
-                const u8 r = bmp->palette[3 * i2 + 0];
-                const u8 g = bmp->palette[3 * i2 + 1];
-                const u8 b = bmp->palette[3 * i2 + 2];
-                pal[(std::size_t)i2] = (u16)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+            for (int L = 0; L < 256; ++L) {
+                u16* row = pal.data() + (std::size_t)L * 256;
+                for (int i2 = 0; i2 < 256; ++i2) {
+                    const u8 sr = bmp->palette[3 * i2 + 0];
+                    const u8 sg = bmp->palette[3 * i2 + 1];
+                    const u8 sb = bmp->palette[3 * i2 + 2];
+                    const u8 r = (u8)((sr * L) / 255);
+                    const u8 g = (u8)((sg * L) / 255);
+                    const u8 b = (u8)((sb * L) / 255);
+                    u16 packed = (u16)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+                    // Colour-key safety: only SOURCE-black texels may resolve to
+                    // the 565 key value 0 (DDBLT_KEYSRC keys on the SOURCE colour,
+                    // pre-lighting). A non-black entry darkened to 0 by the ramp
+                    // clamps to the darkest visible 565 so it never keys out.
+                    if (packed == 0 && (sr | sg | sb) != 0)
+                        packed = 0x0841;   // (1,2,1) in 565 steps — near-black
+                    row[i2] = packed;
+                }
             }
         }
         mb.bound[(std::size_t)mi] = BoundTex{&mb.tex[(std::size_t)mi], pal.data()};
+        // Material +194 bit 1: the alpha/blend route (foliage translucency).
+        if (mi < (int)model->materials.size() && (model->materials[(std::size_t)mi].b2 & 2))
+            mb.bound[(std::size_t)mi].blend = true;
         ++mb.boundCount;
     }
     return &mb;
@@ -1286,6 +1354,44 @@ void CityView3D::computeSunForFrame() {
         render::ComputeSunState(opt_.worldDay, opt_.worldHour, opt_.worldMinute);
     w6_.sunBand = sun.band;
     w6_.sunBrightness = sun.brightness;
+    w6_.sunBlend = sun.blend;
+    // Night gate for the lantern lights: the day cycle's brightness (0..600)
+    // is the DAY-PROGRESS counter (h=8 -> 75 .. h=22 -> 600; 0 before dawn), so
+    // band = time-of-day band. Bands 0 (pre-dawn) and 5/6 (dusk/late night) are
+    // the dark blue-ambient bands — the lamplit hours. (regime.raise is only
+    // the sun rise/set arm, NOT a night flag.)
+    w6_.nightLights = (sun.band == 0 || sun.band >= 5);
+
+    // The frame's GLOBAL AMBIENT TRIPLE (flt_64A074/78/7C): the day-cycle rebuilds
+    // it per band (VIBE_DayCycle_UpdateBrightness). With the scene's 7-band light
+    // rig loaded, the genuine BlendBandLighting @0x5b85e4 cross-fade over the
+    // band ambient colours; else the wave-6 brightness-ramp fallback over the
+    // captured 200-seed. Only with dynamicLight — off keeps the constant 200s.
+    if (opt_.dynamicLight && sun.band >= 0) {
+        bool applied = false;
+        if (hasSkyBands_) {
+            render::SkyBandColor bands[render::kSkyBands];
+            for (int b = 0; b < render::kSkyBands; ++b) {
+                bands[b].r = skyBands_.ambient[b][0];
+                bands[b].g = skyBands_.ambient[b][1];
+                bands[b].b = skyBands_.ambient[b][2];
+            }
+            const render::SkyAmbient amb =
+                render::BlendBandLighting(bands, sun.band, sun.blend, /*scale=*/1.0f);
+            if (amb.r > 0.0f || amb.g > 0.0f || amb.b > 0.0f) {
+                w6_.ambient[0] = amb.r;
+                w6_.ambient[1] = amb.g;
+                w6_.ambient[2] = amb.b;
+                applied = true;
+            }
+        }
+        if (!applied) {
+            float k = (float)sun.brightness / 600.0f;
+            if (k < 0.15f) k = 0.15f;   // floor (the night band ambient)
+            if (k > 1.0f)  k = 1.0f;
+            w6_.ambient[0] = w6_.ambient[1] = w6_.ambient[2] = 200.0f * k;
+        }
+    }
 
     // The sun DIRECTION the dynamic-light/shadow passes read. The day-cycle picks
     // the elevation REGIME (SunRegimeForBand @0x4b28f0: bands 0..2 -> day/positive,
@@ -1438,6 +1544,28 @@ void CityView3D::computeSceneLights() {
         n.intensity  = in.lightParam[1];        // +148
         n.rangeParam = in.lightParam[2];        // +152
         n.flags = 0;                            // +529 not parsed; 0 (sun enabled)
+        // NIGHT LANTERNS: the shipped city scenes store the warm rLICHT_*
+        // point lights (parsed type 6, colour ~(255,185,0), range ~220) with
+        // FILE intensity 0 — the ENGINE lights them at dusk at runtime (the
+        // dusk enable/flicker writer is a named gap). FRIDA-CAPTURED live
+        // values (gilde.exe in-city at night, light kernel @0x5c6f90 walk):
+        // runtime type byte 5, colour (255,180..194,0), intensity 336..380
+        // (torch flicker modulates intensity/range/rangeParam per frame).
+        // Under the engine's own night flag (SunRegimeForBand raise==1) seed
+        // the captured MEAN intensity; the flicker animation itself is the
+        // remaining named gap.
+        if (w6_.nightLights && n.type == 6 && n.intensity == 0.0f &&
+            n.range > 0.0f && n.rangeParam > 0.0f) {
+            // TORCH FLICKER: the live capture showed the dusk system modulating
+            // each lantern's intensity per frame around ~358 (samples 336..380).
+            // Deterministic per-light per-frame wobble in the captured envelope
+            // (a hashed triangle wave — the engine's flicker RNG writer is the
+            // remaining named gap; the ENVELOPE is the measured ground truth).
+            const u32 h = (u32)i * 2654435761u + (u32)flickerTick_ * 40503u;
+            const u32 tri = (h >> 8) & 0x3F;                 // 0..63
+            const float wob = ((tri < 32 ? tri : 63 - tri) / 31.0f) * 2.0f - 1.0f;
+            n.intensity = 358.0f + wob * 22.0f;              // 336..380
+        }
         sceneLights_.lights.push_back(n);
     }
 
@@ -1470,7 +1598,8 @@ void CityView3D::computeSceneLights() {
 // The per-frame view parameters, shared by the ground pass and the scene walk
 // (pure factor of the former doSceneWalk prologue; behaviour unchanged).
 void CityView3D::buildViewParams(render::Frustum& fr, render::ObjectProjectScalars& s) {
-    const float halfW = (float)opt_.fbW * 0.5f;
+    const int vpW = (opt_.viewportW > 0) ? opt_.viewportW : opt_.fbW;
+    const float halfW = (float)vpW * 0.5f;
     const float halfH = (float)opt_.fbH * 0.5f;
     const float scale = (opt_.viewScale > 0.0f) ? opt_.viewScale : halfW;
     const float farZ = (opt_.farZ > 0.0f)
@@ -1479,8 +1608,9 @@ void CityView3D::buildViewParams(render::Frustum& fr, render::ObjectProjectScala
 
     // The engine frustum (BuildViewMatrix @0x5accd0) + the SetupViewTransform
     // @0x5af5f8 projection scalars: flt_13FCD0C = scale, flt_13FCD18 = W*0.5,
-    // flt_13FCAF8 = scale * flt_6280E4 (== -1.0), flt_13FCD10 = H*0.5.
-    BuildEngineFrustum((float)opt_.fbW, (float)opt_.fbH, scale, opt_.nearZ, farZ, fr);
+    // flt_13FCAF8 = scale * flt_6280E4 (== -1.0), flt_13FCD10 = H*0.5 — all of
+    // the VIEWPORT width (694 in-city), while the SURFACE stays fbW wide.
+    BuildEngineFrustum((float)vpW, (float)opt_.fbH, scale, opt_.nearZ, farZ, fr);
     s.xScale = scale;  s.xOffset = halfW;
     s.yScale = -scale; s.yOffset = halfH;
 
@@ -1560,7 +1690,47 @@ void CityView3D::doRenderTerrain(char a2) {
     // WAVE-7 W7-FOGPIX: hand the terrain/water spans this frame's vertex-fog state
     // (configured in RenderFrame when Options::fog). Null/!enabled -> no per-vertex fog.
     vp.fog            = fogState_.enabled ? &fogState_ : nullptr;
-    // sun ambient/bias defaults are the captured flt_64A074../flt_64A084.. values.
+    // The frame's global ambient triple (flt_64A074/78/7C — computeSunForFrame's
+    // band blend / brightness ramp): the ground darkens with the day cycle exactly
+    // like the objects. dynamicLight off keeps the captured 200s (byte-identical).
+    if (opt_.dynamicLight && w6_.sunBand >= 0) {
+        vp.sunAmbient[0] = w6_.ambient[0];
+        vp.sunAmbient[1] = w6_.ambient[1];
+        vp.sunAmbient[2] = w6_.ambient[2];
+        // The Floor+208 SUN-COLOUR scale swaps with the day cycle — both
+        // endpoints LIVE-READ from gilde.exe (flt_13FD510/4/8, frida):
+        //   day   (12:00): (1.000, 0.7086, 0.2969)  — the warm sun
+        //   night ( 4:00): (0.522, 0.439,  1.000)   — the blue moon light
+        // Interpolated on the daylight ramp (brightness 75..225, the band
+        // 0 -> 1 crossover the ambient blend uses).
+        float k = ((float)w6_.sunBrightness - 75.0f) / 150.0f;
+        if (k < 0.0f) k = 0.0f;
+        if (k > 1.0f) k = 1.0f;
+        static const float kDayScale[3]   = {1.0f, 0.708627462f, 0.296862751f};
+        static const float kNightScale[3] = {0.522f, 0.439f, 1.0f};
+        for (int c = 0; c < 3; ++c)
+            vp.sunScale[c] =
+                kNightScale[c] + (kDayScale[c] - kNightScale[c]) * k;
+
+    }
+    // SEASONS (GetSeasonFromDay @0x58339c: day % 4 -> 0 spring, 1 summer,
+    // 2 autumn, 3 winter; the New Game banner "Весна" == day 0 == spring).
+    // A season change re-dresses the whole city:
+    //   * floor slot textures (_fruehling / base / _herbst / _snow + _high),
+    //   * foliage TXS texture sets (rows F/S/H/W — the crowns turn),
+    //   * the baked transition tiles (rebaked from the new slot textures),
+    //   * material binds (rebuilt against the new TXS-selected textures).
+    // (The snow weather overlay is already winter-gated: SnowIsWinterDay.)
+    {
+        const int season = ((opt_.worldDay % 4) + 4) % 4;
+        if (season != season_) {
+            season_ = season;
+            groundTexResolver_.SetSeason(season);
+            tex_.SetActiveTextureSet(season);
+            matBinds_.clear();
+            GroundFrame::InvalidateTransitionBakes();
+        }
+    }
 
     groundStats_ = groundFrame_.Render(fb_, vp, a2);
     groundDrawn_ = groundStats_.rasterTris > 0;
@@ -1634,8 +1804,37 @@ void CityView3D::doShadows() {
             continue;
         const int vc = geom->vertexCount, pc = geom->polyCount;
         std::vector<render::Vertex> vv(geom->vertices, geom->vertices + vc);
+        // (1) model -> WORLD (a compose with a null camera = the pure model
+        //     transform), (2) FLATTEN each vertex onto the object's ground
+        //     plane through the sun direction (the engine's drop-shadow
+        //     projection: MapShadowVertexToSurface @0x5f3bb6 projects the
+        //     silhouette along the sun onto the ground), (3) world -> view
+        //     with the identity model part, then clip + project as usual.
+        {
+            static const CityCamera3D kNullCam{};
+            float mw[16];
+            ComposeModelViewMatrix(inst.l2w, inst.pos, kNullCam, mw);
+            render::TransformMeshVerticesByMatrix(vv.data(), vc, mw);
+        }
+        const float gy = inst.pos[1];
+        const float sunX = w6_.sunDir[0] / w6_.sunDir[1];
+        const float sunZ = w6_.sunDir[2] / w6_.sunDir[1];
+        for (int k = 0; k < vc; ++k) {
+            render::Vertex& v2 = vv[(std::size_t)k];
+            const float h = v2.y - gy;
+            if (h > 0.0f) {
+                v2.x += sunX * h;
+                v2.z += sunZ * h;
+            }
+            v2.y = gy;
+        }
         float mv[16];
-        ComposeModelViewMatrix(inst.l2w, inst.pos, cam_, mv);
+        {
+            render::Mat3 ident{};
+            ident.m[0] = ident.m[4] = ident.m[8] = 1.0f;
+            const float zero3[3] = {0.0f, 0.0f, 0.0f};
+            ComposeModelViewMatrix(ident, zero3, cam_, mv);
+        }
         render::TransformMeshVerticesByMatrix(vv.data(), vc, mv);
         // build a temporary poly list pointing at the LOCAL transformed verts (the
         // clip + project must read/write vv, never the shared cached geometry).
@@ -1657,8 +1856,8 @@ void CityView3D::doShadows() {
         // the engine projects each silhouette vertex onto the ground plane through
         // the sun direction; with no per-object ground Y here, the screen-space skew
         // by the sun azimuth reproduces the cast direction). The shadow sits below.
-        const float skewX = w6_.sunDir[0] * 4.0f;
-        const float skewY = 4.0f;    // shadows fall downward in screen space
+        const float skewX = 0.0f;   // the flatten above IS the cast direction
+        const float skewY = 0.0f;
         tris.clear();
         for (int k = 0; k < pc; ++k) {
             const render::Polygon& dp = pp[(std::size_t)k];
@@ -2075,7 +2274,8 @@ int CityView3D::RefreshObjectFlags(
 // render path), so the doSceneWalk character pass draws it. The session's
 // CityAnimalWorld::SpawnAnimal calls this with the species model + a placement.
 // =============================================================================
-i32 CityView3D::AddAnimalInstance(const char* model, const CityPlacement& place) {
+i32 CityView3D::AddAnimalInstance(const char* model, const CityPlacement& place,
+                                  bool fullbright) {
     if (!model || !*model)
         return 0;
     std::string memberOut;
@@ -2088,6 +2288,7 @@ i32 CityView3D::AddAnimalInstance(const char* model, const CityPlacement& place)
     ai.place  = place;
     ai.l2w    = render::Transpose(render::MatrixFromEuler(place.euler));
     ai.alive  = true;
+    ai.fullbright = fullbright;
     // Reuse a removed slot if one exists (stable tokens).
     for (std::size_t i = 0; i < animals_.size(); ++i) {
         if (!animals_[i].alive) {
@@ -2181,14 +2382,11 @@ int CityView3D::doSceneWalk() {
     // W6-SUN. (The per-vertex NdotL of LightMeshVertices needs world normals the
     // simplified instance pipeline does not carry — named gap, see frame-integration
     // doc; the object-level day/night ambient IS the dominant visible term.)
-    float ambientScale = 1.0f;
-    if (opt_.dynamicLight && w6_.sunBand >= 0) {
-        ambientScale = (float)w6_.sunBrightness / 600.0f;
-        if (ambientScale < 0.15f) ambientScale = 0.15f;   // floor (the night band ambient)
-        if (ambientScale > 1.0f)  ambientScale = 1.0f;
-    }
-    const float ambCh = render::kVertexLightAmbient * ambientScale;
-    const u8 ambientShade = render::FinalizeVertexShadeLuma(ambCh, ambCh, ambCh);
+    // The frame ambient triple computed by computeSunForFrame (the band blend /
+    // brightness ramp over flt_64A074/78/7C); constant 200s when dynamicLight off.
+    const float ambR = w6_.ambient[0], ambG = w6_.ambient[1], ambB = w6_.ambient[2];
+    const float ambCh = (ambR + ambG + ambB) / 3.0f;
+    const u8 ambientShade = render::FinalizeVertexShadeLuma(ambR, ambG, ambB);
     if (opt_.dynamicLight)
         w6_.litObjects = 0;
 
@@ -2201,12 +2399,13 @@ int CityView3D::doSceneWalk() {
     // point-light diffuse over the day/night ambient seed. The single-byte city
     // vertex carries the finalized luma of the resulting shade. This closes the
     // wave-6/7 "instance pipeline carries no per-vertex normals" named gap.
-    const float ambientSeed[3] = {ambCh, ambCh, ambCh};
+    const float ambientSeed[3] = {ambR, ambG, ambB};
     if (opt_.sceneLights) {
         if (!lightFalloffBuilt_) {
             render::BuildFalloffLUT(lightFalloffLut_);
             lightFalloffBuilt_ = true;
         }
+        ++flickerTick_;              // per-frame lantern flicker phase
         computeSceneLights();
         w8SunLitVerts_ = 0;
     }
@@ -2280,6 +2479,13 @@ int CityView3D::doSceneWalk() {
             for (int i = 0; i < vc; ++i)
                 fm.verts[(std::size_t)i].lightIdx = ambientShade;
         }
+        // Persons shade via the luma palette row; neutral RGB diffuse (255 =
+        // modulate off) so the Gouraud channel stays disarmed for them.
+        for (int i = 0; i < vc; ++i) {
+            fm.verts[(std::size_t)i].shadeR = 255;
+            fm.verts[(std::size_t)i].shadeG = 255;
+            fm.verts[(std::size_t)i].shadeB = 255;
+        }
 
         render::ComputeVertexClipFlags(0x3F, fm.verts.data(), vc,
                                        fm.polys.data(), pc, fr);
@@ -2343,8 +2549,13 @@ int CityView3D::doSceneWalk() {
             float mv[16];
             ComposeModelViewMatrix(ai.l2w, ai.place.pos, cam_, mv);
             render::TransformMeshVerticesByMatrix(fm.verts.data(), vc, mv);
-            for (int i = 0; i < vc; ++i)
-                fm.verts[(std::size_t)i].lightIdx = ambientShade;
+            for (int i = 0; i < vc; ++i) {
+                fm.verts[(std::size_t)i].lightIdx =
+                    ai.fullbright ? (u8)255 : ambientShade;   // markers glow at night
+                fm.verts[(std::size_t)i].shadeR = 255;   // neutral RGB diffuse
+                fm.verts[(std::size_t)i].shadeG = 255;
+                fm.verts[(std::size_t)i].shadeB = 255;
+            }
             render::ComputeVertexClipFlags(0x3F, fm.verts.data(), vc,
                                            fm.polys.data(), pc, fr);
             render::ProjectObjectVertices(fm.verts.data(), vc, fm.polys.data(), pc,
@@ -2365,6 +2576,8 @@ int CityView3D::doSceneWalk() {
         }
     }
 
+    static const bool dbgInst = std::getenv("GUILD_DEBUG_INST") != nullptr;
+    static bool dbgDone = false;
     for (int idx = 0; idx < cap; ++idx) {
         const Instance& inst = instances_[(std::size_t)idx];
         render::MeshGeometry* geom = src_.Resolve(inst.member.c_str());
@@ -2372,6 +2585,25 @@ int CityView3D::doSceneWalk() {
             continue;
         const int vc = geom->vertexCount;
         const int pc = geom->polyCount;
+        if (dbgInst && !dbgDone) {
+            const float dx = inst.pos[0] - cam_.eye[0], dz = inst.pos[2] - cam_.eye[2];
+            if (dx * dx + dz * dz < 1500.f * 1500.f) {
+                const float up[3] = {0, 1, 0};
+                float u2[3];
+                render::Apply(inst.l2w, up, u2);
+                float ymin = 1e9f, ymax = -1e9f;
+                for (int i = 0; i < vc; ++i) {
+                    const float* vy = &geom->vertices[i].y;
+                    if (*vy < ymin) ymin = *vy;
+                    if (*vy > ymax) ymax = *vy;
+                }
+                std::printf("[inst %d] %-24.24s m=%-22.22s pos(%7.0f,%6.0f,%7.0f) "
+                            "up->(%.2f,%.2f,%.2f) meshY(%.0f..%.0f) vc=%d\n",
+                            idx, inst.name.c_str(), inst.member.c_str(),
+                            inst.pos[0], inst.pos[1], inst.pos[2],
+                            u2[0], u2[1], u2[2], ymin, ymax, vc);
+            }
+        }
 
         FrameMesh& fm = frameMeshes_[(std::size_t)drawn];
         if ((int)fm.verts.size() < vc) fm.verts.resize((std::size_t)vc);
@@ -2452,6 +2684,23 @@ int CityView3D::doSceneWalk() {
                 O.cullRadius = 0.0f;   // +484 radius^2 (no per-instance bound carried; 0
                                        // keeps the point cull's range>dist gate honest)
                 render::CollectedObjectLights cl = render::CullForObject(sceneLights_, O);
+                if (dbgInst && !dbgDone) {
+                    float best = 1e9f;
+                    const render::SceneLightNode* bn = nullptr;
+                    for (const auto& L : sceneLights_.lights) {
+                        if (L.intensity == 0.0f || L.type == 7) continue;
+                        const float dx = L.pos[0] - inst.pos[0],
+                                    dy = L.pos[1] - inst.pos[1],
+                                    dz = L.pos[2] - inst.pos[2];
+                        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        if (d < best) { best = d; bn = &L; }
+                    }
+                    std::printf("[lights] %-24.24s pts=%d nearest=%.0f range=%.0f Lpos(%.0f,%.0f,%.0f) Ipos(%.0f,%.0f,%.0f)\n",
+                                inst.name.c_str(), (int)cl.pointLights.size(), best,
+                                bn ? bn->range : -1.f,
+                                bn ? bn->pos[0] : 0.f, bn ? bn->pos[1] : 0.f, bn ? bn->pos[2] : 0.f,
+                                inst.pos[0], inst.pos[1], inst.pos[2]);
+                }
                 std::vector<render::ShadeBytes> shade((std::size_t)vc);
                 render::LightMeshVertices(
                     mlv.data(), vc, ambientSeed,
@@ -2459,12 +2708,28 @@ int CityView3D::doSceneWalk() {
                     cl.pointLights.data(), (int)cl.pointLights.size(),
                     /*objScale=*/1.0f, lightFalloffLut_, shade.data());
                 for (int i = 0; i < vc; ++i) {
-                    // The single-byte city pipeline carries the luma of the finalized
-                    // RGB shade (the engine's hardware-branch reduction).
+                    // The single-byte city pipeline carries the luma of the
+                    // finalized RGB shade (the hardware-branch reduction). The
+                    // UNTEXTURED fallback (SpanFillTexturedOpaque LEVEL shade)
+                    // always reads this, so it stays the luma even under
+                    // gouraud (else white-fullbright props at night).
                     fm.verts[(std::size_t)i].lightIdx = render::FinalizeVertexShadeLuma(
                         (float)shade[(std::size_t)i].r,
                         (float)shade[(std::size_t)i].g,
                         (float)shade[(std::size_t)i].b);
+                    if (opt_.gouraudLight) {
+                        // Gouraud: ALSO carry the finalized RGB shade (+68/69/70,
+                        // the software COLOUR branch); the textured span selects
+                        // the full-bright palette row and the per-pixel modulate
+                        // does the shading (D3D texture-modulate semantics).
+                        fm.verts[(std::size_t)i].shadeR = shade[(std::size_t)i].r;
+                        fm.verts[(std::size_t)i].shadeG = shade[(std::size_t)i].g;
+                        fm.verts[(std::size_t)i].shadeB = shade[(std::size_t)i].b;
+                    } else {
+                        fm.verts[(std::size_t)i].shadeR = 255;
+                        fm.verts[(std::size_t)i].shadeG = 255;
+                        fm.verts[(std::size_t)i].shadeB = 255;
+                    }
                 }
                 w8SunLitVerts_ += vc;
                 perVertexLit = true;
@@ -2474,9 +2739,26 @@ int CityView3D::doSceneWalk() {
         float mv[16];
         ComposeModelViewMatrix(inst.l2w, inst.pos, cam_, mv);
         render::TransformMeshVerticesByMatrix(fm.verts.data(), vc, mv);
-        if (!perVertexLit)
-            for (int i = 0; i < vc; ++i)
+        if (!perVertexLit) {
+            const u8 aR = (u8)(ambR > 255.f ? 255 : (ambR < 0.f ? 0 : (int)ambR));
+            const u8 aG = (u8)(ambG > 255.f ? 255 : (ambG < 0.f ? 0 : (int)ambG));
+            const u8 aB = (u8)(ambB > 255.f ? 255 : (ambB < 0.f ? 0 : (int)ambB));
+            for (int i = 0; i < vc; ++i) {
+                // Luma row always on the vertex (the untextured fallback's
+                // LEVEL shade); the RGB diffuse rides +68/69/70 under gouraud
+                // (the band ambient triple — the blue night tint).
                 fm.verts[(std::size_t)i].lightIdx = ambientShade;
+                if (opt_.gouraudLight) {
+                    fm.verts[(std::size_t)i].shadeR = aR;
+                    fm.verts[(std::size_t)i].shadeG = aG;
+                    fm.verts[(std::size_t)i].shadeB = aB;
+                } else {
+                    fm.verts[(std::size_t)i].shadeR = 255;
+                    fm.verts[(std::size_t)i].shadeG = 255;
+                    fm.verts[(std::size_t)i].shadeB = 255;
+                }
+            }
+        }
         if (opt_.dynamicLight)
             ++w6_.litObjects;
 
@@ -2517,6 +2799,7 @@ int CityView3D::doSceneWalk() {
             ++lastObjectInstances_;
         ++drawn;
     }
+    if (dbgInst) dbgDone = true;   // one-shot instance debug dump
     lastInstances_ = drawn - lastPersonInstances_ - lastAnimalInstances_;  // city only
     if (drawn == 0)
         return 0;
@@ -2708,7 +2991,12 @@ CityView3D::Result CityView3D::RenderFrame(const CityCamera3D& cam, const Option
         const float fogFar = (hasFog_ && fogFar_ > opt.nearZ)
                                  ? fogFar_
                                  : ((opt.farZ > 0.0f) ? opt.farZ : 20000.0f);
-        const float fogNear = opt.nearZ;
+        // Fog START: the LIVE engine latches a scene-relative near, NOT the
+        // camera near plane — frida in-city read: flt_13FC5AC = 3075,
+        // flt_13FC568 = 5080.5 (ratio 0.6052). Fogging from the camera near
+        // plane drowned the whole mid-field in sky-blue; the original's ground
+        // is fog-free until ~3 km and hazes only toward the horizon.
+        const float fogNear = fogFar * (3075.0f / 5080.5f);
         render::ConfigureFog(fogState_, fogNear, fogFar, (i32)sf.color,
                              /*fogEnabledGlobal=*/true, /*featureBit=*/true);
     }
@@ -2788,6 +3076,10 @@ CityView3D::Result CityView3D::RenderFrame(const CityCamera3D& cam, const Option
     r.skyColor       = w6_.skyColor;
     r.sunBand        = w6_.sunBand;
     r.sunBrightness  = w6_.sunBrightness;
+    r.sunBlend       = w6_.sunBlend;
+    r.ambient[0]     = w6_.ambient[0];
+    r.ambient[1]     = w6_.ambient[1];
+    r.ambient[2]     = w6_.ambient[2];
     r.litObjects     = w6_.litObjects;
     r.sunLitVerts    = w8SunLitVerts_;
     r.sceneLightCount = (int)sceneLights_.lights.size();

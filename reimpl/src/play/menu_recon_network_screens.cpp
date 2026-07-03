@@ -5,7 +5,8 @@
 #include "shim/IGraphicsDevice.h"        // RunNetworkScreen driver: present
 #include "shim/IPlatform.h"              // RunNetworkScreen driver: input pump
 #include "render/gfx_archive.h"          // render::DecodedShape
-#include "render/bmp.h"                  // render::BmpSave24Bit (debug dump)
+#include "render/bmp.h"                  // render::BmpSave24Bit / BmpLoadBuffer
+#include "io/archive_mount.h"            // Textures.BIN (PKZIP) mount for the parchment
 #include "net/discovery.h"               // net::DiscoverServers (1:1 @0x43abcc)
 #ifdef GUILD_HAVE_SDL2_NET
 #include "shim_impl/sdlnet_backend.h"    // SdlNetDatagram (real UDP/broadcast transport)
@@ -341,13 +342,13 @@ void FbDrawText(u32* dst, int W, int H, int x, int y, const char* s, u32 col) {
 // available, else the fallback block font.
 void DrawCenteredLabel(u32* dst, int W, int H, const MenuAssets& assets, bool art,
                        int x, int y, int w, int h, const std::string& label, int scale,
-                       u8 r, u8 g, u8 b) {
+                       u8 r, u8 g, u8 b, bool modulate = false) {
     if (label.empty()) return;
     if (art && assets.font().loaded()) {
         const MenuFont& fnt = assets.font();
         const int tw = fnt.MeasureWidth(label.c_str()) * scale;
         const int th = (fnt.lineHeight() > 0 ? fnt.lineHeight() : 17) * scale;
-        fnt.DrawText(dst, W, H, x + (w - tw) / 2, y + (h - th) / 2, label.c_str(), scale, r, g, b);
+        fnt.DrawText(dst, W, H, x + (w - tw) / 2, y + (h - th) / 2, label.c_str(), scale, r, g, b, modulate);
     } else {
         const int tw = (int)label.size() * kFbGlyphW;
         FbDrawText(dst, W, H, x + (w - tw) / 2, y + (h - 7) / 2, label.c_str(),
@@ -372,11 +373,13 @@ int LabelWidth(const MenuAssets& assets, bool art, const std::string& s) {
     return (int)s.size() * kFbGlyphW;
 }
 
-// Pick the _OPTIONEN_PIC variant by framebuffer width (matches the menu backdrops).
+// The network hub is a MAIN-MENU sub-screen, so it sits over the live title-screen
+// CITY backdrop (_MENUE_BACKGROUND), like the options / load-game screens — NOT the
+// in-game _OPTIONEN_PIC bookshelf (verified against gilde.exe). Variant by width.
 const char* OptionsPicName(int fbW) {
-    return fbW >= 1152 ? "_OPTIONEN_PIC_1152"
-         : fbW >= 1024 ? "_OPTIONEN_PIC_1024"
-                       : "_OPTIONEN_PIC";
+    return fbW >= 1152 ? "_MENUE_BACKGROUND_1152"
+         : fbW >= 1024 ? "_MENUE_BACKGROUND_1024"
+                       : "_MENUE_BACKGROUND";
 }
 
 // Resolve a single textbin key to its rich-text-stripped plain display string.
@@ -398,6 +401,54 @@ int CanvasScale(int fbW) {
 // when the real art (background) decoded; `font()` validity is checked separately.
 bool LoadArt(MenuAssets& assets, shim::DiskFileSystem& fs, int fbW) {
     return assets.Load(fs, "gfx/gilde.gfx", OptionsPicName(fbW));
+}
+
+// The parchment titles use _FONT+2 (gfx record 68) — a NATIVELY BLACK thin gothic
+// (the _FONT bold gold variant the buttons use is record 66). Cached per game dir.
+const MenuFont* ParchmentTitleFont(const std::string& gameDir) {
+    static std::string s_dir;
+    static MenuFont s_font;
+    static bool s_tried = false;
+    if (s_tried && s_dir == gameDir) return s_font.loaded() ? &s_font : nullptr;
+    s_tried = true; s_dir = gameDir;
+    if (gameDir.empty()) return nullptr;
+    shim::DiskFileSystem fs(gameDir);
+    s_font.Load(fs, "gfx/gilde.gfx", "_FONT+2");
+    return s_font.loaded() ? &s_font : nullptr;
+}
+
+// The network hub's parchment panel is the texture Pergamente/Pergament_Blatt_2_256_rev.bmp
+// (256x256, burnt edges) from Resources/Textures.BIN — NOT a gilde.gfx record. It is
+// blitted stretched-wider to the panel rect. Decoded once and cached per game dir.
+const render::DecodedShape* NetworkPanelParchment(const std::string& gameDir) {
+    static std::string s_dir;
+    static render::DecodedShape s_shape;
+    static bool s_tried = false;
+    if (s_tried && s_dir == gameDir) return s_shape.width > 0 ? &s_shape : nullptr;
+    s_tried = true; s_dir = gameDir; s_shape = render::DecodedShape{};
+    if (gameDir.empty()) return nullptr;
+    shim::DiskFileSystem fs(gameDir);
+    io::ArchiveMount mount;
+    if (!mount.Mount(&fs, "Resources/Textures.BIN", /*caseInsensitive=*/true)) return nullptr;
+    std::vector<u8> bytes;
+    if (!mount.OpenMember("Pergamente/Pergament_Blatt_2_256_rev.bmp", bytes) || bytes.empty())
+        return nullptr;
+    int w = 0, h = 0;
+    std::vector<u8> rgb = render::BmpLoadBuffer(bytes, 24, w, h);   // top-down RGB
+    if (rgb.empty() || w <= 0 || h <= 0) return nullptr;
+    s_shape.width = w; s_shape.height = h;
+    s_shape.argb.resize((std::size_t)w * h);
+    int op = 0;
+    for (std::size_t i = 0; i < (std::size_t)w * h; ++i) {
+        const u8 r = rgb[i*3], g = rgb[i*3+1], b = rgb[i*3+2];
+        // Pure black (0,0,0) is the transparent color key (the torn-edge corners),
+        // so the city backdrop shows through instead of a black border.
+        if (r == 0 && g == 0 && b == 0) { s_shape.argb[i] = 0u; continue; }
+        s_shape.argb[i] = 0xFF000000u | ((u32)r << 16) | ((u32)g << 8) | (u32)b;
+        ++op;
+    }
+    s_shape.opaque = op;
+    return &s_shape;
 }
 
 } // namespace
@@ -445,13 +496,16 @@ std::string StripNetRichMarkup(const char* s) {
 // ---------------------------------------------------------------------------
 static NetHubLayout PaintNetworkHub(u32* dst, const NetViewContext& ctx,
                                     MenuAssets& assets, bool art,
-                                    const std::string& title, const std::string opt[3]) {
+                                    const std::string& title, const std::string opt[3],
+                                    int nButtons = 3) {
     NetHubLayout L{};
     const int W = ctx.fbW, H = ctx.fbH;
     if (!dst || W <= 0 || H <= 0) return L;
     L.titleLabel = title;
+    // The hub has 3 buttons; the "Продолжить игру" sub-screen reuses this form with
+    // 2 (server/client). nButtons is explicit (labels can be empty in headless).
     L.labels[0] = opt[0]; L.labels[1] = opt[1]; L.labels[2] = opt[2];
-    L.buttonCount = 3;
+    L.buttonCount = nButtons < 0 ? 0 : (nButtons > 3 ? 3 : nButtons);
     L.usedArt = art;
     L.window = Translate(W, H, kHubWinX, kHubWinY, kHubWinW, kHubWinH);
     const int scale = CanvasScale(W);
@@ -463,11 +517,25 @@ static NetHubLayout PaintNetworkHub(u32* dst, const NetViewContext& ctx,
     else
         FillRect(dst, W, H, 0, 0, W, H, 0xFF101820u);
 
-    // Button geometry: a vertical column inside the window, equal width = widest
-    // label + caps + pad (the main-menu equalization). Title at the top of the box.
-    const int innerX = kHubWinX + 24;
-    const int titleY = kHubWinY + 24;
-    L.title = Translate(W, H, innerX, titleY, kHubWinW - 48, 20);
+    // The hub sits on a clean parchment SHEET — _PERGAMENT_KARTE (the 256x256
+    // "Pergament_Blatt" sheet) stretched wider to the panel rect. Centered on screen
+    // (native 800x600 coords), matching the original's ~432x256 panel at y168. The
+    // title + 3 red buttons are centered on it.
+    // Real form window (frida VIBE_Window_Create on Menu\CHOOSENETWORK): design
+    // rect (144,160,400,297), center-translated to screen (PositionAtCoord mode 2)
+    // -> centered horizontally, kept at design y. So the parchment fills a 400x297
+    // panel at x=(800-400)/2, y=160. The 256x256 sheet is stretched to fill it.
+    constexpr int kPanelW = 400, kPanelH = 297;
+    const int panelXn = (800 - kPanelW) / 2;       // 200
+    const int panelYn = 160;
+    L.window = Translate(W, H, panelXn, panelYn, kPanelW, kPanelH);
+    if (art) {
+        if (const render::DecodedShape* sheet = NetworkPanelParchment(ctx.gameDir))
+            ScaledBlit(dst, W, H, *sheet, L.window.x, L.window.y, L.window.w, L.window.h);
+    }
+
+    // Title centered on the parchment near its top (measured ~screen y180).
+    L.title = Translate(W, H, panelXn, panelYn + 18, kPanelW, 20);
 
     int uniformW = 0;
     for (int i = 0; i < L.buttonCount; ++i) {
@@ -476,11 +544,11 @@ static NetHubLayout PaintNetworkHub(u32* dst, const NetViewContext& ctx,
         if (bw > uniformW) uniformW = bw;
     }
     if (uniformW <= 0) uniformW = kBtnNominalW;
-    if (uniformW > kHubWinW - 32) uniformW = kHubWinW - 32;
+    if (uniformW > kPanelW - 36) uniformW = kPanelW - 36;
 
-    const int rowStride = 64;                      // spacing between radio rows
-    const int firstRowY = kHubWinY + 80;
-    const int btnX = kHubWinX + (kHubWinW - uniformW) / 2;
+    const int rowStride = 40;                      // spacing between rows (measured)
+    const int firstRowY = panelYn + 91;            // ~y251 (first button, measured)
+    const int btnX = (800 - uniformW) / 2;         // centered on the panel/screen
     for (int i = 0; i < L.buttonCount; ++i) {
         const int fy = firstRowY + i * rowStride;
         L.buttons[i] = Translate(W, H, btnX, fy, uniformW, kBtnH);
@@ -493,12 +561,21 @@ static NetHubLayout PaintNetworkHub(u32* dst, const NetViewContext& ctx,
             OutlineRect(dst, W, H, r.x, r.y, r.w, r.h, 0xFFD8C060u);
         }
         DrawCenteredLabel(dst, W, H, assets, art, r.x, r.y, r.w, r.h * scale,
-                          L.labels[i], scale, 255, 235, 200);
+                          L.labels[i], scale, 255, 235, 200);   // baked gold (on red)
     }
 
-    // Title text.
-    DrawCenteredLabel(dst, W, H, assets, art, L.title.x, L.title.y, L.title.w,
-                      L.title.h * scale, L.titleLabel, scale, 255, 220, 140);
+    // Title text — the original uses the native-black thin gothic _FONT+2 on the
+    // parchment (NOT the bold gold _FONT the buttons use). Render it directly.
+    if (const MenuFont* tf = ParchmentTitleFont(ctx.gameDir)) {
+        const int tw = tf->MeasureWidth(L.titleLabel.c_str()) * scale;
+        const int th = (tf->lineHeight() > 0 ? tf->lineHeight() : 17) * scale;
+        tf->DrawText(dst, W, H, L.title.x + (L.title.w - tw) / 2,
+                     L.title.y + (L.title.h * scale - th) / 2, L.titleLabel.c_str(),
+                     scale, 0, 0, 0, /*modulate=*/false);
+    } else {
+        DrawCenteredLabel(dst, W, H, assets, art, L.title.x, L.title.y, L.title.w,
+                          L.title.h * scale, L.titleLabel, scale, 0, 0, 0);
+    }
     return L;
 }
 
@@ -514,6 +591,22 @@ NetHubLayout RenderNetworkHubView(u32* dst, const NetViewContext& ctx) {
     bool art = false;
     if (!ctx.gameDir.empty()) { shim::DiskFileSystem fs(ctx.gameDir); art = LoadArt(assets, fs, ctx.fbW); }
     return PaintNetworkHub(dst, ctx, assets, art, title, opt);
+}
+
+// The "Продолжить игру" sub-screen (hub option 3 -> ChooseNetworkProfile @0x52991c):
+// the SAME parchment form/title, with 2 buttons — start as server / start as client
+// (_OPTIONEN_NETZWERK_MENUE+4/+5).
+NetHubLayout RenderNetworkContinueView(u32* dst, const NetViewContext& ctx) {
+    const std::string title = ResolveOne(ctx.gameDir, "_OPTIONEN_NETZWERK_MENUE+0");
+    std::string opt[3] = {
+        ResolveOne(ctx.gameDir, "_OPTIONEN_NETZWERK_MENUE+4"),  // start as server
+        ResolveOne(ctx.gameDir, "_OPTIONEN_NETZWERK_MENUE+5"),  // start as client
+        std::string(),                                          // (no third button)
+    };
+    MenuAssets assets;
+    bool art = false;
+    if (!ctx.gameDir.empty()) { shim::DiskFileSystem fs(ctx.gameDir); art = LoadArt(assets, fs, ctx.fbW); }
+    return PaintNetworkHub(dst, ctx, assets, art, title, opt, /*nButtons=*/2);
 }
 
 // ---------------------------------------------------------------------------
@@ -630,66 +723,108 @@ static NetSearchLayout PaintNetworkSearch(u32* dst, const NetViewContext& ctx,
     else
         FillRect(dst, W, H, 0, 0, W, H, 0xFF101820u);
 
-    L.window = Translate(W, H, kSrchWinX, kSrchWinY, kSrchWinW, kSrchWinH);
-    L.title  = Translate(W, H, kSrchWinX + 24, kSrchWinY + 16, kSrchWinW - 48, 20);
-    L.status = Translate(W, H, kSrchWinX + 24, kSrchWinY + 44, kSrchWinW - 48, 18);
+    // The SEARCH form WIN0 is 575x451 (the kSrchWin W/H are swapped) == the game
+    // options' green frame _TOOL_TIP_GREEN_BIGGER. Render it the SAME way: jeweled
+    // border + green marble title bar + a flood-filled DARK interior, centered, top
+    // at win0Y=120. The server list + the 4 buttons live inside the dark interior.
+    const int oy = (H - 600) / 2;
+    int ix0 = kSrchWinX, iy0 = kSrchWinY + 44, ix1 = kSrchWinX + kSrchWinW, iy1 = kSrchWinY + 400;
+    int fpx0 = (W - 574) / 2, fpy0 = 120 + oy;
+    const render::DecodedShape* frame = art ? assets.SpriteByName("_TOOL_TIP_GREEN_BIGGER", 0) : nullptr;
+    if (frame && frame->width > 0 && frame->height > 0) {
+        const int fw = frame->width, fh = frame->height;
+        fpx0 = (W - fw) / 2; fpy0 = 120 + oy;
+        const u32* fa = frame->argb.data();
+        static const render::DecodedShape* s_maskFor = nullptr;
+        static std::vector<unsigned char> s_interior;
+        if (s_maskFor != frame) {
+            s_maskFor = frame;
+            s_interior.assign((std::size_t)fw * fh, 0);
+            std::vector<int> stk; const int seed = (fh / 2) * fw + (fw / 2);
+            if (!(fa[seed] & 0xFF000000u)) { s_interior[seed] = 1; stk.push_back(seed); }
+            while (!stk.empty()) {
+                const int p = stk.back(); stk.pop_back(); const int x = p % fw, y = p / fw;
+                const int nb[4] = { x+1<fw?p+1:-1, x>0?p-1:-1, y+1<fh?p+fw:-1, y>0?p-fw:-1 };
+                for (int k = 0; k < 4; ++k) { const int q = nb[k];
+                    if (q < 0 || s_interior[q] || (fa[q] & 0xFF000000u)) continue; s_interior[q] = 1; stk.push_back(q); }
+            }
+        }
+        int mnx = fw, mny = fh, mxx = 0, mxy = 0;
+        for (int ry = 0; ry < fh; ++ry) { const int dy = fpy0 + ry; if (dy < 0 || dy >= H) continue;
+            u32* drow = dst + (std::size_t)dy * W;
+            for (int rx = 0; rx < fw; ++rx) { const int dx = fpx0 + rx; if (dx < 0 || dx >= W) continue;
+                const std::size_t fi = (std::size_t)ry * fw + rx; const u32 ap = fa[fi];
+                if (ap & 0xFF000000u) drow[dx] = ap;
+                else if (s_interior[fi]) {
+                    const u32 c = drow[dx];
+                    const int r = ((((c>>16)&0xFF)*82)+22*174)>>8, g=((((c>>8)&0xFF)*82)+26*174)>>8, b=(((c&0xFF)*82)+16*174)>>8;
+                    drow[dx] = 0xFF000000u | ((u32)r<<16) | ((u32)g<<8) | (u32)b;
+                    if (rx<mnx)mnx=rx; if (rx>mxx)mxx=rx; if (ry<mny)mny=ry; if (ry>mxy)mxy=ry;
+                }
+            }
+        }
+        ix0 = fpx0 + mnx; ix1 = fpx0 + mxx; iy0 = fpy0 + mny; iy1 = fpy0 + mxy;
+        // Title centered on the green marble bar (cream gold baked _FONT).
+        L.title = { fpx0, fpy0 + 11, fw, 24 };
+    } else {
+        L.title = Translate(W, H, kSrchWinX + 24, kSrchWinY + 16, kSrchWinW - 48, 20);
+    }
+    L.window = { fpx0, fpy0, frame ? frame->width : kSrchWinW, frame ? frame->height : kSrchWinH };
+    L.status = { ix0 + 10, iy0 + 6, ix1 - ix0 - 20, 18 };
 
-    // Server list rows: the original lays each at y = (index<<7 native row pitch
-    // scaled into the list window) — we space them by 24px under the status line.
+    // Button row: CONNECT / REFRESH / DIRECT / CANCEL — uniform width, all INSIDE the
+    // dark interior between its borders, near the bottom. Same button height (kBtnH).
+    const std::string* lbls[4] = { &L.connectLabel, &L.refreshLabel, &L.directLabel, &L.cancelLabel };
+    NetViewRect* outRects[4] = { &L.connectButton, &L.refreshButton, &L.directButton, &L.cancelButton };
+    int bw[4] = {0,0,0,0};
+    int natTotal = 0;
+    for (int i = 0; i < 4; ++i) {
+        const int lw = LabelWidth(assets, art, *lbls[i]);
+        bw[i] = (lw > 0 ? lw : kBtnNominalW - 2*kBtnCapW - 4) + kBtnCapW + kBtnCapW + 4;  // per-label
+        natTotal += bw[i];
+    }
+    const int innerW = ix1 - ix0;
+    const int gap = 6;
+    const int avail = innerW - 8 - gap * 3;                 // usable width for the 4 boxes
+    if (natTotal > avail) {                                 // scale all down to fit between borders
+        natTotal = 0;
+        for (int i = 0; i < 4; ++i) { bw[i] = bw[i] * avail / (bw[0]+bw[1]+bw[2]+bw[3]); natTotal += bw[i]; }
+    }
+    const int totalW = natTotal + gap * 3;
+    const int btnY = iy1 - kBtnH - 8;                       // just above the interior bottom
+    int rowX = ix0 + (innerW - totalW) / 2;
+    for (int i = 0; i < 4; ++i) {
+        outRects[i]->x = rowX; outRects[i]->y = btnY; outRects[i]->w = bw[i]; outRects[i]->h = kBtnH;
+        const NetViewRect& r = *outRects[i];
+        const bool sel = (ctx.hover == L.rowCount + i);
+        if (art) DrawButton3Slice(dst, W, H, assets, r.x, r.y, r.w, r.h * scale, sel);
+        else { FillRect(dst, W, H, r.x, r.y, r.w, r.h, sel ? 0xFF783030u : 0xFF5A1E1Eu);
+               OutlineRect(dst, W, H, r.x, r.y, r.w, r.h, 0xFFD8C060u); }
+        DrawCenteredLabel(dst, W, H, assets, art, r.x, r.y, r.w, r.h * scale, *lbls[i], scale, 255, 235, 200);
+        rowX += bw[i] + gap;
+    }
+
+    // Server list rows inside the interior, between the status line and the buttons.
     const int rowH = 24;
-    const int listX = kSrchWinX + 24;
-    const int listY = kSrchWinY + 80;
-    const int listW = kSrchWinW - 48;
+    const int listX = ix0 + 10, listY = iy0 + 30, listW = ix1 - ix0 - 20;
     L.rowCount = (int)servers.size();
     L.rows.reserve(L.rowCount);
     for (int i = 0; i < L.rowCount; ++i) {
-        const int fy = listY + i * rowH;
-        NetViewRect r = Translate(W, H, listX, fy, listW, rowH - 2);
+        const int ry = listY + i * rowH;
+        if (ry + rowH > btnY - 6) break;                   // clip to above the buttons
+        NetViewRect r = { listX, ry, listW, rowH - 2 };
         L.rows.push_back(r);
         const bool sel = (i == ctx.hover);
-        if (sel) {
-            FillRect(dst, W, H, r.x, r.y, r.w, r.h, 0xFF40301Eu);
-            OutlineRect(dst, W, H, r.x, r.y, r.w, r.h, 0xFFD8C060u);
-        }
-        DrawLeftLabel(dst, W, H, assets, art, r.x + 6, r.y + 3, servers[i],
-                      scale, 235, 235, 220);
+        if (sel) { FillRect(dst, W, H, r.x, r.y, r.w, r.h, 0xFF40301Eu);
+                   OutlineRect(dst, W, H, r.x, r.y, r.w, r.h, 0xFFD8C060u); }
+        DrawLeftLabel(dst, W, H, assets, art, r.x + 6, r.y + 3, servers[i], scale, 235, 235, 220);
     }
 
-    // Button row at the bottom of the window: CONNECT / REFRESH / DIRECT / CANCEL.
-    const int btnY = kSrchWinY + kSrchWinH - 48;
-    const std::string* lbls[4] = { &L.connectLabel, &L.refreshLabel, &L.directLabel, &L.cancelLabel };
-    NetViewRect* outRects[4] = { &L.connectButton, &L.refreshButton, &L.directButton, &L.cancelButton };
-    int uniformW = 0;
-    for (int i = 0; i < 4; ++i) {
-        const int lw = LabelWidth(assets, art, *lbls[i]);
-        const int bw = lw + kBtnCapW + kBtnCapW + 4;
-        if (bw > uniformW) uniformW = bw;
-    }
-    if (uniformW <= 0) uniformW = kBtnNominalW;
-    const int totalW = uniformW * 4 + 3 * 8;
-    int rowX = kSrchWinX + (kSrchWinW - totalW) / 2;
-    if (rowX < kSrchWinX + 8) rowX = kSrchWinX + 8;
-    for (int i = 0; i < 4; ++i) {
-        *outRects[i] = Translate(W, H, rowX, btnY, uniformW, kBtnH);
-        const NetViewRect& r = *outRects[i];
-        // hover indices for buttons start after the rows (rows: 0..rowCount-1)
-        const bool sel = (ctx.hover == L.rowCount + i);
-        if (art) {
-            DrawButton3Slice(dst, W, H, assets, r.x, r.y, r.w, r.h * scale, sel);
-        } else {
-            FillRect(dst, W, H, r.x, r.y, r.w, r.h, sel ? 0xFF783030u : 0xFF5A1E1Eu);
-            OutlineRect(dst, W, H, r.x, r.y, r.w, r.h, 0xFFD8C060u);
-        }
-        DrawCenteredLabel(dst, W, H, assets, art, r.x, r.y, r.w, r.h * scale,
-                          *lbls[i], scale, 255, 235, 200);
-        rowX += uniformW + 8;
-    }
-
-    // Title + status.
+    // Title (green-bar, cream gold) + status line.
     DrawCenteredLabel(dst, W, H, assets, art, L.title.x, L.title.y, L.title.w,
-                      L.title.h * scale, L.titleLabel, scale, 255, 220, 140);
+                      L.title.h * scale, L.titleLabel, scale, 255, 235, 200);
     DrawLeftLabel(dst, W, H, assets, art, L.status.x, L.status.y, L.statusLabel,
-                  scale, 220, 220, 200);
+                  scale, 230, 222, 180);
     return L;
 }
 
@@ -846,7 +981,13 @@ NetworkScreenResult RunNetworkScreen(shim::IGraphicsDevice& device, shim::IPlatf
     };
 
     int frames = 0;
-    enum { kHub, kSearch, kIp } view = kHub;
+    enum { kHub, kSearch, kIp, kContinue } view = kHub;
+    // "Продолжить игру" sub-screen captions (server / client), resolved once.
+    const std::string contOpt[3] = {
+        ResolveOne(cfg.gameDir, "_OPTIONEN_NETZWERK_MENUE+4"),
+        ResolveOne(cfg.gameDir, "_OPTIONEN_NETZWERK_MENUE+5"),
+        std::string(),
+    };
     std::string typedIp = "127.0.0.1";   // host-IP entry seed (INI Host default)
     std::vector<std::string> serverNames;            // discovered LAN hosts (display)
     std::vector<net::DiscoveredServer> serverList;   // decoded records (IP/blob/type)
@@ -885,8 +1026,26 @@ NetworkScreenResult RunNetworkScreen(shim::IGraphicsDevice& device, shim::IPlatf
                 // multiplayer transport (rule 6, NOT a pre-approved swap) — gate them
                 // here rather than show a wrong screen (rule 8). They stay on the hub.
                 if (hov == 1) { res.sessionFlags = 5; view = kSearch; discoverPending = true; } // search / join
-                else          { res.sessionFlags = (hov == 0) ? 5 : 4; }      // host/profile gated
+                else if (hov == 2) { res.sessionFlags = 4; view = kContinue; }                  // continue -> server/client
+                else { res.sessionFlags = 5; }                                                  // host gated
             }
+        } else if (view == kContinue) {
+            // "Продолжить игру": the server/client choice (pure UI, same parchment
+            // form as the hub). The two actions need real transport -> gated; ESC
+            // (or no third button) returns to the hub.
+            NetViewContext cc = ctx; cc.hover = -1;
+            NetHubLayout L = PaintNetworkHub(scratch.data(), cc, assets, art, hubTitle, contOpt, /*nButtons=*/2);
+            int hov = -1;
+            for (int i = 0; i < L.buttonCount; ++i) if (InRect(mouse.x, mouse.y, L.buttons[i])) hov = i;
+            if (hov != -1) { cc.hover = hov; std::fill(scratch.begin(), scratch.end(), 0u);
+                             L = PaintNetworkHub(scratch.data(), cc, assets, art, hubTitle, contOpt, /*nButtons=*/2); }
+            res.hoveredRow = hov;
+            present(cc);
+            if (escEdge) { view = kHub; continue; }             // back to hub
+            if (clickEdge && hov == 1) {                         // клиент -> server-list/connect
+                res.sessionFlags = 5; view = kSearch; discoverPending = true;
+            }
+            // hov == 0 (сервер / host setup) needs real transport -> gated.
         } else if (view == kSearch) {
             // Run a real LAN discovery pass (1:1 net::DiscoverServers over SDL_net)
             // on entry and on REFRESH. The 3000ms drain window is the original's

@@ -106,7 +106,18 @@ if(GUILD_BACKEND)
   # src/**/*.cpp glob doesn't pull its main() into libguild.
   if(EXISTS ${CMAKE_SOURCE_DIR}/apps/guild_run.cpp)
     add_executable(guild_run ${CMAKE_SOURCE_DIR}/apps/guild_run.cpp)
-    target_link_libraries(guild_run PRIVATE guild)
+    if(WIN32)
+      # MinGW/PE: weak default symbols (the test-overridable gui edges) in a static
+      # archive are not pulled the way they are on ELF, so whole-archive libguild to
+      # bring them in. SDL also redefines main() on Windows, so link SDL2main for the
+      # WinMain entry glue. (Linux keeps the plain link.)
+      target_link_libraries(guild_run PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,guild>")
+      if(TARGET SDL2::SDL2main)
+        target_link_libraries(guild_run PRIVATE SDL2::SDL2main)
+      endif()
+    else()
+      target_link_libraries(guild_run PRIVATE guild)
+    endif()
   endif()
 endif()
 

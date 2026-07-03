@@ -35,6 +35,15 @@
 #include "play/sdl_city_screen.h"
 #include "play/sdl_charcreate_screen.h"
 #include "play/sdl_options_screen.h"
+#include "play/sdl_loadgame_screen.h"
+#include "play/menu_recon_network_screens.h"
+#include "play/sdl_city_screen3d.h"
+#include "play/sdl_charintro_screen.h"
+#include "play/sdl_choosehistory_screen.h"
+#include "play/sdl_chooseplayer_screen.h"
+#include "play/menu_assets.h"
+#include "render/bmp.h"
+#include "render/surface.h"
 #include "play/sdl_credits_screen.h"
 
 #include <algorithm>
@@ -160,7 +169,16 @@ int main(int argc, char** argv) {
 
     // Prefer a real SDL/Vulkan window; degrade to NullPlatform when headless
     // (no display) so the spine still runs end to end on the real GPU backend.
-    bool windowed = sdlPlat.createMainWindow("Die Gilde", 1024, 768, false);
+    // The window MUST be created at the same pixel size the renderer targets,
+    // otherwise SDL reports mouse coords in window space while the GUI hit-tests
+    // in render space — a scale mismatch that makes every click land off-target
+    // (the "I can only click if the cursor is slightly up" bug). The render size
+    // is 1024x768 by default, overridden by GUILD_PLAY_W/GUILD_PLAY_H (e.g. 800x600
+    // to match the original's Gilde.INI) — read it here so the window matches.
+    int winW = 1024, winH = 768;
+    if (const char* pw = std::getenv("GUILD_PLAY_W")) { int v = std::atoi(pw); if (v >= 320) winW = v; }
+    if (const char* ph = std::getenv("GUILD_PLAY_H")) { int v = std::atoi(ph); if (v >= 240) winH = v; }
+    bool windowed = sdlPlat.createMainWindow("Die Gilde", winW, winH, false);
     shim::IPlatform& plat = windowed ? static_cast<shim::IPlatform&>(sdlPlat)
                                      : static_cast<shim::IPlatform&>(nullPlat);
     std::printf("  platform: %s\n", windowed ? "SDL2 window (SDL_WINDOW_VULKAN)"
@@ -198,13 +216,274 @@ int main(int argc, char** argv) {
         // The play loop renders + presents at 1024x768x16 (the original menu/play
         // resolution); init the Vulkan device to that surface (swapchain already
         // configured above when windowed).
-        const int W = 1024, H = 768;
+        // Default 1024x768; override via GUILD_PLAY_W/GUILD_PLAY_H (e.g. 800x600 to
+        // match the original's Gilde.INI screen_x/screen_y for a 1:1 comparison).
+        // Same dimensions the window was created at (above) — keep render size and
+        // window size identical so SDL mouse coords map 1:1 onto GUI hit-tests.
+        int W = winW, H = winH;
         if (!gfx.init(W, H, 16, /*fullscreen=*/false)) {
             std::printf("  --play: Vulkan device init failed.\n");
             if (windowed) sdlPlat.destroyMainWindow();
             return 3;
         }
         shim::IPlatform& playPlat = plat;   // SDL window when present, else NullPlatform
+
+        // Debug/verification: jump straight to an options sub-screen and (with
+        // GUILD_OPTIONS_DUMP) dump its frame, then exit. GUILD_OPEN_OPTIONS=game|gfx|sfx.
+        if (const char* oo = std::getenv("GUILD_OPEN_OPTIONS")) {
+            play::OptionsConfig oc;
+            std::string pg = oo;
+            oc.page = pg == "gfx" ? play::OptionsPage::kGfx
+                    : pg == "sfx" ? play::OptionsPage::kSfx
+                                  : play::OptionsPage::kGame;
+            oc.gameDir = gameDir; oc.fbW = W; oc.fbH = H;
+            oc.maxFrames = framesSet ? frames : 240;   // bounded so it terminates
+            oc.frameCapMs = 0;
+            std::printf("  --play: GUILD_OPEN_OPTIONS=%s -> options screen (%dx%d)\n", oo, W, H);
+            play::RunOptionsScreen(gfx, playPlat, oc);
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
+
+        // Debug/verification: jump straight to the Load-Game screen and (with
+        // GUILD_LOADGAME_DUMP) dump its frame, then exit. GUILD_OPEN_LOAD=1.
+        if (std::getenv("GUILD_OPEN_LOAD")) {
+            play::LoadGameScreenConfig lc;
+            lc.gameDir = gameDir; lc.fbW = W; lc.fbH = H;
+            lc.maxFrames = framesSet ? frames : 240;   // bounded so it terminates
+            lc.frameCapMs = 0;
+            std::printf("  --play: GUILD_OPEN_LOAD -> load-game screen (%dx%d)\n", W, H);
+            play::RunLoadGameScreen(gfx, playPlat, lc);
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
+
+        // Debug/verification: jump straight to the Network screen and (with
+        // GUILD_NETWORK_DUMP) dump its frame, then exit. GUILD_OPEN_NET=1.
+        if (const char* on = std::getenv("GUILD_OPEN_NET")) {
+            // GUILD_OPEN_NET=cont: one-shot render the "Продолжить игру" sub-screen
+            // (server/client) into a CPU buffer and save it via GUILD_NETWORK_DUMP.
+            const std::string onv = on;
+            if (onv == "cont" || onv == "search") {
+                std::vector<std::uint32_t> fb((std::size_t)W * H, 0u);
+                play::NetViewContext nctx; nctx.gameDir = gameDir; nctx.fbW = W; nctx.fbH = H; nctx.hover = -1;
+                if (onv == "search") {
+                    std::vector<std::string> servers;     // empty LAN list (no fake servers)
+                    play::RenderNetworkSearchView(fb.data(), nctx, servers);
+                } else {
+                    play::RenderNetworkContinueView(fb.data(), nctx);
+                }
+                if (const char* mp = std::getenv("GUILD_NETWORK_DUMP")) {
+                    std::vector<std::uint8_t> rgb((std::size_t)W * H * 3);
+                    for (std::size_t i = 0; i < (std::size_t)W * H; ++i) {
+                        const std::uint32_t c = fb[i];
+                        rgb[i*3] = (c >> 16) & 0xFF; rgb[i*3+1] = (c >> 8) & 0xFF; rgb[i*3+2] = c & 0xFF;
+                    }
+                    std::vector<std::uint8_t> bmp = render::BmpSave24Bit(W, H, rgb.data());
+                    if (FILE* f = std::fopen(mp, "wb")) { std::fwrite(bmp.data(), 1, bmp.size(), f); std::fclose(f); }
+                    std::printf("  --play: GUILD_OPEN_NET=cont -> dumped %s\n", mp);
+                }
+                gfx.shutdown();
+                if (windowed) sdlPlat.destroyMainWindow();
+                return 0;
+            }
+            play::NetworkScreenConfig nc;
+            nc.gameDir = gameDir; nc.fbW = W; nc.fbH = H;
+            nc.maxFrames = framesSet ? frames : 240;
+            nc.frameCapMs = 0;
+            std::printf("  --play: GUILD_OPEN_NET -> network screen (%dx%d)\n", W, H);
+            play::RunNetworkScreen(gfx, playPlat, nc);
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
+
+        // Debug/verification: jump straight to the New-Game CHOOSECITY screen and
+        // (with GUILD_CITY_DUMP) dump its frame, then exit. GUILD_OPEN_CITY=1.
+        if (std::getenv("GUILD_OPEN_CITY")) {
+            play::CityScreenConfig csc;
+            csc.gameDir = gameDir; csc.fbW = W; csc.fbH = H;
+            csc.maxFrames = framesSet ? frames : 360;
+            csc.frameCapMs = 16;   // real-time pacing so the ~5 s intro animation plays
+            {
+                namespace fsx = std::filesystem;
+                std::error_code ec;
+                const fsx::path cdir = fsx::path(gameDir) / "Resources" / "gamedata" / "Cities";
+                for (fsx::directory_iterator it(cdir, ec), end; !ec && it != end; it.increment(ec)) {
+                    std::string ext = it->path().extension().string();
+                    for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                    if (ext != ".cty") continue;
+                    csc.cities.emplace_back(it->path().stem().string(),
+                                            std::string("Resources/gamedata/Cities/") + it->path().filename().string());
+                }
+                std::sort(csc.cities.begin(), csc.cities.end());
+            }
+            std::printf("  --play: GUILD_OPEN_CITY -> choosecity screen (%dx%d, %zu cities)\n", W, H, csc.cities.size());
+            play::RunCityScreen3D(gfx, playPlat, csc);
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
+
+        // Debug/verification: jump straight to the difficulty screen reached via
+        // New-Game CHOOSECITY -> Дальше (VIBE_Menu_ChooseCharacterIntroVariant). With
+        // GUILD_DIFF_DUMP, one-shot render the _M0_DIFFICULTY screen and save it.
+        if (std::getenv("GUILD_OPEN_DIFF")) {
+            play::CharIntroContent content;
+            const bool real = play::LoadCharIntroContent(gameDir, content);
+            if (!real) {
+                content.heading = "Difficulty"; content.prompt = "Please choose the difficulty level.";
+                content.options = {"very easy","easy","normal","hard","very hard","back"};
+                content.selectable = {true,true,true,true,true,false};
+            }
+            shim::DiskFileSystem dfs(gameDir);
+            play::MenuAssets assets;
+            const bool haveAssets = assets.Load(dfs);
+            // Render the shared New-Game desk backdrop once via the live device.
+            std::vector<std::uint32_t> backdrop;
+            bool haveBackdrop = false;
+            if (render::Surface* bg = render::SurfaceCreate(W, H, 32)) {
+                if (play::RenderNewGameDeskBackdrop(gfx, gameDir, W, H, bg)) {
+                    backdrop.resize((std::size_t)W * H);
+                    for (int y = 0; y < H; ++y) {
+                        const auto* s = reinterpret_cast<const std::uint32_t*>(
+                            static_cast<const std::uint8_t*>(bg->pixels) + (std::size_t)y * bg->pitch);
+                        std::memcpy(backdrop.data() + (std::size_t)y * W, s, (std::size_t)W * 4);
+                    }
+                    haveBackdrop = true;
+                }
+                render::SurfaceDestroy(bg);
+            }
+            std::vector<std::uint32_t> fb((std::size_t)W * H, 0u);
+            play::RenderCharIntroFrame(fb.data(), W, H, content, /*hoveredRow=*/-1,
+                                       /*seedVariant=*/0, haveAssets ? &assets : nullptr,
+                                       haveBackdrop ? backdrop.data() : nullptr, gameDir);
+            if (const char* mp = std::getenv("GUILD_DIFF_DUMP")) {
+                std::vector<std::uint8_t> rgb((std::size_t)W * H * 3);
+                for (std::size_t i = 0; i < (std::size_t)W * H; ++i) {
+                    const std::uint32_t c = fb[i];
+                    rgb[i*3] = (c >> 16) & 0xFF; rgb[i*3+1] = (c >> 8) & 0xFF; rgb[i*3+2] = c & 0xFF;
+                }
+                std::vector<std::uint8_t> bmp = render::BmpSave24Bit(W, H, rgb.data());
+                if (FILE* f = std::fopen(mp, "wb")) { std::fwrite(bmp.data(), 1, bmp.size(), f); std::fclose(f); }
+                std::printf("  --play: GUILD_OPEN_DIFF -> dumped %s (real=%d)\n", mp, (int)real);
+            }
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
+
+        // Debug/verification: the choose-history screen (New-Game -> difficulty -> a
+        // difficulty pick -> VIBE_Menu_RunChooseHistory). GUILD_HIST_DUMP saves it.
+        if (std::getenv("GUILD_OPEN_HIST")) {
+            play::CharIntroContent content;
+            const bool real = play::LoadChooseHistoryContent(gameDir, content);
+            if (!real) {
+                content.heading = "Historical perspective"; content.prompt = "Choose how history unfolds.";
+                content.options = {"Factual historical account","Your own personal history","No historical events","back"};
+                content.selectable = {true,true,true,false};
+            }
+            shim::DiskFileSystem dfs(gameDir);
+            play::MenuAssets assets;
+            const bool haveAssets = assets.Load(dfs);
+            std::vector<std::uint32_t> backdrop;
+            bool haveBackdrop = false;
+            if (render::Surface* bg = render::SurfaceCreate(W, H, 32)) {
+                if (play::RenderNewGameDeskBackdrop(gfx, gameDir, W, H, bg)) {
+                    backdrop.resize((std::size_t)W * H);
+                    for (int y = 0; y < H; ++y) {
+                        const auto* s = reinterpret_cast<const std::uint32_t*>(
+                            static_cast<const std::uint8_t*>(bg->pixels) + (std::size_t)y * bg->pitch);
+                        std::memcpy(backdrop.data() + (std::size_t)y * W, s, (std::size_t)W * 4);
+                    }
+                    haveBackdrop = true;
+                }
+                render::SurfaceDestroy(bg);
+            }
+            std::vector<std::uint32_t> fb((std::size_t)W * H, 0u);
+            play::RenderChooseHistoryFrame(fb.data(), W, H, content, /*hoveredRow=*/-1,
+                                           /*seedRow=*/0, haveAssets ? &assets : nullptr,
+                                           haveBackdrop ? backdrop.data() : nullptr, gameDir);
+            if (const char* mp = std::getenv("GUILD_HIST_DUMP")) {
+                std::vector<std::uint8_t> rgb((std::size_t)W * H * 3);
+                for (std::size_t i = 0; i < (std::size_t)W * H; ++i) {
+                    const std::uint32_t c = fb[i];
+                    rgb[i*3] = (c >> 16) & 0xFF; rgb[i*3+1] = (c >> 8) & 0xFF; rgb[i*3+2] = c & 0xFF;
+                }
+                std::vector<std::uint8_t> bmp = render::BmpSave24Bit(W, H, rgb.data());
+                if (FILE* f = std::fopen(mp, "wb")) { std::fwrite(bmp.data(), 1, bmp.size(), f); std::fclose(f); }
+                std::printf("  --play: GUILD_OPEN_HIST -> dumped %s (real=%d)\n", mp, (int)real);
+            }
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
+
+        // Debug/verification: the tasks screen (New-Game -> ... -> factual history ->
+        // VIBE "Ваши задания" / _M0_AUFTRAEGE). GUILD_TASKS_DUMP saves it.
+        if (std::getenv("GUILD_OPEN_TASKS")) {
+            play::CharIntroContent content;
+            const bool real = play::LoadChooseTasksContent(gameDir, content);
+            if (!real) {
+                content.heading = "Your tasks"; content.prompt = "Choose your task difficulty.";
+                content.options = {"Free play","Very easy tasks","Easy tasks","Medium tasks","Hard tasks","Very hard tasks","back"};
+                content.selectable = {true,true,true,true,true,true,false};
+            }
+            shim::DiskFileSystem dfs(gameDir);
+            play::MenuAssets assets;
+            const bool haveAssets = assets.Load(dfs);
+            std::vector<std::uint32_t> backdrop;
+            bool haveBackdrop = false;
+            if (render::Surface* bg = render::SurfaceCreate(W, H, 32)) {
+                if (play::RenderNewGameDeskBackdrop(gfx, gameDir, W, H, bg)) {
+                    backdrop.resize((std::size_t)W * H);
+                    for (int y = 0; y < H; ++y) {
+                        const auto* s = reinterpret_cast<const std::uint32_t*>(
+                            static_cast<const std::uint8_t*>(bg->pixels) + (std::size_t)y * bg->pitch);
+                        std::memcpy(backdrop.data() + (std::size_t)y * W, s, (std::size_t)W * 4);
+                    }
+                    haveBackdrop = true;
+                }
+                render::SurfaceDestroy(bg);
+            }
+            std::vector<std::uint32_t> fb((std::size_t)W * H, 0u);
+            play::RenderChooseHistoryFrame(fb.data(), W, H, content, /*hoveredRow=*/-1,
+                                           /*seedRow=*/-1, haveAssets ? &assets : nullptr,
+                                           haveBackdrop ? backdrop.data() : nullptr, gameDir,
+                                           play::kChooseTasksBtnTop0);
+            if (haveBackdrop && std::getenv("GUILD_BACKDROP_ONLY"))   // investigation: raw backdrop
+                std::memcpy(fb.data(), backdrop.data(), (std::size_t)W * H * 4);
+            if (const char* mp = std::getenv("GUILD_TASKS_DUMP")) {
+                std::vector<std::uint8_t> rgb((std::size_t)W * H * 3);
+                for (std::size_t i = 0; i < (std::size_t)W * H; ++i) {
+                    const std::uint32_t c = fb[i];
+                    rgb[i*3] = (c >> 16) & 0xFF; rgb[i*3+1] = (c >> 8) & 0xFF; rgb[i*3+2] = c & 0xFF;
+                }
+                std::vector<std::uint8_t> bmp = render::BmpSave24Bit(W, H, rgb.data());
+                if (FILE* f = std::fopen(mp, "wb")) { std::fwrite(bmp.data(), 1, bmp.size(), f); std::fclose(f); }
+                std::printf("  --play: GUILD_OPEN_TASKS -> dumped %s (real=%d)\n", mp, (int)real);
+            }
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
+
+        // Debug/verification: the player-identity wizard (RunChoosePlayer) — the screen
+        // after the tasks pick, with the camera panned to the shelf. GUILD_PLAYER_DUMP saves
+        // page 0 (set via the screen's own one-shot dump).
+        if (std::getenv("GUILD_OPEN_PLAYER")) {
+            play::ChoosePlayerConfig pc;
+            pc.gameDir = gameDir; pc.fbW = W; pc.fbH = H;
+            pc.maxFrames = framesSet ? frames : 2; pc.frameCapMs = 0;
+            pc.seedFirstName = "Petri";
+            std::printf("  --play: GUILD_OPEN_PLAYER -> player wizard (%dx%d)\n", W, H);
+            play::RunChoosePlayerScreen(gfx, playPlat, pc);
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
 
         shim::DiskFileSystem fs(gameDir);
         play::SdlSessionConfig cfg;
@@ -218,6 +497,26 @@ int main(int argc, char** argv) {
         // day rollover through RunGameDay). SPACE day-advance stays.
         cfg.city3d = true;
         cfg.continuousClock = true;
+
+        // Debug/verification: jump straight into the in-city SESSION (skip the menu),
+        // run until GUILD_SESSION_FRAMES (default 300) and dump the final frame to
+        // GUILD_SESSION_DUMP. City via --city. GUILD_OPEN_SESSION=1.
+        if (std::getenv("GUILD_OPEN_SESSION")) {
+            cfg.maxFrames = framesSet ? frames : 300;
+            if (const char* dp = std::getenv("GUILD_SESSION_DUMP")) cfg.dumpFramePath = dp;
+            std::printf("  --play: GUILD_OPEN_SESSION -> '%s' (%d frames)\n",
+                        cfg.cityPath.c_str(), cfg.maxFrames);
+            play::SdlSessionTrace tr = play::RunSdlSession(fs, gfx, playPlat, cfg);
+            std::printf("  session: lights=%d sunLitVerts=%d panelVis=%d panelText=%d\n",
+                        tr.view3dSceneLights, tr.view3dSunLitVerts,
+                        (int)tr.panelVisible, tr.panelTextOps);
+            std::printf("  session: loaded=%d view3d=%d(%d inst) frames=%d dump=%d\n",
+                        (int)tr.loaded, (int)tr.view3dActive, tr.view3dInstances,
+                        tr.framesPresented, (int)tr.frameDumped);
+            gfx.shutdown();
+            if (windowed) sdlPlat.destroyMainWindow();
+            return 0;
+        }
 
         // Enumerate the shipped cities for the New-Game screen.
         play::SdlMenuConfig mcfg;

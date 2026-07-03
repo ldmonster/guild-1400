@@ -258,8 +258,10 @@ i32 RenderTerrain(TerrainFloor* floor, TerrainRenderState& st, const TerrainWalk
                             // first 6 floats of flt_13FE540[subTexId*0x60], tri1 the next 6.
                             if (st.uvTable && tile->polyUv) {
                                 u8 cellFlag = (u8)v494;          // *v413 (var_4)
-                                i32 quadIdx = qr * colsM1 + qc;  // linear quad index (edi)
-                                u32 subTexId = TerrainSubTexId(cellFlag, st.subTexSrc, quadIdx);
+                                const i32 cellU = (worldX / lod) + qc;   // absolute cell
+                                const i32 cellV = (worldY / lod) + qr;
+                                u32 subTexId = TerrainSubTexId(cellFlag, st.subTexSrc,
+                                                               cellU, cellV);
                                 i32 pIdx = (i32)(&p0 - PBuf(tile));   // poly slot of tri0
                                 TerrainQuadUvT0(&tile->polyUv[kTriUvFloats * pIdx],
                                                 st.uvTable, subTexId);          // poly+0x10

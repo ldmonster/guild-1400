@@ -57,12 +57,19 @@ void InterpolateEdgeRgbz(RgbzRasterState& rs, int a, int b) {
         rs.vLeftStep = (i32)(((i64)((u64)(i64)(rs.vv[b] - rs.vv[a]) << 16)) / dy);  // 13FC5D0
         // wave-7: the fog-factor channel uses the same edge slope as U/V.
         rs.fLeftStep = (i32)(((i64)((u64)(i64)(rs.vf[b] - rs.vf[a]) << 16)) / dy);
+        // gouraud: the RGB shade channels use the same edge slope as U/V.
+        rs.rLeftStep = (i32)(((i64)((u64)(i64)(rs.vr[b] - rs.vr[a]) << 16)) / dy);
+        rs.gLeftStep = (i32)(((i64)((u64)(i64)(rs.vg[b] - rs.vg[a]) << 16)) / dy);
+        rs.bLeftStep = (i32)(((i64)((u64)(i64)(rs.vb[b] - rs.vb[a]) << 16)) / dy);
     } else {
         i32 recip = (i32)(0x40000000 / dy);                            // ecx
         rs.xLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vx[b] - rs.vx[a]))) >> 14);
         rs.uLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vu[b] - rs.vu[a]))) >> 14);
         rs.vLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vv[b] - rs.vv[a]))) >> 14);
         rs.fLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vf[b] - rs.vf[a]))) >> 14);
+        rs.rLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vr[b] - rs.vr[a]))) >> 14);
+        rs.gLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vg[b] - rs.vg[a]))) >> 14);
+        rs.bLeftStep = (i32)(((u64)((i64)recip * (i64)(rs.vb[b] - rs.vb[a]))) >> 14);
     }
     i32 ya  = rs.vy[a];                                    // edi
     // <<16 unsigned (negative ceil() for an off-screen top edge would be
@@ -72,6 +79,9 @@ void InterpolateEdgeRgbz(RgbzRasterState& rs, int a, int b) {
     rs.uLeft = rs.vu[a] + (i32)(((u64)((i64)rs.uLeftStep * (i64)sub)) >> 16); // 13FC5F0
     rs.vLeft = rs.vv[a] + (i32)(((u64)((i64)rs.vLeftStep * (i64)sub)) >> 16); // 13FC5EC
     rs.fLeft = rs.vf[a] + (i32)(((u64)((i64)rs.fLeftStep * (i64)sub)) >> 16);
+    rs.rLeft = rs.vr[a] + (i32)(((u64)((i64)rs.rLeftStep * (i64)sub)) >> 16);
+    rs.gLeft = rs.vg[a] + (i32)(((u64)((i64)rs.gLeftStep * (i64)sub)) >> 16);
+    rs.bLeft = rs.vb[a] + (i32)(((u64)((i64)rs.bLeftStep * (i64)sub)) >> 16);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +191,16 @@ static int FillSpanLoopWith(RgbzRasterState& rs, int rowCount,
             span.fPerPixel = rs.fogPerPixel;
             span.fGrad = rs.fGrad;
             span.fStart = (i32)(((i64)rs.fGrad * (i64)sub) >> 16) + rs.fLeft;
+            // gouraud: the RGB shade channels — same back-off + per-pixel step.
+            span.gPerPixel = rs.gouraudPerPixel;
+            if (rs.gouraudPerPixel) {
+                span.rGrad = rs.rGrad;
+                span.gGrad = rs.gGrad;
+                span.bGrad = rs.bGrad;
+                span.rStart = (i32)(((i64)rs.rGrad * (i64)sub) >> 16) + rs.rLeft;
+                span.gStart = (i32)(((i64)rs.gGrad * (i64)sub) >> 16) + rs.gLeft;
+                span.bStart = (i32)(((i64)rs.bGrad * (i64)sub) >> 16) + rs.bLeft;
+            }
             // The patched span body: plain (0x5F71AD) or colour-key masked
             // (0x5F721A — skip source index 0). Same six patched constants.
             if (masked)
@@ -195,6 +215,9 @@ static int FillSpanLoopWith(RgbzRasterState& rs, int rowCount,
         rs.uLeft  = WrapAddI32(rs.uLeft,  rs.uLeftStep);    // 13FC5F0 += 13FC5CC
         rs.vLeft  = WrapAddI32(rs.vLeft,  rs.vLeftStep);    // 13FC5EC += 13FC5D0
         rs.fLeft  = WrapAddI32(rs.fLeft,  rs.fLeftStep);    // fog-factor left edge
+        rs.rLeft  = WrapAddI32(rs.rLeft,  rs.rLeftStep);    // gouraud RGB left edges
+        rs.gLeft  = WrapAddI32(rs.gLeft,  rs.gLeftStep);
+        rs.bLeft  = WrapAddI32(rs.bLeft,  rs.bLeftStep);
         rs.xRight = WrapAddI32(rs.xRight, rs.xRightStep);   // 13FC5BC += 13FC5C8
         row += rs.fbPitchPx;                               // 13FC5D4 += 2*7626F8
         result = 2 * rs.fbPitchPx;
@@ -255,6 +278,11 @@ static int LoadVertices(RgbzRasterState& rs, const RgbzVertex v[3],
         // The original source is the vertex+79 BYTE (0..255); <<16 in the
         // unsigned domain so it can never be signed-shift UB. HARDENING wave-10.
         rs.vf[i] = (i32)((u32)(src.fogFactor & 0xFF) << 16);
+        // gouraud: the per-vertex RGB diffuse shade (vertex +70/+69/+68 bytes),
+        // promoted to 16.16 like the fog channel.
+        rs.vr[i] = (i32)((u32)src.shadeR << 16);
+        rs.vg[i] = (i32)((u32)src.shadeG << 16);
+        rs.vb[i] = (i32)((u32)src.shadeB << 16);
         if (minY >= rs.vy[i]) {                            // v2 >= (int)v31
             topIdx = i;
             minY = rs.vy[i];
@@ -303,6 +331,9 @@ static int RasterizeTexturedTriangleRgbzWith(Surface* fb, const RgbzVertex v[3],
             rs.uLeft  = (i32)((u32)rs.uLeft  + (u32)rs.uLeftStep  * (u32)skip);
             rs.vLeft  = (i32)((u32)rs.vLeft  + (u32)rs.vLeftStep  * (u32)skip);
             rs.fLeft  = (i32)((u32)rs.fLeft  + (u32)rs.fLeftStep  * (u32)skip); // fog (wave-7)
+            rs.rLeft  = (i32)((u32)rs.rLeft  + (u32)rs.rLeftStep  * (u32)skip); // gouraud RGB
+            rs.gLeft  = (i32)((u32)rs.gLeft  + (u32)rs.gLeftStep  * (u32)skip);
+            rs.bLeft  = (i32)((u32)rs.bLeft  + (u32)rs.bLeftStep  * (u32)skip);
             rs.xRight = (i32)((u32)rs.xRight + (u32)rs.xRightStep * (u32)skip);
             startRow += skip;
             rc -= skip;
@@ -367,6 +398,22 @@ static int RasterizeTexturedTriangleRgbzWith(Surface* fb, const RgbzVertex v[3],
     // off the textured spans run with no fog accumulation (byte-identical to the
     // pre-fog raster).
     rs.fogPerPixel = SpanFog().enabled;
+
+    // gouraud: horizontal RGB shade gradients (same cross product as fog); armed
+    // only when a vertex carries a non-255 shade — all-255 keeps the exact
+    // original span (byte-identical).
+    rs.gouraudPerPixel =
+        (v[0].shadeR & v[1].shadeR & v[2].shadeR &
+         v[0].shadeG & v[1].shadeG & v[2].shadeG &
+         v[0].shadeB & v[1].shadeB & v[2].shadeB) != 0xFF;
+    if (rs.gouraudPerPixel) {
+        const float r0 = (float)v[0].shadeR, r1 = (float)v[1].shadeR, r2 = (float)v[2].shadeR;
+        const float g0 = (float)v[0].shadeG, g1 = (float)v[1].shadeG, g2 = (float)v[2].shadeG;
+        const float b0 = (float)v[0].shadeB, b1 = (float)v[1].shadeB, b2 = (float)v[2].shadeB;
+        rs.rGrad = ConvertChop((v46 * (r0 - r1) - (r2 - r1) * v47) * v18);
+        rs.gGrad = ConvertChop((v46 * (g0 - g1) - (g2 - g1) * v47) * v18);
+        rs.bGrad = ConvertChop((v46 * (b0 - b1) - (b2 - b1) * v47) * v18);
+    }
 
     // --- pick the long edge from the top vertex (kNext/kPrev) ----------------
     // Identical edge-selection algorithm to the shaded path

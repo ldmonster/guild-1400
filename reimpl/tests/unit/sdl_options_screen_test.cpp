@@ -50,7 +50,7 @@ Geom GeomFor(play::OptionsPage p) {
         case play::OptionsPage::kGame: default: return { 104,120,449,575, 136,168, 208, 140, kGameRowY, 11 };
     }
 }
-constexpr int kSliderTrackW = 100, kSliderTrackH = 18, kBtnW = 110, kBtnH = 33;
+constexpr int kSliderTrackW = 100, kSliderTrackH = 18, kBtnW = 96, kBtnH = 33;
 constexpr int kCapL = 68, kCapR = 67;   // slider +/- end-cap widths (asset-less)
 
 // Active page + framebuffer for the geometry mirror (tests set these via BaseCfg).
@@ -71,23 +71,26 @@ SeqPlatform::Step OnPart(int i, int part, bool left) {
 SeqPlatform::Step OnRow(int i, bool left)   { return OnPart(i, 2, left); }  // default: plus
 SeqPlatform::Step OnPlus(int i, bool left)  { return OnPart(i, 2, left); }
 SeqPlatform::Step OnMinus(int i, bool left) { return OnPart(i, 0, left); }
+// Mirrors BuildLayout's OK/Cancel rects: GeomFor stores win0W/win0H swapped, so
+// panelW=win0H, panelH=win0W; the panel is screen-centered; gap=78, btnY uses -21.
 SeqPlatform::Step OnBack(int /*rowCount*/, bool left) {
-    // OK button (apply) center — mirrors BuildLayout's OK rect (left of the pair).
     const Geom g = GeomFor(gPage);
-    const int ox = (gFbW - kDesignW) / 2, oy = (gFbH - kDesignH) / 2;
-    const int win0ScrX = ox + g.win0X, win0ScrY = oy + g.win0Y;
-    const int btnY = win0ScrY + g.win0H - kBtnH - 24;
-    const int gap = 24, totalW = kBtnW * 2 + gap;
-    const int firstX = win0ScrX + (g.win0W - totalW) / 2;
+    const int oy = (gFbH - kDesignH) / 2;
+    const int panelW = g.win0H, panelH = g.win0W;
+    const int win0ScrX = (gFbW - panelW) / 2, win0ScrY = oy + g.win0Y;
+    const int btnY = win0ScrY + panelH - kBtnH - 21;
+    const int gap = 78, totalW = kBtnW * 2 + gap;
+    const int firstX = win0ScrX + (panelW - totalW) / 2;
     SeqPlatform::Step s; s.x = firstX + kBtnW / 2; s.y = btnY + kBtnH / 2; s.left = left; return s;
 }
 SeqPlatform::Step OnCancel(bool left) {
     const Geom g = GeomFor(gPage);
-    const int ox = (gFbW - kDesignW) / 2, oy = (gFbH - kDesignH) / 2;
-    const int win0ScrX = ox + g.win0X, win0ScrY = oy + g.win0Y;
-    const int btnY = win0ScrY + g.win0H - kBtnH - 24;
-    const int gap = 24, totalW = kBtnW * 2 + gap;
-    const int firstX = win0ScrX + (g.win0W - totalW) / 2;
+    const int oy = (gFbH - kDesignH) / 2;
+    const int panelW = g.win0H, panelH = g.win0W;
+    const int win0ScrX = (gFbW - panelW) / 2, win0ScrY = oy + g.win0Y;
+    const int btnY = win0ScrY + panelH - kBtnH - 21;
+    const int gap = 78, totalW = kBtnW * 2 + gap;
+    const int firstX = win0ScrX + (panelW - totalW) / 2;
     SeqPlatform::Step s; s.x = firstX + kBtnW + gap + kBtnW / 2; s.y = btnY + kBtnH / 2; s.left = left; return s;
 }
 

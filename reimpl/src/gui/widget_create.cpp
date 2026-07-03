@@ -8,6 +8,14 @@
 #include <cstdint>
 #include <cstring>
 
+// GUILD_WEAK: weak "default edge" on ELF (tests override); strong on PE/COFF
+// (MinGW has no usable weak-definition support; no overrides in the app build).
+#if defined(_WIN32)
+#define GUILD_WEAK
+#else
+#define GUILD_WEAK __attribute__((weak))
+#endif
+
 namespace guild::gui {
 
 // ---- Leaf-owned global tables (original BSS bases in comments) -------------------------
@@ -35,16 +43,16 @@ void ResetWidgetCreate() {
 // fonts; here we provide neutral defaults so the model is exercisable, and tests may
 // override by linking their own definitions (the symbols are weak by being the only TU).
 // (Faithful behaviour requires the real font cluster; see report "deferred edges".)
-i16 __attribute__((weak)) Property_Get(const char* text, int /*font*/) {
+i16 GUILD_WEAK Property_Get(const char* text, int /*font*/) {
     // The original returns the rendered pixel width; the placeholder returns the byte
     // length so width-derived field math (+96 / +6) stays monotonic and testable.
     return static_cast<i16>(text ? std::strlen(text) : 0);
 }
-int __attribute__((weak)) Property_Validate(const char* /*name*/) { return 0; }
+int GUILD_WEAK Property_Validate(const char* /*name*/) { return 0; }
 
 // VIBE_GameObject_AttachToWindow @0x40e57c: the original links the widget into the window
 // (Z-order + child list). We forward to the shared model epilogue.
-void __attribute__((weak)) GameObject_AttachToWindow(int widgetIdx, int winSlot) {
+void GUILD_WEAK GameObject_AttachToWindow(int widgetIdx, int winSlot) {
     Widget_LinkToWindow(widgetIdx, winSlot);
 }
 
@@ -528,11 +536,11 @@ int Widget_SetButtonState(int widgetIdx, char state) {
 // Graphics-metric table dword_62D204 (84-byte stride): the slider/sprite size math reads
 // packed 16.16 metrics. These are renderer-cluster data; we expose neutral accessors so the
 // model math is exercisable and tests can seed them.
-i16 __attribute__((weak)) GfxMetricWord(int /*gfxId*/, int /*byteOff*/)   { return 0; }
-i32 __attribute__((weak)) GfxMetricDword(int /*gfxId*/, int /*byteOff*/)  { return 0; }
-i16 __attribute__((weak)) SliderTrackExtent(int /*gfxBase*/, int /*flags*/){ return 0; }
-void* __attribute__((weak)) SceneStateFor(int /*gfxId*/)                  { return nullptr; }
-int __attribute__((weak)) GlyphAdvance(void* /*state*/, int /*which*/)    { return 0; }
-int __attribute__((weak)) ButtonBankFrameCount(int /*rec*/)               { return 1; }
+i16 GUILD_WEAK GfxMetricWord(int /*gfxId*/, int /*byteOff*/)   { return 0; }
+i32 GUILD_WEAK GfxMetricDword(int /*gfxId*/, int /*byteOff*/)  { return 0; }
+i16 GUILD_WEAK SliderTrackExtent(int /*gfxBase*/, int /*flags*/){ return 0; }
+void* GUILD_WEAK SceneStateFor(int /*gfxId*/)                  { return nullptr; }
+int GUILD_WEAK GlyphAdvance(void* /*state*/, int /*which*/)    { return 0; }
+int GUILD_WEAK ButtonBankFrameCount(int /*rec*/)               { return 1; }
 
 } // namespace guild::gui

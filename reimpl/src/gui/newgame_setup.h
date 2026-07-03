@@ -135,6 +135,10 @@ struct NewGameParams {
     // History/difficulty (RunChooseHistory): 1, 2 or 0 (History_SetActiveFlag arg).
     int historyFlag = 0;
 
+    // Task/mission difficulty (RunChooseTasks, _M0_AUFTRAEGE): the picked mode 0..5
+    // (0 = free play). Only asked when historyFlag == 1 (factual); -1 = not asked.
+    int taskMode = -1;
+
     // Player identity (RunChoosePlayer).
     std::string firstName;       // [Network] Name      (Vorname)   -> global String
     std::string familyName;      // [Network] Familienname (Nachname) -> byte_122F4CA

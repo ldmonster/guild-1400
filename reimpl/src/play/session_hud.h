@@ -70,10 +70,13 @@
 // =============================================================================
 #include "guild/common/types.h"
 #include "play/hud_render.h"        // HudBarObject / HudMarker / hooks / strings
+#include "gui/text/textdb.h"        // gui::text::TextDb (panel line resolve)
+#include "play/menu_assets.h"       // MenuFont (the gold gothic banner font)
 #include "play/session_panels.h"    // tooltip dispatch + info panel composite
 #include "render/gfx_archive.h"     // render::GfxArchive (real gilde.gfx directory)
 #include "sim/types.h"              // sim::GameTime (14-byte packed clock record)
 
+#include <string>
 #include <vector>
 
 namespace guild::shim { class IFileSystem; }
@@ -136,6 +139,16 @@ public:
         // (VIBE_InfoPanel_Update @0x4b84c0 + the @0x4b64b0.. builders),
         // composited through the same 16bpp leaves (see play/session_panels.h).
         const SessionPanelsInputs* panels = nullptr;
+
+        // Player display name for the top banner ("<title> <name>", e.g.
+        // "Господин Patri Müller"); null/empty = banner shows the title only.
+        const char* playerName = nullptr;
+
+        // Floating selection label (the original's building name under the
+        // HAUSPFEIL marker): screen-centred at (labelX, labelY), wrapped to two
+        // lines in the small gold face. Null = no label.
+        const char* labelText = nullptr;
+        int labelX = 0, labelY = 0;
     };
 
     // HUD anchor layout within the frame (caller-tunable, like RenderHud's
@@ -146,8 +159,24 @@ public:
         int statusX  = 8,  statusY  = 30;  // selected-entity status line
         int barX     = 4,  barY     = 48;  // player-bar strip top-left
         int mapX     = -1, mapY     = 8;   // marker/map region top-left
+        // Split money anchor (the sidebar money slot); <0 = follow captionX/Y.
+        int moneyX   = -1, moneyY  = -1;
     };
     Layout layout;
+
+    // ------------------------------------------------------------------
+    // PANEL CHROME (the in-city screen furniture): decode the real
+    // `_PANEL_*` 800x600 overlay (gold top banner + right sidebar with the
+    // transparent 3D-view center) and the city crest `_STADTWAPPEN_<CITY>`
+    // from the loaded gilde.gfx; Render() composites them (alpha-keyed,
+    // scaled) BEFORE the HUD elements. Real pixels through the reconstructed
+    // depth-2 decode; the engine-leaf 24->16 bank conversion
+    // (VIBE_Shape_ConvertRgbTo16 @0x5d7c0c) remains the named gap — this
+    // feeds the SAME artwork through the surface path instead. Returns true
+    // if the panel decoded (needs a successful Init()).
+    // ------------------------------------------------------------------
+    bool DecodePanelChrome(const char* panelName, const char* crestName);
+    bool panelChromeReady() const { return panelChrome_.width > 0; }
 
     // ------------------------------------------------------------------
     // Load the REAL HUD artwork. Reads gfx/gilde.gfx via `fs`, runs the real
@@ -178,6 +207,11 @@ public:
     // for the per-frame results (SessionPanels::lastResult()).
     SessionPanels&       panels()       { return panels_; }
     const SessionPanels& panels() const { return panels_; }
+    // The localized text array loaded with the chrome (null before/without it) —
+    // feed to SessionPanelsInputs.textDb so panel lines resolve real strings.
+    const gui::text::TextDb* textDb() const {
+        return textDbLoaded_ ? &textDb_ : nullptr;
+    }
 
     // ---- investigation results (filled by Init) ----------------------
     bool gfxLoaded()      const { return gfxLoaded_; }
@@ -197,6 +231,23 @@ private:
     render::GfxArchive archive_;
     SessionPanels panels_;
     SessionHudResult last_;
+    render::DecodedShape panelChrome_;   // _PANEL_* 800x600 ARGB overlay (alpha-keyed)
+    render::DecodedShape cityCrest_;     // _STADTWAPPEN_<CITY> ARGB
+    // Chrome CONTENT (loaded by DecodePanelChrome): the gold gothic banner font,
+    // the red button 3-slice, and the localized strings (textbin_deutsch.BIN):
+    // title _TITEL_MAENNLICH+1, seasons _JAHRESZEITEN+0..3, button labels.
+    MenuFont bannerFont_;                // _FONT   (banner/date — big gold)
+    MenuFont smallFont_;                 // _FONT+1 (sidebar buttons/money — small gold)
+    gui::text::TextDb textDb_;           // the full localized text array (chrome load)
+    bool textDbLoaded_ = false;
+    render::DecodedShape btnCapL_, btnCapR_, btnMid_;   // _BUTTON_RED 0/1/2
+    std::string title_, seasons_[4], optLabel_, transLabel_;
+    // Selection-state sidebar buttons (the live captures): with NOTHING
+    // selected the pair reads Стройка/Обзор (_INFOPANEL_BAUEN+0 /
+    // _INFOPANEL_OPTIONEN+4); with a building selected Информация/Транспорт
+    // (_INFOPANEL_OPTIONEN+2 / the transport heading).
+    std::string buildLabel_, overviewLabel_, infoLabel_;
+    shim::IFileSystem* fs_ = nullptr;    // stashed by Init for DecodePanelChrome
     bool gfxLoaded_      = false;
     int  gfxObjectCount_ = 0;
     int  bankCount_      = 0;

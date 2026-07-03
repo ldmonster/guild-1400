@@ -62,6 +62,9 @@ constexpr int kWinX = 232, kWinY = 160;            // form window x/y (mode-3 ba
 // selected/hover {3=left,5=centre,4=right}.
 constexpr int kBtnDesignW = 124, kBtnDesignH = 33;
 constexpr int kBtnCapW = 12, kBtnMidW = 100;
+// Live-binary ground truth (frida @800x600): menu buttons are a fixed 300px wide
+// at screen x=258 (the full MENU\MAIN_MENU window width), label centred inside.
+constexpr int kBtnScreenX0 = 258, kBtnFullW = 300;
 
 const std::uint8_t* GlyphMap() {
     static std::uint8_t table[256];
@@ -378,7 +381,7 @@ struct NativeMenuHooks : gui::MainMenuRunHooks {
                     const int tx = r.x + (r.w - textW) / 2;
                     const int ty = r.y + (r.h - textH) / 2;
                     fnt.DrawText(scratch.data(), W, H, tx, ty, lbl->c_str(),
-                                 scale, 255, 235, 200);
+                                 scale, 255, 255, 214);  // near-white (frida-sampled glyph colour)
                 } else {
                     const char* cap = lbl ? lbl->c_str() : CaptionForY(by);
                     const int textW = (int)std::strlen(cap) * 6;
@@ -466,6 +469,16 @@ struct NativeMenuHooks : gui::MainMenuRunHooks {
         ChooseHistoryScreenResult hist = RunChooseHistoryScreen(*dev, *plat, chc);
         if (hist.quitByWindow) { windowOpen = false; return false; }
         if (!hist.confirmed) return false;         // back / ESC -> chain aborts
+        // After the FACTUAL perspective (flag 1) the original asks for the task/mission
+        // difficulty ("Ваши задания" / _M0_AUFTRAEGE). The other perspectives skip it.
+        int taskMode = -1;
+        if (hist.historyFlag == 1) {
+            ChooseHistoryConfig tcfg; tcfg.gameDir = gameDir; tcfg.fbW = fbW; tcfg.fbH = fbH; tcfg.frameCapMs = frameCapMs;
+            ChooseTasksScreenResult tasks = RunChooseTasksScreen(*dev, *plat, tcfg);
+            if (tasks.quitByWindow) { windowOpen = false; return false; }
+            if (!tasks.confirmed) return false;    // back / ESC -> chain aborts
+            taskMode = tasks.taskMode;
+        }
         // VIBE_Menu_RunChoosePlayer @0x52ccd8 — the identity wizard (Vorname / Nachname /
         // Geschlecht / Glauben / Wappen). The first character-spine screen.
         ChoosePlayerConfig pcfg; pcfg.gameDir = gameDir; pcfg.fbW = fbW; pcfg.fbH = fbH; pcfg.frameCapMs = frameCapMs;
@@ -485,6 +498,7 @@ struct NativeMenuHooks : gui::MainMenuRunHooks {
                                CityFileBaseName(city.cityPath), /*network=*/false);
         ccc.in.difficulty = intro.variant;         // byte_12335BA (0..4)
         ccc.in.historyFlag = hist.historyFlag;     // carry the chosen perspective forward
+        ccc.in.taskMode = taskMode;                // _M0_AUFTRAEGE pick (factual only; else -1)
         ccc.in.firstName = player.firstName;       // identity from the player wizard
         ccc.in.familyName = player.familyName;
         ccc.in.gender = player.gender; ccc.in.faith = player.faith; ccc.in.wappen = player.wappenIndex;
@@ -541,9 +555,11 @@ struct NativeMenuHooks : gui::MainMenuRunHooks {
         if (nr.quitByWindow) { windowOpen = false; return false; }
         return false;   // no real session launched (rule 6) -> back to the menu
     }
-    void RunOptionsGfx() override { OsCursorScope cur(plat); OptionsConfig o; o.page = OptionsPage::kGfx;  o.gameDir = gameDir; o.fbW = fbW; o.fbH = fbH; o.frameCapMs = frameCapMs; RunOptionsScreen(*dev, *plat, o); }
-    void RunOptionsSfx() override { OsCursorScope cur(plat); OptionsConfig o; o.page = OptionsPage::kSfx;  o.gameDir = gameDir; o.fbW = fbW; o.fbH = fbH; o.frameCapMs = frameCapMs; RunOptionsScreen(*dev, *plat, o); }
-    void RunOptionsGame() override{ OsCursorScope cur(plat); OptionsConfig o; o.page = OptionsPage::kGame; o.gameDir = gameDir; o.fbW = fbW; o.fbH = fbH; o.frameCapMs = frameCapMs; RunOptionsScreen(*dev, *plat, o); }
+    // No OsCursorScope here: RunOptionsScreen draws the game leather-hand cursor
+    // itself (_MOUSE_CURSOR), so the OS arrow must remain hidden (as in the menu).
+    void RunOptionsGfx() override { OptionsConfig o; o.page = OptionsPage::kGfx;  o.gameDir = gameDir; o.fbW = fbW; o.fbH = fbH; o.frameCapMs = frameCapMs; RunOptionsScreen(*dev, *plat, o); }
+    void RunOptionsSfx() override { OptionsConfig o; o.page = OptionsPage::kSfx;  o.gameDir = gameDir; o.fbW = fbW; o.fbH = fbH; o.frameCapMs = frameCapMs; RunOptionsScreen(*dev, *plat, o); }
+    void RunOptionsGame() override{ OptionsConfig o; o.page = OptionsPage::kGame; o.gameDir = gameDir; o.fbW = fbW; o.fbH = fbH; o.frameCapMs = frameCapMs; RunOptionsScreen(*dev, *plat, o); }
     void RunCreditsScroll() override { OsCursorScope cur(plat); CreditsScreenConfig c; c.gameDir = gameDir; c.fbW = fbW; c.fbH = fbH; c.frameCapMs = frameCapMs; RunCreditsScreen(*dev, *plat, c); }
     void RunCreditsWindow() override { OsCursorScope cur(plat); CreditsScreenConfig c; c.gameDir = gameDir; c.fbW = fbW; c.fbH = fbH; c.frameCapMs = frameCapMs; RunCreditsScreen(*dev, *plat, c); }
 };
@@ -561,9 +577,13 @@ MenuButtonRect MenuButtonScreenRect(int designY, int fbW, int fbH, int designW) 
     // native px; _BUTTON_RED record height +82 = 33).
     const int ox = (fbW - kDesignW) / 2;   // horizontal centering offset
     const int oy = (fbH - kDesignH) / 2;   // vertical centering offset
-    const int dx = kWinX + gui::kMainMenuButtonX + ox;
-    const int dy = kWinY + designY + oy;
-    return { dx, dy, designW, kBtnDesignH };
+    // GROUND TRUTH (frida, live gilde.exe @800x600): every menu button widget is
+    // x=258, y=160+designY, w=300, h=33 — a FIXED 300px width (the full menu-window
+    // width), NOT sized to the label. Read directly from dword_69FFB4[id]+0x14.
+    (void)designW;
+    const int dx = kBtnScreenX0 + ox;      // 258 at 800x600, center-translated
+    const int dy = kWinY + designY + oy;   // 160 + designY
+    return { dx, dy, kBtnFullW, kBtnDesignH };  // 300 x 33
 }
 
 NativeMenuResult RunNativeMainMenu(shim::IGraphicsDevice& device, shim::IPlatform& plat,
@@ -639,8 +659,13 @@ NativeMenuResult RunNativeMainMenu(shim::IGraphicsDevice& device, shim::IPlatfor
                 const int w = assets.font().ButtonWidth(menuLabels[i].c_str());
                 if (w > uniformW) uniformW = w;
             }
-        if (uniformW > 0)
-            for (int i = 0; i < 8; ++i) menuWidths[i] = uniformW;  // equalize to widest
+        // VIBE_Window_NormalizeSpriteWidths @0x416658: the common width is the
+        // widest sprite + 8, clamped to a 128px minimum (NOT just the widest).
+        if (uniformW > 0) {
+            uniformW += 8;
+            if (uniformW < 128) uniformW = 128;
+            for (int i = 0; i < 8; ++i) menuWidths[i] = uniformW;
+        }
     }
 
     gui::MainMenuRunState st;

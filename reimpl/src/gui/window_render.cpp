@@ -4,17 +4,26 @@
 
 #include <cstdint>
 
+// GUILD_WEAK: weak "default edge" on ELF (test TUs override these); strong on
+// PE/COFF (MinGW), which has no usable weak-definition support — there are no
+// test overrides in the Windows app build, so the defaults must be strong.
+#if defined(_WIN32)
+#define GUILD_WEAK
+#else
+#define GUILD_WEAK __attribute__((weak))
+#endif
+
 namespace guild::gui {
 
 // ---- Forward-declared edges: default no-op / neutral (tests override) ------
 // All marked weak so a test TU can supply counting/behavioural definitions.
-void __attribute__((weak)) Widget_LayoutBounds(int /*x*/, int /*y*/, int /*widgetIdx*/) {}
-void __attribute__((weak)) Widget_RefreshText(int /*widgetIdx*/) {}
-void __attribute__((weak)) GameObject_DispatchInteractions() {}
-int  __attribute__((weak)) DecompressState_Blob() { return 0; }
-void __attribute__((weak)) GameLogic_Interactions() {}
-void __attribute__((weak)) Decompression_Finalize() {}
-int  __attribute__((weak)) Render_PresentFrame() { return 0; }
+void GUILD_WEAK Widget_LayoutBounds(int /*x*/, int /*y*/, int /*widgetIdx*/) {}
+void GUILD_WEAK Widget_RefreshText(int /*widgetIdx*/) {}
+void GUILD_WEAK GameObject_DispatchInteractions() {}
+int  GUILD_WEAK DecompressState_Blob() { return 0; }
+void GUILD_WEAK GameLogic_Interactions() {}
+void GUILD_WEAK Decompression_Finalize() {}
+int  GUILD_WEAK Render_PresentFrame() { return 0; }
 
 // Window scroll-state field byte offsets (the originals address v1[145..151]).
 namespace {

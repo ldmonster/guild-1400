@@ -7,6 +7,14 @@
 
 #include <cstdint>
 
+// GUILD_WEAK: weak "default edge" on ELF (tests override); strong on PE/COFF
+// (MinGW has no usable weak-definition support; no overrides in the app build).
+#if defined(_WIN32)
+#define GUILD_WEAK
+#else
+#define GUILD_WEAK __attribute__((weak))
+#endif
+
 namespace guild::gui {
 
 // Screen-center globals (owned here). Original BSS dword_69FFA4 / dword_69FFA0.
@@ -19,14 +27,14 @@ i32 g_screenCenterY = 0; // dword_69FFA0
 // data-model effect of their own in the originals' caller-visible contract that
 // the lifecycle functions here depend on.
 // ---------------------------------------------------------------------------
-void __attribute__((weak)) Widget_DestroyByType(int /*widgetIdx*/, int /*a2*/, int /*a3*/) {}
-int  __attribute__((weak)) Surface_DestroySurface(i32 /*surfaceHandle*/) { return 0; }
+void GUILD_WEAK Widget_DestroyByType(int /*widgetIdx*/, int /*a2*/, int /*a3*/) {}
+int  GUILD_WEAK Surface_DestroySurface(i32 /*surfaceHandle*/) { return 0; }
 // gilde.exe 0x41aae8 — VIBE_ZOrder_RaiseWindow. DEFERRED: its body shuffles the widget
 // pointer cache using host-pointer identity (widget marker/+0 vs window backWidget index,
 // widget +44 group link vs Window*); translating that over our index model would not be
 // behaviour-identical, so it is left as a placeholder (Form_RaiseWindows still drives the
 // per-window dispatch faithfully). Weak so the real translation can supersede it.
-int  __attribute__((weak)) ZOrder_RaiseWindow(int /*winSlot*/) { return 0; }
+int  GUILD_WEAK ZOrder_RaiseWindow(int /*winSlot*/) { return 0; }
 
 // gilde.exe 0x41e544 — VIBE_Form_GetWindowId
 int Form_GetWindowId(int formId, int slot) {

@@ -209,15 +209,28 @@ constexpr int kPrev[3] = {2, 0, 1};
 // from the surface ColorFormat: clear bit0 of each of the R/G/B fields so the
 // >>1 average cannot carry between channels. RGB565 -> 0xF7DE, RGB555 -> 0x7BDE.
 u16 BlendMaskFromFormat(const ColorFormat& f) {
-    u32 lsb = (1u << f.rPos) | (1u << f.gPos) | (1u << f.bPos);
-    return (u16)(~lsb & 0xFFFFu);
+    // The engine's blend mask (word_1406944, built by VIBE_Shape_InitColorMasks
+    // @0x5d4ad4): ((1 << (7 - prec)) - 1) << pos per channel — each field KEEPS
+    // its lower bits and drops its TOP bit, because the span applies the mask
+    // AFTER the >>1 (the foreign bit from the field above lands on the top).
+    // 565 -> 0x7BEF (matches the live word_1406944 read). The previous ~LSB
+    // form (0xF7DE) was the PRE-shift mask — wrong for this span order (channel
+    // bleed on blended foliage).
+    const u32 keep = (((1u << (7 - f.rPrec)) - 1u) << f.rPos) |
+                     (((1u << (7 - f.gPrec)) - 1u) << f.gPos) |
+                     (((1u << (7 - f.bPrec)) - 1u) << f.bPos);
+    return (u16)(keep & 0xFFFFu);
 }
+
+} // namespace
 
 // One particle billboard triangle, blended. Mirrors the body of
 // RasterizeTexturedTriangleRgbzWith but drives the blend/OR span. polyFlags38=0
 // for particles (billboards are always front-wound), so no winding reversal.
+// PUBLIC (declared in fx_recon3_particle_render.h): the city foliage alpha
+// route reuses it with masked=true.
 int RasterizeBlendTriangle(Surface* fb, const RgbzVertex v[3], const Texture& tex,
-                           const u16* palette, ParticleBlend blend) {
+                           const u16* palette, ParticleBlend blend, bool masked) {
     RgbzRasterState rs;
     std::memset(&rs, 0, sizeof(rs));
     rs.fbPitchPx = fb->widthPx;
@@ -298,10 +311,17 @@ int RasterizeBlendTriangle(Surface* fb, const RgbzVertex v[3], const Texture& te
                 i32 u = (i32)(((i64)rs.uGrad * (i64)sub) >> 16) + rs.uLeft;
                 i32 vv = (i32)(((i64)rs.vGrad * (i64)sub) >> 16) + rs.vLeft;
                 span.spanLen = rs.spanLen;
-                if (blend == kBlendAdd)
-                    guild::render::FillSpanTexturedOr(span, row + xL, u, vv, bp);
-                else
-                    guild::render::FillSpanTexturedBlend(span, row + xL, u, vv, bp);
+                if (blend == kBlendAdd) {
+                    if (masked)
+                        guild::render::FillSpanTexturedOrMasked(span, row + xL, u, vv, bp);
+                    else
+                        guild::render::FillSpanTexturedOr(span, row + xL, u, vv, bp);
+                } else {
+                    if (masked)
+                        guild::render::FillSpanTexturedBlendMasked(span, row + xL, u, vv, bp);
+                    else
+                        guild::render::FillSpanTexturedBlend(span, row + xL, u, vv, bp);
+                }
             }
             rs.xLeft += rs.xLeftStep; rs.uLeft += rs.uLeftStep;
             rs.vLeft += rs.vLeftStep; rs.xRight += rs.xRightStep;
@@ -338,8 +358,6 @@ int RasterizeBlendTriangle(Surface* fb, const RgbzVertex v[3], const Texture& te
     }
     return drew;
 }
-
-} // namespace
 
 int render_system_to_surface(Surface* fb, const ParticleSystemView& sys,
                              const Mat4& world, const ProjState& ps,

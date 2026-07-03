@@ -98,13 +98,15 @@ void SessionCamera::Init(float eyeX, float eyeZ, int fbW, int fbH) {
     obj.matrix[0] = 1.0f; obj.matrix[4] = 1.0f; obj.matrix[8] = 1.0f;
     obj.matrix[10] = 1.0f;
 
-    // REAL anchor at zoom fraction 0: Camera_AnchorToTerrain @0x4b2900 sets
-    // posY = terrain + baseHeight + span*0 (= 450 headless) and the pitch
-    // worldX = baseAngle, plus the pos/world history mirrors.
-    float zero = 0.0f;
-    i32 zeroBits;
-    std::memcpy(&zeroBits, &zero, sizeof(i32));
-    render::Camera_AnchorToTerrain(obj, cs, h1_, /*x*/ 0, /*z*/ 0, zeroBits);
+    // REAL city-enter anchor: the boot call site at gilde.exe 0x506fe9 is
+    // `push 0.33f; call Camera_AnchorToTerrain@0x4b2900` (frida-verified live:
+    // flt_6316DC == 0.33, node pitch == baseAngle + span*0.33 == -0.6728).
+    // posY = terrain + baseHeight + (spanHeight-baseHeight)*0.33 (= 829.5 over
+    // flat terrain) and pitch worldX follows the same 0.33 lerp.
+    float bootZoom = 0.33f;
+    i32 bootZoomBits;
+    std::memcpy(&bootZoomBits, &bootZoom, sizeof(i32));
+    render::Camera_AnchorToTerrain(obj, cs, h1_, /*x*/ 0, /*z*/ 0, bootZoomBits);
 
     // World-pose mirror (the scene graph's local->world propagation for the
     // parent-less camera node): +76 -> +92, +132 -> +144. EdgeScroll's center

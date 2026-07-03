@@ -1,6 +1,7 @@
 // guild::play — ChooseCity info window (real per-city card). See city_info.h.
 #include "play/city_info.h"
 
+#include "play/menu_assets.h"        // MenuFont — the baked-gold _FONT
 #include "gui/text_load.h"           // gui::text::BuildTextArray
 #include "io/archive_mount.h"
 #include "render/surface.h"
@@ -68,6 +69,19 @@ std::string CityInfoText::Beschr(const std::string& city) const {
     return (i >= 0) ? db_.Text(i) : std::string();
 }
 
+std::string CityInfoText::ScreenTitle() const {
+    int i = db_.FindIndex("_M0_STADT+0");
+    if (i < 0 || !db_.Text(i)) return std::string();
+    std::string s = db_.Text(i);
+    // Strip leading "$Z" (centering) and any other $X markup codes.
+    std::string out;
+    for (std::size_t j = 0; j < s.size();) {
+        if (s[j] == '$') { j += (j + 1 < s.size() ? 2 : 1); continue; }
+        out += s[j++];
+    }
+    return out;
+}
+
 std::string CityInfoText::Info(const std::string& city) const {
     const std::string key = "_STADTAUSWAHL_" + Upper(city) + "_INFO+0";
     int i = db_.FindIndex(key.c_str());
@@ -115,15 +129,32 @@ void BlitShape(render::Surface* s, int dx, int dy, int dw, int dh,
         }
     }
 }
-// The markup card text, drawn dark on parchment within (tx,ty,tw) starting at line0.
+// The markup card text. When `font` is set it is drawn in the baked-gold _FONT (the
+// main-menu button font); otherwise the built-in cp1251 raster (gold/cream).
 void DrawBeschr(render::Surface* fb, int tx, int ty, int colUnit, int lineH,
-                const std::string& beschr) {
+                const std::string& beschr, const MenuFont* font,
+                int boxX, int boxW) {
     int line = 0, col = 0; bool inTitle = false;
+    auto widthOf = [&](const std::string& s) -> int {
+        return (font && font->loaded()) ? font->MeasureWidth(s.c_str())
+                                        : (int)s.size() * 6;
+    };
     auto draw = [&](const std::string& run, bool t) {
         if (run.empty()) return;
-        u8 r = t ? 96 : 54, g = t ? 28 : 36, b = t ? 12 : 18;   // dark red title / dark text
-        int endx = render::DrawTextCp1251(fb, tx + col, ty + line * lineH, run.c_str(), r, g, b);
-        col = endx - tx;
+        // The $[ ]$ title (city name) is centered on the box X; the rest is laid
+        // out left-aligned by the column tabs.
+        const int x = t ? boxX + (boxW - widthOf(run)) / 2 : tx + col;
+        const int y = ty + line * lineH;
+        if (font && font->loaded()) {
+            font->DrawText(reinterpret_cast<std::uint32_t*>(fb->pixels),
+                           fb->widthPx ? fb->widthPx : fb->width, fb->height,
+                           x, y, run.c_str(), 1, 0, 0, 0, /*modulate=*/false);  // baked gold
+            if (!t) col += font->MeasureWidth(run.c_str());
+        } else {
+            u8 r = t ? 255 : 235, g = t ? 220 : 225, b = t ? 140 : 200;
+            int endx = render::DrawTextCp1251(fb, x, y, run.c_str(), r, g, b);
+            if (!t) col = endx - tx;
+        }
     };
     std::string run;
     for (std::size_t i = 0; i < beschr.size();) {
@@ -151,35 +182,53 @@ void DrawBeschr(render::Surface* fb, int tx, int ty, int colUnit, int lineH,
 
 InfoWindowLayout RenderCityInfoWindow(render::Surface* fb, int fbW, int fbH,
                                       const CityInfoText& text, CityInfoGfx& gfx,
-                                      const std::string& cityName) {
+                                      const std::string& cityName, const MenuFont* font) {
     InfoWindowLayout L;
     if (!fb || !fb->pixels) return L;
-    // Menu/CHOOSECITY form rects (800x600 layout), scaled to the framebuffer.
+    // Menu/CHOOSECITY form rects (800x600 layout), scaled to the framebuffer. The
+    // info box is the inner window (129,400,527,141) — a DARK semi-transparent box
+    // (NOT parchment, no crest), city name + info rows in gold/cream (frida-measured).
     const float sx = fbW / 800.0f, sy = fbH / 600.0f;
+    // The DARK info box is the form's OUTER bottom window (120,392,548,204) — the
+    // full dark panel (info rows up top, the choose button on its bottom strip).
     const int px = (int)(120 * sx), py = (int)(392 * sy);
     const int pw = (int)(548 * sx), ph = (int)(204 * sy);
     L.panelX = px; L.panelY = py; L.panelW = pw; L.panelH = ph; L.valid = true;
 
-    const render::DecodedShape* panel = gfx.Panel();
-    if (panel) BlitShape(fb, px, py, pw, ph, *panel);
-    else FillRect(fb, px, py, pw, ph, 196, 170, 120);   // parchment fallback
+    // Dark semi-transparent fill (blend ~0.72 toward near-black) + a thin gold edge.
+    for (int yy = py; yy < py + ph; ++yy) {
+        if (yy < 0 || yy >= fb->height) continue;
+        auto* row = reinterpret_cast<std::uint32_t*>(
+            static_cast<std::uint8_t*>(fb->pixels) + (std::size_t)yy * fb->pitch);
+        for (int xx = px; xx < px + pw; ++xx) {
+            if (xx < 0 || xx >= (fb->widthPx ? fb->widthPx : fb->width)) continue;
+            const std::uint32_t c = row[xx];
+            const int r = (((c >> 16) & 0xFF) * 72) / 256 + (18 * 184) / 256;
+            const int g = (((c >> 8)  & 0xFF) * 72) / 256 + (14 * 184) / 256;
+            const int b = (((c)       & 0xFF) * 72) / 256 + (10 * 184) / 256;
+            row[xx] = 0xFF000000u | ((std::uint32_t)r << 16) | ((std::uint32_t)g << 8) | (std::uint32_t)b;
+        }
+    }
+    // (No border — the original's dark zone has no gold edge.)
 
     const std::string beschr = text.Beschr(cityName);
 
-    // City crest on the left (native aspect, fit to the panel's upper area).
-    int crestRight = px + 12;
-    if (const render::DecodedShape* crest = gfx.Crest(cityName)) {
-        const int ch = (int)(120 * sy), cw = crest->width * ch / (crest->height ? crest->height : 1);
-        const int cx = px + (int)(14 * sx), cy = py + (int)(20 * sy);
-        BlitShape(fb, cx, cy, cw, ch, *crest);
-        crestRight = cx + cw + (int)(12 * sx);
-    }
-
-    // Title (ASCII city name) + the BESCHR markup card, dark on parchment.
-    const int tx = crestRight, ty = py + (int)(14 * sy);
-    const int lineH = 12, colUnit = 34;
-    render::DrawTextCp1251(fb, tx, ty, cityName.c_str(), 110, 30, 12);
-    DrawBeschr(fb, tx, ty + lineH + 2, colUnit, lineH, beschr);
+    // City name + BESCHR info rows. With the baked-gold _FONT (main-menu button
+    // font) when available; else the built-in cp1251 raster. The _FONT is taller,
+    // so the row pitch + value column widen accordingly.
+    const bool mf = font && font->loaded();
+    (void)cityName;   // the LATIN file name is NOT shown; the localized city name is
+                      // the BESCHR's centered $[ ]$ title.
+    const int tx = px + (int)(14 * sx);
+    const int lineH = mf ? (font->lineHeight() > 0 ? font->lineHeight() - 2 : 18) : 12;
+    const int colUnit = mf ? 56 : 34;
+    // The BESCHR is "$Z$[<Name>$]$N <rows>": line 0 = the centered city name (a header
+    // band at the top of the box), lines 1+ = the info rows. Center the name X by
+    // passing the box bounds; the name's row is vertically centered in the header.
+    const int nameH = mf ? (font->lineHeight() > 0 ? font->lineHeight() : 18) : 9;
+    const int headerH = (int)(40 * sy);
+    const int ty = py + (headerH - nameH) / 2;   // name vertically centered in header
+    DrawBeschr(fb, tx, ty, colUnit, lineH, beschr, font, px, pw);
 
     // The choose button on the bottom strip (128,545,529,43), right-aligned: the red
     // main-menu button (_BUTTON_RED) composed left-cap + stretched centre + right-cap,
@@ -192,15 +241,28 @@ InfoWindowLayout RenderCityInfoWindow(render::Surface* fb, int fbW, int fbH,
     int bh = (face && face->height > 0) ? face->height : 33;
     if (bh > stripH - 4) bh = stripH - 4;
     int bw = (int)(150 * sx);
-    const int bx = stripX + stripW - bw - (int)(6 * sx), by = stripY + (stripH - bh) / 2;
+    // Button centered on the X axis within the strip (frida: the choose button is
+    // centered, not right-aligned).
+    const int bx = stripX + (stripW - bw) / 2, by = stripY + (stripH - bh) / 2;
+    (void)0;
     if (face) {
         const int capW = (capL && capL->width > 0) ? (capL->width * bh / (face->height ? face->height : bh)) : 0;
         const int capWR = (capR && capR->width > 0) ? (capR->width * bh / (face->height ? face->height : bh)) : 0;
         BlitShape(fb, bx + capW, by, bw - capW - capWR, bh, *face);          // stretched centre
         if (capL) BlitShape(fb, bx, by, capW, bh, *capL);                    // left cap
         if (capR) BlitShape(fb, bx + bw - capWR, by, capWR, bh, *capR);      // right cap
-        // Choose caption (light text on the red button).
-        render::DrawTextCp1251(fb, bx + capW + (int)(8 * sx), by + (bh - 7) / 2, "OK", 250, 240, 210);
+        // Choose caption "Дальше", centered — baked-gold _FONT (main-menu button font).
+        const char* cap = "\xc4\xe0\xeb\xfc\xf8\xe5";   // "Дальше" (cp1251)
+        if (mf) {
+            const int capPx = font->MeasureWidth(cap);
+            const int th = font->lineHeight() > 0 ? font->lineHeight() : 17;
+            font->DrawText(reinterpret_cast<std::uint32_t*>(fb->pixels),
+                           fb->widthPx ? fb->widthPx : fb->width, fb->height,
+                           bx + (bw - capPx) / 2, by + (bh - th) / 2, cap, 1, 0, 0, 0, false);
+        } else {
+            const int capPx = (int)std::strlen(cap) * 6;
+            render::DrawTextCp1251(fb, bx + (bw - capPx) / 2, by + (bh - 7) / 2, cap, 235, 200, 100);
+        }
     } else {
         FillRect(fb, bx, by, bw, bh, 120, 30, 24); FrameRect(fb, bx, by, bw, bh, 230, 200, 90);
     }

@@ -43,6 +43,9 @@ public:
     std::string Beschr(const std::string& city) const;
     // The city's _STADTAUSWAHL_<CITY>_INFO line, or "".
     std::string Info(const std::string& city) const;
+    // The screen title (_M0_STADT+0, "Выберите город…"), $Z centering markup
+    // stripped. Empty if absent.
+    std::string ScreenTitle() const;
 
 private:
     gui::text::TextDb db_;
@@ -83,9 +86,12 @@ struct InfoWindowLayout {
 // crest, the BESCHR description (dark text on parchment via the markup layout), and
 // the `_AUSWAHL` choose button on the bottom strip. Returns the button rect for the
 // caller to hit-test (click => confirm). Falls back to a framed panel if gfx absent.
+class MenuFont;  // play/menu_assets.h — the baked-gold _FONT (main-menu button font)
+
 InfoWindowLayout RenderCityInfoWindow(render::Surface* fb, int fbW, int fbH,
                                       const CityInfoText& text, CityInfoGfx& gfx,
-                                      const std::string& cityName);
+                                      const std::string& cityName,
+                                      const MenuFont* font = nullptr);
 
 // Render the ChooseCity info-window card at panel rect (x,y,w,h) onto `fb`
 // (16/32 bpp): a framed panel, then the BESCHR rich-text laid out 1:1 with the

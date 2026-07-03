@@ -48,3 +48,45 @@ TEST(ChooseHistoryScreen, RealPerspectiveContent) {
             if ((px[(std::size_t)y * W + x] & 0x00FFFFFFu) != 0) ++nonzero;
     CHECK(nonzero > 1000);
 }
+
+// Tasks screen (VIBE "Ваши задания" / _M0_AUFTRAEGE) — shown after factual history.
+TEST(ChooseTasksScreen, RealTaskContent) {
+    shim::DiskFileSystem fs(GameDir());
+    if (!fs.exists("Resources/textbin_deutsch.BIN")) {
+        std::printf("  [skip] ChooseTasksScreen: game dir absent\n"); CHECK(true); return; }
+
+    play::CharIntroContent c;
+    CHECK(play::LoadChooseTasksContent(GameDir(), c));
+    CHECK(!c.heading.empty());
+    CHECK_EQ((int)c.options.size(), 7);                 // 6 task modes + back
+    CHECK_EQ((int)c.selectable.size(), 7);
+    for (int i = 0; i < 6; ++i) {                       // the %ia[%s] slots got real names
+        CHECK(c.selectable[i]);
+        CHECK(c.options[i] != "%s");
+        CHECK(!c.options[i].empty());
+    }
+    CHECK(!c.selectable[6]);                            // appended back row
+
+    // The 7-button column: equal width (widest label), centred at x=W/2, top y=246, pitch 40.
+    const int W = 800, H = 600;
+    play::MenuAssets assets; bool ha = assets.Load(fs);
+    std::vector<play::NewGameButtonRect> rects =
+        play::ChooseHistoryButtonRects(W, H, c, ha ? &assets : nullptr, play::kChooseTasksBtnTop0);
+    CHECK_EQ((int)rects.size(), 7);
+    CHECK_EQ(rects[0].y, 246);                          // button 0 top (design == native here)
+    CHECK_EQ(rects[1].y - rects[0].y, 40);              // 40px pitch
+    for (const auto& r : rects) {
+        CHECK_EQ(r.x + r.w / 2, W / 2);                 // centred on screen
+        CHECK_EQ(r.w, rects[0].w);                      // uniform width
+    }
+
+    // Render one frame; real pixels drew.
+    std::vector<std::uint32_t> px((std::size_t)W * H, 0u);
+    play::RenderChooseHistoryFrame(px.data(), W, H, c, /*hover=*/0, /*seed=*/-1,
+                                   ha ? &assets : nullptr, /*backdrop=*/nullptr,
+                                   GameDir(), play::kChooseTasksBtnTop0);
+    long nonzero = 0;
+    for (std::size_t i = 0; i < (std::size_t)W * H; ++i)
+        if ((px[i] & 0x00FFFFFFu) != 0) ++nonzero;
+    CHECK(nonzero > 1000);
+}

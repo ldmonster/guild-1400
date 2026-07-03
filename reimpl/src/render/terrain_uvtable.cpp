@@ -1,4 +1,6 @@
 #include "render/terrain_uvtable.h"
+#include "crt/rand.h"
+#include "render/scene_transform.h"   // MatrixFromEuler (0x5cb1bc)
 
 namespace guild::render {
 
@@ -40,12 +42,76 @@ void BuildTerrainUvTable(float out[kTerrainUvTableSize], u32 mipTileSize) {
 // is all-zero, get_bytes 0x13DCE58 verified -> the result is always 0 unless the
 // runtime writer ran). The (quadIdx & 0xFF) masks the LOW byte of the linear quad
 // index exactly as the engine (mov eax, edi; and eax, 0FFh).
-u32 TerrainSubTexId(u8 cellFlag, const u8* subTexSrc, i32 quadIdx) {
+void BuildTerrainUvTable64(float out[kTerrainUvRecordCount * kTerrainUvTableSize],
+                           u32 mipTileSize) {
+    // Record 0: the verbatim corner-inset full-tile record.
+    BuildTerrainUvTable(out, mipTileSize);
+
+    // Records 1..63 (@0x5b96b1..): random rotated/scaled/offset sub-quads.
+    // The four unit-quad corners, in the exact record-0 triangle pattern:
+    //   T0 = (P01, P00, P10)  T1 = (P10, P11, P01)
+    //   T2 = (P00, P11, P01)  T3 = (P00, P10, P11)
+    static const float kCorner[4][2] = {
+        {0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+    static const int kTriCorner[4][3] = {
+        {2, 0, 1}, {1, 3, 2}, {0, 3, 2}, {0, 1, 3}};
+    for (int rec = 1; rec < kTerrainUvRecordCount; ++rec) {
+        const float cU = (float)crt::RandNext() * (1.0f / 32767.0f);
+        const float cV = (float)crt::RandNext() * (1.0f / 32767.0f);
+        const float sc = (float)crt::RandNext() * (1.0f / 98301.0f) + 0.9f;
+        const float an = (float)crt::RandNext() * (1.0f / 32767.0f) *
+                         6.2831855f;                          // flt_628750 = 2*pi
+        const float e[3] = {0.0f, 0.0f, an};
+        const Mat3 R = MatrixFromEuler(e);
+        float p[4][2];
+        for (int c = 0; c < 4; ++c) {
+            // row-vector x matrix (the @0x5b978a fmul/faddp chain; z = 0)
+            const float x = kCorner[c][0], y = kCorner[c][1];
+            const float rx = x * R.m[0] + y * R.m[3];
+            const float ry = x * R.m[1] + y * R.m[4];
+            p[c][0] = cU + rx * sc;
+            p[c][1] = cV + ry * sc;
+        }
+        float* o = out + (std::size_t)rec * kTerrainUvTableSize;
+        for (int t = 0; t < 4; ++t)
+            for (int v = 0; v < 3; ++v) {
+                const int c = kTriCorner[t][v];
+                o[t * 6 + v * 2 + 0] = p[c][0];
+                o[t * 6 + v * 2 + 1] = p[c][1];
+            }
+    }
+}
+
+void BuildTerrainSubTexTable(u8 out[65536]) {
+    // Seed (@0x5afedb): every byte = (RandNext() << 8) / 0x7FFF.
+    for (int i = 0; i < 65536; ++i)
+        out[i] = (u8)(((u32)crt::RandNext() << 8) / 0x7FFFu);
+    // 15 shuffle passes (@0x5aff15..0x5aff95): each cell swaps with the cell at
+    // ((randByte) << 8) | randByte (both draws through the same scaling).
+    for (int pass = 0; pass < 15; ++pass) {
+        for (int i = 0; i < 65536; ++i) {
+            const u8 a = (u8)(((u32)crt::RandNext() << 8) / 0x7FFFu);
+            const u8 b = (u8)(((u32)crt::RandNext() << 8) / 0x7FFFu);
+            const u32 j = ((u32)a << 8) + (u32)b;
+            const u8 t = out[j];
+            out[j] = out[i];
+            out[i] = t;
+        }
+    }
+}
+
+u32 TerrainSubTexId(u8 cellFlag, const u8* subTexSrc, i32 cellU, i32 cellV) {
     if ((cellFlag & 0x40) == 0)
         return 0;
     if (subTexSrc == nullptr)
         return 0;                                     // the all-zero shipped table
-    return (u32)(subTexSrc[(u32)quadIdx & 0xFF] & 0x3F);
+    // WORLD-STABLE index: the 256x256 byte_13DCE58 table is addressed by the
+    // absolute cell coordinates mod 256 (row*256 + col — the engine's
+    // (quad & 0xFF) + rowBase form). A tile-local index would re-roll every
+    // cell's sub-record whenever the tile LOD changes with the camera —
+    // visible ground shimmer while scrolling.
+    const u32 idx = (((u32)cellV & 0xFFu) << 8) | ((u32)cellU & 0xFFu);
+    return (u32)(subTexSrc[idx] & 0x3F);
 }
 
 // gilde.exe 0x5c1ff5 — poly+0x10 = &flt_13FE540[subTexId*0x60] (tri0 = floats 0..5).

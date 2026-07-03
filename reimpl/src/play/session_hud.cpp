@@ -25,15 +25,23 @@
 #include "render/font.h"             // FontInitGlyphTable (0x42E350)
 #include "render/surface_present.h"  // PresentGlobals / PresentBackend
 #include "shim/IFileSystem.h"
+#include "io/archive_mount.h"        // textbin_deutsch.BIN mount (chrome strings)
+#include "gui/text_load.h"           // BuildTextArray
+#include "gui/text/textdb.h"         // TextDb (localized chrome strings)
+#include "world/money_format.h"      // MoneyFormatWithSeparators (0x11 currency glyph)
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
 namespace guild::play {
 
 namespace {
+
+int DrawGold565(render::Surface& s, const MenuFont& fnt, int x, int y,
+                const char* text, bool centerX);   // defined below (2nd block)
 
 inline u16 RdU16(const u8* p) { return (u16)(p[0] | (p[1] << 8)); }
 inline u32 RdU32(const u8* p) {
@@ -95,6 +103,7 @@ bool SessionHud::Init(shim::IFileSystem* fs) {
     bankCount_      = 0;
     fmt2Banks_      = 0;
     depth1Banks_    = 0;
+    fs_             = fs;   // stashed for DecodePanelChrome (font + strings)
 
     // Always wire the sprite hook to the REAL 2D blit leaf chain
     // (ShapeShowFromBank @0x5d861c -> ShapeBlitColored16 @0x5d7164) over the
@@ -147,6 +156,162 @@ bool SessionHud::Init(shim::IFileSystem* fs) {
 }
 
 // ---------------------------------------------------------------------------
+bool SessionHud::DecodePanelChrome(const char* panelName, const char* crestName) {
+    panelChrome_ = render::DecodedShape{};
+    cityCrest_   = render::DecodedShape{};
+    if (!gfxLoaded_ || !panelName)
+        return false;
+    if (!archive_.DecodeShapeByName(panelName, 0, panelChrome_))
+        panelChrome_ = render::DecodedShape{};
+    if (crestName && *crestName &&
+        !archive_.DecodeShapeByName(crestName, 0, cityCrest_))
+        cityCrest_ = render::DecodedShape{};
+
+    // Chrome CONTENT: the gold gothic banner font (_FONT, the main-menu button
+    // face — the banner/date/money face in the original), the red button
+    // 3-slice (_BUTTON_RED shapes 0/1/2), and the localized strings.
+    if (fs_) {
+        bannerFont_.Load(*fs_, "gfx/gilde.gfx", "_FONT");
+        smallFont_.Load(*fs_, "gfx/gilde.gfx", "_FONT+1");
+    }
+    if (!archive_.DecodeShapeByName("_BUTTON_RED", 0, btnCapL_)) btnCapL_ = render::DecodedShape{};
+    if (!archive_.DecodeShapeByName("_BUTTON_RED", 1, btnCapR_)) btnCapR_ = render::DecodedShape{};
+    if (!archive_.DecodeShapeByName("_BUTTON_RED", 2, btnMid_))  btnMid_  = render::DecodedShape{};
+
+    if (fs_ && fs_->exists("Resources/textbin_deutsch.BIN")) {
+        io::ArchiveMount mount;
+        if (mount.Mount(fs_, "Resources/textbin_deutsch.BIN", /*caseInsensitive=*/true)) {
+            gui::text::TextDb db;
+            for (const io::ArchiveMember& mem : mount.members()) {
+                const std::string& n = mem.name;
+                if (n.size() < 4) continue;
+                std::string ext = n.substr(n.size() - 4);
+                for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+                if (ext != ".res") continue;
+                std::vector<u8> b;
+                if (mount.OpenMember(n.c_str(), b) && !b.empty())
+                    gui::text::BuildTextArray(b.data(), b.size(), db);
+            }
+            textDb_ = std::move(db);           // persist for the panel layer
+            textDbLoaded_ = true;
+            gui::text::TextDb& tdb = textDb_;
+            auto get = [&](const char* key) -> std::string {
+                const int i = tdb.FindIndex(key);
+                return (i >= 0 && tdb.Text(i)) ? tdb.Text(i) : std::string();
+            };
+            title_ = get("_TITEL_MAENNLICH+1");           // "Господин" (rank-1 male title)
+            for (int k = 0; k < 4; ++k)                    // Весна/Лето/Осень/Зима
+                seasons_[k] = get(("_JAHRESZEITEN+" + std::to_string(k)).c_str());
+            optLabel_ = get("_INFOPANEL_OPTIONEN+0");      // "Опции"
+            buildLabel_    = get("_INFOPANEL_BAUEN+0");    // "Стройка"
+            overviewLabel_ = get("_INFOPANEL_OPTIONEN+4"); // "Обзор"
+            infoLabel_     = get("_INFOPANEL_OPTIONEN+2"); // "Информация"
+            // "Транспорт": the $[..$] heading of the transport-window text (the
+            // localized DB has no standalone button entry; the heading is the
+            // same word the button shows, trailing space trimmed).
+            std::string t = get("_NEV_TRANSPORT_STADTLOCATION+0");
+            const std::size_t o = t.find("$[");
+            const std::size_t e = (o == std::string::npos) ? o : t.find("$]", o + 2);
+            if (e != std::string::npos) {
+                t = t.substr(o + 2, e - (o + 2));
+                while (!t.empty() && t.back() == ' ') t.pop_back();
+                transLabel_ = t;
+            }
+        }
+    }
+    // Card-text renderer for the sidebar info card: the small gold face,
+    // centred (the same DrawGold565 leaf the buttons/money use).
+    panels_.cardText.user = this;
+    panels_.cardText.draw = [](render::Surface& s, int cx, int y, int maxW,
+                               const char* text, void* user) -> int {
+        auto* self = static_cast<SessionHud*>(user);
+        const MenuFont& f = self->smallFont_;
+        if (!f.loaded() || !text || !*text) return 0;
+        // Word-wrap on spaces to maxW (the card's width), centred per line.
+        const int lh = (f.lineHeight() > 0 ? f.lineHeight() : 12) + 1;
+        std::string word, lineStr;
+        std::vector<std::string> lines;
+        for (const char* p2 = text;; ++p2) {
+            if (*p2 && *p2 != ' ') { word += *p2; continue; }
+            if (!word.empty()) {
+                std::string cand = lineStr.empty() ? word : lineStr + " " + word;
+                if (!lineStr.empty() && f.MeasureWidth(cand.c_str()) > maxW) {
+                    lines.push_back(lineStr);
+                    lineStr = word;
+                } else {
+                    lineStr = cand;
+                }
+                word.clear();
+            }
+            if (!*p2) break;
+        }
+        if (!lineStr.empty()) lines.push_back(lineStr);
+        int n = 0;
+        for (const std::string& L : lines) {
+            if (DrawGold565(s, f, cx, y + n * lh, L.c_str(), /*centerX=*/true))
+                ++n;
+        }
+        return n > 0 ? n : (int)lines.size();
+    };
+
+    return panelChrome_.width > 0;
+}
+
+namespace {
+// Draw a gold-gothic MenuFont string onto the 565 surface: render into a
+// transparent ARGB scratch, then alpha-keyed blit 1:1. `centerX` centres the
+// run on x when true. Returns the drawn pixel width.
+int DrawGold565(render::Surface& s, const MenuFont& fnt, int x, int y,
+                const char* text, bool centerX) {
+    if (!fnt.loaded() || !text || !*text) return 0;
+    const int tw = fnt.MeasureWidth(text);
+    const int th = fnt.lineHeight() > 0 ? fnt.lineHeight() : 17;
+    if (tw <= 0) return 0;
+    std::vector<u32> scratch((std::size_t)tw * th, 0u);
+    fnt.DrawText(scratch.data(), tw, th, 0, 0, text, 1, 0, 0, 0, false);
+    const int x0 = centerX ? x - tw / 2 : x;
+    for (int yy = 0; yy < th; ++yy) {
+        const int Y = y + yy;
+        if (Y < 0 || Y >= s.height) continue;
+        u16* drow = reinterpret_cast<u16*>(s.pixels + (std::size_t)Y * s.pitch);
+        const u32* srow = scratch.data() + (std::size_t)yy * tw;
+        for (int xx = 0; xx < tw; ++xx) {
+            const int X = x0 + xx;
+            if (X < 0 || X >= s.width) continue;
+            const u32 p = srow[xx];
+            if (!(p & 0xFF000000u)) continue;
+            const u8 r = (p >> 16) & 0xFF, g = (p >> 8) & 0xFF, b = p & 0xFF;
+            drow[X] = (u16)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        }
+    }
+    return tw;
+}
+
+// Nearest-neighbour ARGB -> RGB565 alpha-keyed scaled blit onto the session
+// surface (A==0 texels skipped — the panel's transparent 3D-view center).
+void BlitArgbTo565(render::Surface& s, const render::DecodedShape& sh,
+                   int dx, int dy, int dw, int dh) {
+    if (sh.width <= 0 || sh.height <= 0 || dw <= 0 || dh <= 0)
+        return;
+    for (int y = 0; y < dh; ++y) {
+        const int Y = dy + y;
+        if (Y < 0 || Y >= s.height) continue;
+        const int sy = y * sh.height / dh;
+        const u32* srow = sh.argb.data() + (std::size_t)sy * sh.width;
+        u16* drow = reinterpret_cast<u16*>(s.pixels + (std::size_t)Y * s.pitch);
+        for (int x = 0; x < dw; ++x) {
+            const int X = dx + x;
+            if (X < 0 || X >= s.width) continue;
+            const u32 p = srow[x * sh.width / dw];
+            if (!(p & 0xFF000000u)) continue;
+            const u8 r = (p >> 16) & 0xFF, g = (p >> 8) & 0xFF, b = p & 0xFF;
+            drow[X] = (u16)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        }
+    }
+}
+} // namespace
+
+// ---------------------------------------------------------------------------
 void SessionHud::Render(void* fb16, int w, int h, int pitchBytes,
                         const Inputs& in) {
     last_ = SessionHudResult{};
@@ -173,6 +338,111 @@ void SessionHud::Render(void* fb16, int w, int h, int pitchBytes,
     const HudRenderHooks& hooks = GetHudRenderHooks();
     const int mapX = layout.mapX >= 0 ? layout.mapX : (w > 140 ? w - 140 : 0);
     const int mapY = layout.mapY;
+
+    // -----------------------------------------------------------------------
+    // 0. Panel chrome — the real _PANEL_* screen furniture (gold top banner +
+    //    right sidebar, transparent centre) scaled over the whole frame, then
+    //    the city crest into the sidebar crest slot (design 800x600: crest
+    //    centre ~(744,145)). Drawn FIRST so every HUD element lands on top.
+    // -----------------------------------------------------------------------
+    const bool chrome = panelChrome_.width > 0;
+    if (chrome) {
+        BlitArgbTo565(s, panelChrome_, 0, 0, w, h);
+        if (cityCrest_.width > 0) {
+            const int cw = cityCrest_.width  * w / 800;
+            const int ch = cityCrest_.height * h / 600;
+            BlitArgbTo565(s, cityCrest_, 744 * w / 800 - cw / 2,
+                          145 * h / 600 - ch / 2, cw, ch);
+        }
+        if (bannerFont_.loaded()) {
+            // Top banner: "<title> <player>" left, "<season> A.D.<year>"
+            // centre-right — the original's gold gothic face. Season/year from
+            // the day counter: season = day % 4 (GetSeasonFromDay @0x58339c),
+            // year = 1400 + day / 4 (4 season-days per year).
+            std::string name = in.playerName ? in.playerName : "";
+            std::string banner = title_;
+            if (!name.empty()) banner += (banner.empty() ? "" : " ") + name;
+            if (!banner.empty())
+                DrawGold565(s, bannerFont_, 66 * w / 800, 17 * h / 600,
+                            banner.c_str(), /*centerX=*/false);
+            const int day = in.clock ? in.clock->day : 0;
+            if (!seasons_[day % 4].empty()) {
+                char date[64];
+                std::snprintf(date, sizeof(date), "%s A.D.%d",
+                              seasons_[day % 4].c_str(), 1400 + day / 4);
+                DrawGold565(s, bannerFont_, 480 * w / 800, 17 * h / 600,
+                            date, /*centerX=*/true);
+            }
+            // Sidebar money slot: the ENGINE money string (trailing 0x11
+            // currency glyph — the font's gold-coin ligature), small face.
+            const MenuFont& sf = smallFont_.loaded() ? smallFont_ : bannerFont_;
+            {
+                i64 mm = in.money;
+                if (mm > std::numeric_limits<i32>::max()) mm = std::numeric_limits<i32>::max();
+                if (mm < std::numeric_limits<i32>::min()) mm = std::numeric_limits<i32>::min();
+                const std::string ms =
+                    world::MoneyFormatWithSeparators((i32)mm, in.moneyRate);
+                DrawGold565(s, sf, 745 * w / 800, 480 * h / 600,
+                            ms.c_str(), /*centerX=*/true);
+            }
+            // Sidebar red buttons (Опции / Транспорт): _BUTTON_RED 3-slice at
+            // the sidebar slots, SMALL gold label centred (the original's
+            // sidebar face).
+            auto redButton = [&](int bx, int by, int bw, int bh, const std::string& label) {
+                if (btnCapL_.width <= 0 || btnMid_.width <= 0 || btnCapR_.width <= 0)
+                    return;
+                const int capW = btnCapL_.width * w / 800;
+                int midW = bw - 2 * capW;
+                if (midW < 0) midW = 0;
+                BlitArgbTo565(s, btnCapL_, bx, by, capW, bh);
+                BlitArgbTo565(s, btnMid_, bx + capW, by, midW, bh);
+                BlitArgbTo565(s, btnCapR_, bx + capW + midW, by, capW, bh);
+                if (!label.empty()) {
+                    const int th2 = sf.lineHeight() > 0 ? sf.lineHeight() : 12;
+                    DrawGold565(s, sf, bx + bw / 2, by + (bh - th2) / 2,
+                                label.c_str(), /*centerX=*/true);
+                }
+            };
+            // Selection-state pair (live captures): idle = Стройка/Обзор,
+            // building selected = Информация/Транспорт. Falls back to the
+            // generic Опции pair when a label is missing from the text db.
+            const bool haveSel = in.selectedId != 0;
+            const std::string& top =
+                haveSel ? (!infoLabel_.empty() ? infoLabel_ : optLabel_)
+                        : (!buildLabel_.empty() ? buildLabel_ : optLabel_);
+            const std::string& bottom =
+                haveSel ? transLabel_
+                        : (!overviewLabel_.empty() ? overviewLabel_ : transLabel_);
+            redButton(700 * w / 800, 404 * h / 600, 92 * w / 800, 22 * h / 600, top);
+            redButton(700 * w / 800, 432 * h / 600, 92 * w / 800, 22 * h / 600, bottom);
+
+            // Floating selection label (under the HAUSPFEIL marker): the
+            // building name, small gold face, centred, wrapped to two lines.
+            if (in.labelText && in.labelText[0] && sf.loaded()) {
+                const std::string full = in.labelText;
+                std::string l1 = full, l2;
+                if (sf.MeasureWidth(full.c_str()) > 170) {
+                    // break at the space nearest the middle
+                    std::size_t best = std::string::npos;
+                    for (std::size_t sp = full.find(' '); sp != std::string::npos;
+                         sp = full.find(' ', sp + 1)) {
+                        if (best == std::string::npos ||
+                            std::llabs((long long)sp - (long long)full.size() / 2) <
+                                std::llabs((long long)best - (long long)full.size() / 2))
+                            best = sp;
+                    }
+                    if (best != std::string::npos) {
+                        l1 = full.substr(0, best);
+                        l2 = full.substr(best + 1);
+                    }
+                }
+                const int lh = sf.lineHeight() > 0 ? sf.lineHeight() : 12;
+                DrawGold565(s, sf, in.labelX, in.labelY, l1.c_str(), /*centerX=*/true);
+                if (!l2.empty())
+                    DrawGold565(s, sf, in.labelX, in.labelY + lh + 1, l2.c_str(), true);
+            }
+        }
+    }
 
     // -----------------------------------------------------------------------
     // 1. Bottom player bar — the VIBE_PlayerBar_BuildContent @0x4b11e4 model:
@@ -225,12 +495,17 @@ void SessionHud::Render(void* fb16, int w, int h, int pitchBytes,
     const int day = in.clock ? in.clock->day : 0;
     const std::string date = HudDateString(day, in.clockTick);
 
-    last_.captionGlyphs += DrawLine16(s, layout.captionX, layout.captionY,
-                                      money.c_str(),
-                                      pal.textR, pal.textG, pal.textB);
-    last_.captionGlyphs += DrawLine16(s, layout.captionX, layout.captionY + 9,
-                                      date.c_str(),
-                                      pal.textR, pal.textG, pal.textB);
+    if (!(chrome && bannerFont_.loaded())) {
+        // Asset-less caption (the 5x7 debug face). With the chrome + gold font
+        // active the banner/date/money draw in the real face above instead.
+        const int moneyX = layout.moneyX >= 0 ? layout.moneyX : layout.captionX;
+        const int moneyY = layout.moneyY >= 0 ? layout.moneyY : layout.captionY;
+        last_.captionGlyphs += DrawLine16(s, moneyX, moneyY, money.c_str(),
+                                          pal.textR, pal.textG, pal.textB);
+        last_.captionGlyphs += DrawLine16(s, layout.captionX, layout.captionY + 9,
+                                          date.c_str(),
+                                          pal.textR, pal.textG, pal.textB);
+    }
 
     // -----------------------------------------------------------------------
     // 3. Selected-entity status line. Register the selection in the REAL

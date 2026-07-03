@@ -49,6 +49,7 @@
 #include "play/sdl_session.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -584,8 +585,18 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
     CityView3D::Options opt3;
     if (use3d) {
         tr.mounted = view.mounted();
-        opt3.fbW = cfg.fbW;
+        // The in-city 3D viewport EXCLUDES the right HUD sidebar: the live
+        // SetupViewTransform @0x5af5f8 globals (frida, gilde.exe in-city) are
+        // width=694 height=600 origin(0,0) centre(347,300) at 800x600 — the
+        // sidebar owns the right 106px. The engine projection scale
+        // flt_13FCD0C reads 640 live (sx = x/z*640 + 347) — hFOV
+        // 2*atan(347/640) ~ 57 deg. (0x13FCAFC == 5093.07 is only the LOD
+        // fovScale divisor 1/flt_13FC774, NOT the projection.) Scale both
+        // with the configured resolution.
+        opt3.fbW = cfg.fbW;                       // the full DDraw surface
+        opt3.viewportW = cfg.fbW * 694 / 800;     // the 3D projection viewport
         opt3.fbH = cfg.fbH;
+        opt3.viewScale = 640.0f * (float)cfg.fbW / 800.0f;
         opt3.textured = cfg.textured && view.texturesMounted();
         // GROUND PASS (terrain-ground wave 4): the real parsed city floor
         // through the BeginUniverseFrame @0x5B3900 0x5b3a2f arm. No-op when
@@ -600,15 +611,32 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
         // opts in. Each feature honours its own engine gate inside CityView3D.
         opt3.sky          = true;   // time-of-day sky backdrop
         opt3.dynamicLight = true;   // day/night object shading (ComputeSunState)
-        opt3.shadows      = true;   // per-object drop shadows (sun above horizon)
+        // Per-object drop shadows: OFF by default. The doShadows pass splats
+        // EVERY instance's flattened silhouette — an approximation whose huge
+        // angular ground patches visibly diverge from the original (the engine
+        // leaf RenderObjectShadow @0x5f3f38 exists, but its real caster set /
+        // trigger is not yet established — named gap). GUILD_SHADOWS=1 enables
+        // the experimental pass for A/B work.
+        opt3.shadows      = std::getenv("GUILD_SHADOWS") != nullptr;
         opt3.fog          = true;   // distance fog per-pixel span blend
         opt3.lodSelect    = true;   // per-distance node LOD pick
         opt3.worldSprites = true;   // billboard depth-fade sprite arm
         opt3.particles    = true;   // world particle systems (when spawned)
         opt3.mirror       = true;   // reflection pass (when a mirror node exists)
-        opt3.weather      = true;   // snow/rain overlay (season/rain gated)
+        opt3.weather      = std::getenv("GUILD_NO_WEATHER") == nullptr;   // snow/rain overlay (season/rain gated)
+        if (std::getenv("GUILD_NO_CKEY"))          // debug A/B: colour key off
+            render::SetColourKeyEnabled(false);
         // WAVE-8 W8-INTEGRATE — turn ON the new world-entity features in the live
         // session (DEFAULT-OFF keeps every pinned frame byte-identical):
+        opt3.gouraudLight = true;   // per-pixel RGB Gouraud texture modulate (the
+                                    // hardware path's diffuse: warm lantern pools,
+                                    // tinted night ambient)
+        // 24-bit material stand-in: the engine palettizes 24-bit BMPs via the
+        // NOT-YET-reconstructed quantizer @0x5da34c; the default renders those
+        // materials as LEVEL-shaded white (craft signs etc. glow white). The
+        // documented stand-in binds them as RGB-affine instead — the real texel
+        // colours through the in-tree affine kernel.
+        render::SetRgb24MaterialStandIn(true);
         opt3.sceneLights  = true;   // per-vertex SUN-LIT object shading (W8-NORMALS +
                                     // W8-SCENELIGHTS: real object-space normals + the
                                     // day-cycle sun NdotL — objects are no longer flat)
@@ -616,10 +644,11 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
         // the live frame because the simplified instance pipeline did not carry their
         // per-object data. Each rides its own gate inside CityView3D (DEFAULT OFF keeps
         // every pinned frame byte-identical; the session opts in):
-        opt3.flagAnim   = true;   // RefreshFlagAnimation over building dummy_FAHNE children
-        opt3.vegRelight = true;   // per-frame type-4 vg_/pfl_ scenery light-cache relight
-        opt3.reflective = true;   // consult reflective_nodes on scene meshes -> mirror gate
-        opt3.animals    = true;   // draw the ambient animals through the character path
+        const bool extras = std::getenv("GUILD_NO_EXTRAS") == nullptr;
+        opt3.flagAnim   = extras; // RefreshFlagAnimation over building dummy_FAHNE children
+        opt3.vegRelight = extras; // per-frame type-4 vg_/pfl_ scenery light-cache relight
+        opt3.reflective = extras; // consult reflective_nodes on scene meshes -> mirror gate
+        opt3.animals    = extras; // draw the ambient animals through the character path
         // Spawn the city's chimney smoke (W8-EMITTER + W8-SMOKE: a particle system at
         // every dummy_RAUCH_0 node, linked into render::LiveSystems() the doParticles
         // walk drives). No-op when the scene ships no smoke dummies.
@@ -783,9 +812,73 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
     }
     const float basePixelsPerUnit = opt.pixelsPerUnit;
 
+    // Debug/verification: pin the camera to an exact pose read from the live
+    // original (frida ground truth) so frames are directly diffable.
+    // GUILD_CAM_EYE="x,y,z" (world position) + optional GUILD_CAM_YAW=f.
+    // GUILD_CAM_LOCK=1 freezes the camera (no pan/zoom input) for the run.
+    bool camLock = std::getenv("GUILD_CAM_LOCK") != nullptr;
+    if (const char* ce = std::getenv("GUILD_CAM_EYE")) {
+        float ex, ey, ez;
+        if (std::sscanf(ce, "%f,%f,%f", &ex, &ey, &ez) == 3) {
+            cam.obj.posX = ex; cam.obj.posY = ey; cam.obj.posZ = ez;
+            cam.obj.wposX = ex; cam.obj.wposY = ey; cam.obj.wposZ = ez;
+            if (const char* cy = std::getenv("GUILD_CAM_YAW")) {
+                const float yaw = (float)std::atof(cy);
+                cam.obj.worldY = yaw; cam.obj.wrotY = yaw;
+            }
+            camLock = true;
+        }
+    }
+
     // --- HUD overlay (money/date caption, player bar, status, markers) --------
     SessionHud hud;
     tr.hudActive = cfg.hud && (hud.Init(&fs), true);
+
+    // PANEL CHROME — the in-city screen furniture over the 694px 3D viewport:
+    // the real _PANEL_STEIN (gold top banner + right stone sidebar, transparent
+    // centre) + the city's _STADTWAPPEN crest, per the original's in-city frame.
+    if (tr.hudActive && hud.gfxLoaded()) {
+        std::string base;   // "Resources/gamedata/Cities/KOELN.CTY" -> "KOELN"
+        {
+            std::string p = cfg.cityPath;
+            const std::size_t sl = p.find_last_of("/\\");
+            if (sl != std::string::npos) p = p.substr(sl + 1);
+            const std::size_t dot = p.rfind('.');
+            if (dot != std::string::npos) p = p.substr(0, dot);
+            for (char& c : p) c = (char)std::toupper((unsigned char)c);
+            base = p;
+        }
+        const std::string crest = "_STADTWAPPEN_" + base;
+        if (hud.DecodePanelChrome("_PANEL_STEIN", crest.c_str())) {
+            // Anchor the HUD text into the chrome (design 800x600, scaled):
+            // date/time in the gold top banner; money in the sidebar money
+            // slot; status line under the banner; player bar above the bottom
+            // edge of the 3D viewport; markers inside the viewport.
+            const int W = cfg.fbW, H = cfg.fbH;
+            hud.layout.captionX = 360 * W / 800;  // date line (banner centre)
+            hud.layout.captionY = 18 * H / 600;
+            hud.layout.moneyX   = 706 * W / 800;  // sidebar money slot
+            hud.layout.moneyY   = 484 * H / 600;
+            hud.layout.statusX  = 12 * W / 800;
+            hud.layout.statusY  = 56 * H / 600;
+            hud.layout.barX     = 4 * W / 800;
+            hud.layout.barY     = (600 - 90) * H / 600;
+            // Map markers: the original's in-city frame shows no floating
+            // marker region (its map anchors live in the map PANEL, 'M') — park
+            // the region off-frame so the placeholder icons don't stamp the
+            // 3D view. The 'M' overview map renders its own markers.
+            hud.layout.mapX     = W + 64;
+            hud.layout.mapY     = H + 64;
+            // The selected-entity info panel lives in the SIDEBAR CARD slot
+            // (the original's "Patri / building / thumbnail" card at ~(698,
+            // 255)-(790,400)): content only, the stone art is the background.
+            hud.panels().layout.panelX  = 700 * W / 800;
+            hud.panels().layout.panelY  = 258 * H / 600;
+            hud.panels().layout.panelW  = 90 * W / 800;
+            hud.panels().layout.panelH  = 140 * H / 600;
+            hud.panels().layout.drawBox = false;
+        }
+    }
 
     // --- REAL HUD ARTWORK: feed the gfx-1403 icon bank's raw SHAPBANK blob
     //     through the reconstructed conversion chain (ShapeBankConvertNew
@@ -799,6 +892,19 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
             (std::size_t)cfg.hudIconGfxId < ar.recordCount() &&
             ar.record((std::size_t)cfg.hudIconGfxId).dataSize > 0)
             idx = cfg.hudIconGfxId;
+        // Prefer the GEB record — the 48x48 building-thumbnail bank the info
+        // panel's icon-object ids index (building icon id = code + 1010, the
+        // gui/infopanel_build kIconObjBias). It takes priority over the legacy
+        // cfg.hudIconGfxId pick; falls back to the first non-empty record (the
+        // legacy single-shape behaviour).
+        bool gebBank = false;
+        {
+            const int geb = ar.FindByName("GEB");
+            if (geb >= 0 && ar.record((std::size_t)geb).dataSize > 0) {
+                idx = geb;
+                gebBank = true;
+            }
+        }
         if (idx < 0) {
             for (std::size_t i = 0; i < ar.recordCount(); ++i)
                 if (ar.record(i).dataSize > 0) { idx = (int)i; break; }
@@ -814,6 +920,9 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
                     hudBank = SetHudSpriteBankFromGfx(blob.data(), blob.size());
             }
         }
+        // With the GEB bank live, map icon-object ids to bank shapes:
+        // shape = gfxId - kIconObjBias (id base 1010).
+        SetHudSpriteIdBase(hudBank && gebBank ? 1010 : -1);
         tr.hudRealArt = hudBank != nullptr;
     }
 
@@ -832,6 +941,10 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
     int curSelId = 0;                        // live selection id (HUD/panels)
     int curSelKind = 0;                      // selection kind (1 object / 3 person)
     const char* curSelName = nullptr;
+    std::string selTypeName;                 // selected building gb_<type> name
+    CityView3D::Result lastVr{};             // last 3D frame result (debug trace)
+    i32 markerToken = -1;                    // HAUSPFEIL marker instance token
+    int markerSelId = 0;                     // selection the marker is seated on
 
     // --- day-cycle / weather driver (UpdateBrightness @0x4b2504 chain) --------
     SessionAtmos atmos;
@@ -941,6 +1054,14 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
 
         // Shared HUD input block (money / clock / selection / panels).
         SessionHud::Inputs hi{};
+        // Banner display name (title prepends inside SessionHud).
+        std::string bannerName;
+        if (!cfg.newGame.firstName.empty()) {
+            bannerName = cfg.newGame.firstName;
+            if (!cfg.newGame.familyName.empty())
+                bannerName += " " + cfg.newGame.familyName;
+        }
+        hi.playerName = bannerName.empty() ? nullptr : bannerName.c_str();
         play::SessionPanelsInputs pin;
         // Per-frame record-content feeds for the panel layer (wave-3): the live
         // record fields the reconstructed builders dereference, filled from the
@@ -1129,6 +1250,57 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
                 curSelId = si.has ? si.id : 0;       // panel selection feed
                 curSelKind = si.has ? si.kind : 0;
             }
+            // SELECTION MARKER + floating label (the original's golden
+            // HAUSPFEIL arrow over the selected building + its name under it).
+            // The marker is the real _DYNAMIC/X_STUFF/HAUSPFEIL.bgf drawn as a
+            // per-frame extra instance; the label rides the HUD (small gold
+            // face). Reseated only when the selection changes.
+            if (use3d && hi.selectedId != markerSelId) {
+                if (markerToken >= 0) {
+                    view.RemoveAnimalInstance(markerToken);
+                    markerToken = -1;
+                }
+                markerSelId = hi.selectedId;
+                if (markerSelId != 0) {
+                    for (const auto& b : view.boundObjects()) {
+                        if (b.id != markerSelId) continue;
+                        CityPlacement mp = b.place;
+                        mp.pos[1] += 430.0f;   // hover above the roofline
+                        markerToken = view.AddAnimalInstance("HAUSPFEIL", mp,
+                                                             /*fullbright=*/true);
+                        if (std::getenv("GUILD_SELECT_FIRST"))
+                            std::printf("  marker: sel=%d token=%d pos(%.0f,%.0f,%.0f) bldRec=%d\n",
+                                        markerSelId, markerToken,
+                                        mp.pos[0], mp.pos[1], mp.pos[2],
+                                        (int)(sim::BuildingFindById(markerSelId) != nullptr));
+                        break;
+                    }
+                }
+            }
+            if (use3d && markerSelId != 0 && hi.selectedName) {
+                // Project the selected building for the label anchor (the same
+                // view transform the pick boxes use).
+                for (const auto& b : view.boundObjects()) {
+                    if (b.id != markerSelId) continue;
+                    CameraPose p2 = cam.pose();
+                    const float negr2[3] = {-p2.rotX, -p2.rotY, -p2.rotZ};
+                    const render::Mat3 RM2 = render::MatrixFromEuler(negr2);
+                    const float eye2[3] = {p2.eyeX, p2.eyeY, p2.eyeZ};
+                    float vv[3];
+                    render::WorldToView(RM2, eye2, b.place.pos, vv);
+                    if (vv[2] > 1.0f) {
+                        const int vpW = opt3.viewportW > 0 ? opt3.viewportW
+                                                           : opt3.fbW;
+                        const float sc2 = (opt3.viewScale > 0.0f)
+                                              ? opt3.viewScale
+                                              : 0.5f * (float)vpW;
+                        hi.labelText = hi.selectedName;
+                        hi.labelX = (int)(vv[0] * sc2 / vv[2] + 0.5f * (float)vpW);
+                        hi.labelY = (int)(-vv[1] * sc2 / vv[2] + 0.5f * (float)opt3.fbH) + 26;
+                    }
+                    break;
+                }
+            }
             // TOOLTIPS + INFO PANEL: the per-frame SessionPanelsInputs (the
             // dword_75BF3C hover model; selection -> InfoPanel_Update @0x4b84c0).
             // Wave-3: REAL record-content feeds — the hovered/selected entity's
@@ -1144,6 +1316,26 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
                         ++tr.hoverFeedFrames;
                 }
                 feedSelection(curSelId, curSelKind);
+                pin.textDb = hud.textDb();   // real localized panel strings
+                // Selected building's TYPE NAME (from the owner-matched node's
+                // gb_<type> member) -> the keyed localized name resolve.
+                selTypeName.clear();
+                if (use3d && curSelId != 0 && curSelKind == 1) {
+                    for (const auto& b : view.boundObjects()) {
+                        if (b.id != curSelId) continue;
+                        const std::size_t g = b.member.rfind("gb_");
+                        if (g != std::string::npos) {
+                            for (std::size_t k = g + 3; k < b.member.size(); ++k) {
+                                const char c = b.member[k];
+                                if (c == '.' || c == '/' || c == '\\') break;
+                                selTypeName += (char)std::toupper((unsigned char)c);
+                            }
+                        }
+                        break;
+                    }
+                }
+                pin.selBuildingTypeName =
+                    selTypeName.empty() ? nullptr : selTypeName.c_str();
                 hi.panels = &pin;
             }
         }
@@ -1192,10 +1384,25 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
                                               ? tick.worldTime()
                                               : sim::g_sysGameTime;
                 opt3.worldDay    = (i32)wt.day;
+                // Debug/verification: pin the world day (season = day % 4).
+                static const char* dayEnv = std::getenv("GUILD_DAY");
+                if (dayEnv)
+                    opt3.worldDay = std::atoi(dayEnv);
                 opt3.worldHour   = (int)wt.hour;
                 opt3.worldMinute = (int)wt.minute;
+                // Debug/verification: pin the time-of-day (GUILD_HOUR=h[:m]) so
+                // day/night frames are directly diffable against the original.
+                static const char* fh = std::getenv("GUILD_HOUR");
+                if (fh) {
+                    int hh = 12, mm = 0;
+                    if (std::sscanf(fh, "%d:%d", &hh, &mm) >= 1) {
+                        opt3.worldHour = hh;
+                        opt3.worldMinute = mm;
+                    }
+                }
             }
             CityView3D::Result vr = view.RenderFrame(c3, opt3);
+            lastVr = vr;                       // debug trace (GUILD_SELECT_FIRST)
             tr.view3dInstances = vr.instancesDrawn;
             tr.view3dNonClear  = vr.nonClearPixels;
             tr.personsRendered = vr.personInstances;
@@ -1355,9 +1562,10 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
             const float negr[3] = {-p.rotX, -p.rotY, -p.rotZ};
             const render::Mat3 RM = render::MatrixFromEuler(negr);
             const float eye3[3] = {p.eyeX, p.eyeY, p.eyeZ};
+            const int pickVpW = opt3.viewportW > 0 ? opt3.viewportW : opt3.fbW;
             const float scale = (opt3.viewScale > 0.0f)
                                     ? opt3.viewScale
-                                    : 0.5f * (float)cfg.fbW;   // flt_13FCD0C
+                                    : 0.5f * (float)pickVpW;  // flt_13FCD0C
             for (const auto& b : view.boundObjects()) {
                 if (b.id == 0 || b.slot < 0 || b.slot >= sim::kObjectCapacity)
                     continue;
@@ -1365,8 +1573,8 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
                 render::WorldToView(RM, eye3, b.place.pos, v);
                 if (v[2] <= 1.0f)
                     continue;                       // behind the near plane
-                const float sx = v[0] * scale / v[2] + 0.5f * (float)cfg.fbW;
-                const float sy = -v[1] * scale / v[2] + 0.5f * (float)cfg.fbH;
+                const float sx = v[0] * scale / v[2] + 0.5f * (float)pickVpW;
+                const float sy = -v[1] * scale / v[2] + 0.5f * (float)opt3.fbH;
                 float r = 12.0f * scale / v[2];     // ~12 world units half-extent
                 if (r < 6.0f) r = 6.0f;
                 if (r > 48.0f) r = 48.0f;
@@ -1412,6 +1620,28 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
             curSelId = lastIn.selected ? lastIn.selectedId : 0;
             curSelKind = lastIn.selected ? lastIn.selectedKind : 0;
             curSelName = lastIn.selected ? input.selectedName() : nullptr;
+            // Debug/verification: force-select the first bound building so the
+            // HAUSPFEIL marker + label render in a scripted dump.
+            static const char* selDbg = std::getenv("GUILD_SELECT_FIRST");
+            if (selDbg && curSelId == 0) {
+                // Pick the bound gb_ building nearest the camera's look point.
+                CameraPose sp2 = cam.pose();
+                const float lx = sp2.eyeX, lz = sp2.eyeZ + 1200.0f;
+                float best = 1e18f;
+                for (const auto& b : view.boundObjects()) {
+                    if (b.id == 0 || b.member.find("gb_") == std::string::npos)
+                        continue;
+                    const float dx = b.place.pos[0] - lx, dz = b.place.pos[2] - lz;
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 < best) {
+                        best = d2;
+                        curSelId = b.id;
+                        curSelKind = 1;
+                        curSelName = "\xD3\xEA\xF0\xFB\xF2\xE8\xE5 \xEA\xEE\xED\xF2\xF0"
+                                     "\xEE\xE1\xE0\xED\xE4\xE8\xF1\xF2\xE0";  // CP1251 sample
+                    }
+                }
+            }
             if (lastIn.leftClickEdge) {
                 ++tr.clicksHandled;
                 if (lastIn.pickedId > 0) {
@@ -1542,9 +1772,10 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
         // wheel-zoom branch: SessionCamera stages them into the dword_672254
         // accumulator consumed by VIBE_Camera_UpdateMovement @0x4b41a8 (the
         // zoom step + Camera_AnchorToTerrain @0x4b2900 eye/pitch recompute).
-        cam.Frame(ms, plat.keyDown(kVkLeft), plat.keyDown(kVkRight),
-                  plat.keyDown(kVkUp), plat.keyDown(kVkDown),
-                  /*wheelDelta=*/(float)ms.wheel, dt);
+        if (!camLock)
+            cam.Frame(ms, plat.keyDown(kVkLeft), plat.keyDown(kVkRight),
+                      plat.keyDown(kVkUp), plat.keyDown(kVkDown),
+                      /*wheelDelta=*/(float)ms.wheel, dt);
         tr.wheelNotches += ms.wheel;
         opt.eyeX = cam.eyeX();
         opt.eyeZ = cam.eyeZ();
@@ -1653,6 +1884,21 @@ SdlSessionTrace RunSdlSession(shim::IFileSystem& fs, shim::IGraphicsDevice& devi
     }
 
     // Release the bridge-owned converted HUD bank (process-global state).
+    if (std::getenv("GUILD_SELECT_FIRST")) {
+        const SessionPanelsResult& pr = hud.panels().lastResult();
+        std::printf("  panel: form=%s builder=%d iconOps=%d iconBlits=%d text=%d "
+                    "realArt=%d idBase=%d\n",
+                    pr.panelForm, (int)pr.panelBuilder, pr.panelIconOps,
+                    pr.panelIconBlits, pr.panelTextOps,
+                    (int)tr.hudRealArt, HudSpriteIdBase());
+        std::printf("  panel: hook=%p installed=%d\n",
+                    (void*)GetHudRenderHooks().drawSprite,
+                    (int)RealHudBridgeInstalled());
+        std::printf("  view3d: band=%d blend=%.2f amb=%.0f,%.0f,%.0f\n",
+                    lastVr.sunBand, lastVr.sunBlend, lastVr.ambient[0],
+                    lastVr.ambient[1], lastVr.ambient[2]);
+
+    }
     if (hudBank)
         SetHudSpriteBankFromGfx(nullptr, 0);
 

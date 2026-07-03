@@ -11,6 +11,8 @@
 #include "gui/text/textdb.h"
 #include "gui/choosehistory_run.h"     // ChooseHistory_SeedIndex
 #include "play/menu_assets.h"
+#include "play/sdl_city_screen3d.h"    // RenderNewGameDeskBackdrop (shared desk scene)
+#include "render/surface.h"
 
 #include <cstdint>
 #include <cstring>
@@ -95,6 +97,123 @@ bool LoadChooseHistoryContent(const std::string& gameDir, CharIntroContent& out)
     return !out.options.empty();
 }
 
+// ---- tasks screen content (_M0_AUFTRAEGE) ----------------------------------
+bool LoadChooseTasksContent(const std::string& gameDir, CharIntroContent& out) {
+    if (gameDir.empty()) return false;
+    shim::DiskFileSystem fs(gameDir);
+    const char* arch = "Resources/textbin_deutsch.BIN";
+    if (!fs.exists(arch)) return false;
+    io::ArchiveMount mount;
+    if (!mount.Mount(&fs, arch, /*caseInsensitive=*/true)) return false;
+    gui::text::TextDb db;
+    for (const io::ArchiveMember& m : mount.members()) {
+        const std::string& n = m.name;
+        if (n.size() < 4) continue;
+        std::string ext = n.substr(n.size() - 4);
+        for (auto& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+        if (ext != ".res") continue;
+        std::vector<u8> bytes;
+        if (!mount.OpenMember(n.c_str(), bytes) || bytes.empty()) continue;
+        gui::text::BuildTextArray(bytes.data(), bytes.size(), db);
+    }
+    const int idx = db.FindIndex("_M0_AUFTRAEGE+0");
+    if (idx < 0) return false;
+    const char* markup = db.Text(idx);
+    if (!markup || !*markup) return false;
+
+    out = ParseDifficultyMarkup(markup);   // heading + body + N "%s" option slots
+    // Substitute each "%s" option with the task-mode names in order.
+    int mi = 0;
+    for (std::size_t i = 0; i < out.options.size(); ++i) {
+        if (out.options[i] != "%s") continue;
+        const std::string key = "_M0_AUFTRAEGE_MODUS+" + std::to_string(mi++);
+        const int k = db.FindIndex(key.c_str());
+        out.options[i] = (k >= 0 && db.Text(k)) ? db.Text(k) : out.options[i];
+    }
+    // The tasks markup has no back member — append the real "Назад" from _M0_DIFFICULTY
+    // (its trailing %in option), matching the on-screen back button.
+    CharIntroContent diff;
+    const int di = db.FindIndex("_M0_DIFFICULTY+0");
+    if (di >= 0 && db.Text(di)) diff = ParseDifficultyMarkup(db.Text(di));
+    if (!diff.options.empty()) {
+        out.options.push_back(diff.options.back());
+        out.selectable.push_back(false);
+    }
+    return !out.options.empty();
+}
+
+ChooseTasksScreenResult RunChooseTasksScreen(shim::IGraphicsDevice& device,
+                                             shim::IPlatform& plat,
+                                             const ChooseHistoryConfig& cfg) {
+    ChooseTasksScreenResult res;
+    const int W = cfg.fbW, H = cfg.fbH;
+    std::vector<std::uint32_t> scratch((std::size_t)W * H, 0u);
+
+    CharIntroContent content;
+    res.usedRealText = LoadChooseTasksContent(cfg.gameDir, content);
+    if (!res.usedRealText) {
+        content.heading = "Your tasks"; content.prompt = "Choose your task difficulty.";
+        content.options = {"Free play", "Very easy tasks", "Easy tasks", "Medium tasks",
+                           "Hard tasks", "Very hard tasks", "back"};
+        content.selectable = {true, true, true, true, true, true, false};
+    }
+    shim::DiskFileSystem assetFs(cfg.gameDir);
+    MenuAssets assets;
+    const bool haveAssets = !cfg.gameDir.empty() && assets.Load(assetFs);
+    const std::vector<NewGameButtonRect> btnRects =
+        ChooseHistoryButtonRects(W, H, content, haveAssets ? &assets : nullptr, kChooseTasksBtnTop0);
+
+    std::vector<std::uint32_t> backdrop;
+    bool haveBackdrop = false;
+    if (render::Surface* bg = render::SurfaceCreate(W, H, 32)) {
+        if (RenderNewGameDeskBackdrop(device, cfg.gameDir, W, H, bg)) {
+            backdrop.resize((std::size_t)W * H);
+            for (int y = 0; y < H; ++y) {
+                const auto* s = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(bg->pixels) + (std::size_t)y * bg->pitch);
+                std::memcpy(backdrop.data() + (std::size_t)y * W, s, (std::size_t)W * 4);
+            }
+            haveBackdrop = true;
+        }
+        render::SurfaceDestroy(bg);
+    }
+
+    int frame = 0;
+    bool prevLeft = false;
+    for (;;) {
+        if (cfg.maxFrames >= 0 && frame >= cfg.maxFrames) break;
+        shim::MouseState ms{};
+        plat.getMouse(ms);
+        res.hoveredRow = ChooseHistoryHitRow(btnRects, ms.x, ms.y);
+
+        RenderChooseHistoryFrame(scratch.data(), W, H, content, res.hoveredRow, /*seedRow=*/-1,
+                                 haveAssets ? &assets : nullptr,
+                                 haveBackdrop ? backdrop.data() : nullptr, cfg.gameDir,
+                                 kChooseTasksBtnTop0);
+        BlitToDevice(scratch.data(), W, H, device);
+        device.present();
+        ++res.framesPresented;
+
+        if (!plat.pumpMessages()) { res.quitByWindow = true; res.back = true; break; }
+        plat.getMouse(ms);
+        const bool leftEdge = ms.left && !prevLeft;
+        prevLeft = ms.left;
+        if (plat.keyDown(kVkEsc)) { res.back = true; break; }
+        if (leftEdge) {
+            const int hov = ChooseHistoryHitRow(btnRects, ms.x, ms.y);
+            if (hov >= 0) {
+                const bool selectable = content.selectable.size() > (std::size_t)hov
+                                        && content.selectable[hov];
+                if (selectable) { res.confirmed = true; res.taskMode = hov; break; }
+                else            { res.back = true; break; }
+            }
+        }
+        if (cfg.frameCapMs > 0) plat.sleepMs((std::uint32_t)cfg.frameCapMs);
+        ++frame;
+    }
+    return res;
+}
+
 ChooseHistoryScreenResult RunChooseHistoryScreen(shim::IGraphicsDevice& device,
                                                  shim::IPlatform& plat,
                                                  const ChooseHistoryConfig& cfg) {
@@ -112,13 +231,29 @@ ChooseHistoryScreenResult RunChooseHistoryScreen(shim::IGraphicsDevice& device,
                            "No historical events", "back"};
         content.selectable = {true, true, true, false};
     }
-    const int rowCount = (int)content.options.size();
-    const CharIntroLayout L = CharIntroComputeLayout(W, H, rowCount);
     const int seedRow = gui::ChooseHistory_SeedIndex(cfg.seedMode);   // 0->2,1->0,2->1
 
     shim::DiskFileSystem assetFs(cfg.gameDir);
     MenuAssets assets;
     const bool haveAssets = !cfg.gameDir.empty() && assets.Load(assetFs);
+    const std::vector<NewGameButtonRect> btnRects =
+        ChooseHistoryButtonRects(W, H, content, haveAssets ? &assets : nullptr);
+
+    // Render the shared New-Game desk scene ONCE into a backdrop buffer.
+    std::vector<std::uint32_t> backdrop;
+    bool haveBackdrop = false;
+    if (render::Surface* bg = render::SurfaceCreate(W, H, 32)) {
+        if (RenderNewGameDeskBackdrop(device, cfg.gameDir, W, H, bg)) {
+            backdrop.resize((std::size_t)W * H);
+            for (int y = 0; y < H; ++y) {
+                const auto* s = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(bg->pixels) + (std::size_t)y * bg->pitch);
+                std::memcpy(backdrop.data() + (std::size_t)y * W, s, (std::size_t)W * 4);
+            }
+            haveBackdrop = true;
+        }
+        render::SurfaceDestroy(bg);
+    }
 
     int frame = 0;
     bool prevLeft = false;
@@ -127,10 +262,11 @@ ChooseHistoryScreenResult RunChooseHistoryScreen(shim::IGraphicsDevice& device,
 
         shim::MouseState ms{};
         plat.getMouse(ms);
-        res.hoveredRow = L.HitRow(ms.x, ms.y);
+        res.hoveredRow = ChooseHistoryHitRow(btnRects, ms.x, ms.y);
 
-        RenderCharIntroFrame(scratch.data(), W, H, content, res.hoveredRow, seedRow,
-                             haveAssets ? &assets : nullptr);
+        RenderChooseHistoryFrame(scratch.data(), W, H, content, res.hoveredRow, seedRow,
+                                 haveAssets ? &assets : nullptr,
+                                 haveBackdrop ? backdrop.data() : nullptr, cfg.gameDir);
         BlitToDevice(scratch.data(), W, H, device);
         device.present();
         ++res.framesPresented;
@@ -142,7 +278,7 @@ ChooseHistoryScreenResult RunChooseHistoryScreen(shim::IGraphicsDevice& device,
 
         if (plat.keyDown(kVkEsc)) { res.back = true; break; }
         if (leftEdge) {
-            const int hov = L.HitRow(ms.x, ms.y);
+            const int hov = ChooseHistoryHitRow(btnRects, ms.x, ms.y);
             if (hov >= 0) {
                 const bool selectable = content.selectable.size() > (std::size_t)hov
                                         && content.selectable[hov];

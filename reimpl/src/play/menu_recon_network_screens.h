@@ -241,6 +241,10 @@ struct NetViewContext {
 // Returns the produced layout (rects + resolved labels).
 NetHubLayout RenderNetworkHubView(u32* dst, const NetViewContext& ctx);
 
+// Render the "Продолжить игру" sub-screen (server/client choice): same parchment
+// form as the hub, 2 buttons (_OPTIONEN_NETZWERK_MENUE+4/+5).
+NetHubLayout RenderNetworkContinueView(u32* dst, const NetViewContext& ctx);
+
 // Render the host-IP entry screen. `typedIp` is the current edit-field text
 // (seeded from the INI "Host", default "127.0.0.1") drawn inside the input box.
 NetIpLayout RenderNetworkIpView(u32* dst, const NetViewContext& ctx,

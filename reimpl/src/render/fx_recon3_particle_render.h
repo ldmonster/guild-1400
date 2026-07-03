@@ -1,7 +1,7 @@
 #pragma once
 #include "guild/common/types.h"
 
-namespace guild::render { struct Surface; struct Texture; }
+namespace guild::render { struct Surface; struct Texture; struct RgbzVertex; }
 
 // =============================================================================
 // guild::render::fxrecon3 — particle billboard rasterizer prep.
@@ -165,6 +165,16 @@ enum ParticleBlend : u8 {
     kBlendAlpha = 0,   // 50/50 translucent (smoke / spray / dust)
     kBlendAdd   = 1,   // additive OR (fire / sparks)
 };
+
+// One blended textured triangle through the 50/50 / OR span leaves (the body
+// RasterizeTexturedTriangleRgbzWith uses, driving the blend inner spans).
+// `masked` selects the colour-key variants (skip source index 0) — the alpha
+// path FOLIAGE materials take (mesh material +194 bit 1, the "flag0 BYTE2 |= 2"
+// alpha route; bit 0 adds the key). `palette` is the 256-entry row the span
+// resolves texels through (callers with a 256-row shade ramp pass row base).
+int RasterizeBlendTriangle(Surface* fb, const RgbzVertex v[3], const Texture& tex,
+                           const u16* palette, ParticleBlend blend,
+                           bool masked = false);
 
 // ---------------------------------------------------------------------------
 // A live particle system header view, sufficient for rendering. Mirrors the

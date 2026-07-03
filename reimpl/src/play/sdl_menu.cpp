@@ -71,6 +71,41 @@ void DrawLabel(render::Surface& s, int x, int y, const char* text,
                      GlyphMap(), pg, s.fmt);
 }
 
+// Nearest-neighbour scaled blit of a decoded shape (alpha-keyed), mirroring
+// native_main_menu's ScaledBlit — used for the _BUTTON_RED 3-slice caps/centre.
+void ScaledShapeBlit(std::uint32_t* dst, int W, int H, const render::DecodedShape& s,
+                     int rx, int ry, int rw, int rh) {
+    if (s.width <= 0 || s.height <= 0 || rw <= 0 || rh <= 0) return;
+    for (int y = 0; y < rh; ++y) {
+        const int dy = ry + y; if (dy < 0 || dy >= H) continue;
+        const int sy = y * s.height / rh;
+        for (int x = 0; x < rw; ++x) {
+            const int dx = rx + x; if (dx < 0 || dx >= W) continue;
+            const int sx = x * s.width / rw;
+            const std::uint32_t p = s.argb[(std::size_t)sy * s.width + sx];
+            if (p & 0xFF000000u) dst[(std::size_t)dy * W + dx] = p;
+        }
+    }
+}
+
+// Draw a full _BUTTON_RED (gfx 174) 3-slice — left cap (shape 0/3) + stretched
+// centre (shape 2/5) + right cap (shape 1/4) — exactly like native_main_menu's
+// DrawButton3Slice.  This replaces the previous single-centre-slice blit (which
+// dropped the rounded end caps and ignored the label width).
+void DrawMenuButton(std::uint32_t* dst, int W, int H, MenuAssets& a,
+                    int rx, int ry, int rw, int rh, bool sel) {
+    const render::DecodedShape* L = a.buttonFrame(sel ? 3 : 0);
+    const render::DecodedShape* C = a.buttonFrame(sel ? 5 : 2);
+    const render::DecodedShape* R = a.buttonFrame(sel ? 4 : 1);
+    if (!L || !C || !R) return;
+    const int capW = MenuFont::kCapW;            // 12 native (shapes 0,1 width)
+    int lw = capW, rcw = capW, mw = rw - lw - rcw;
+    if (mw < 0) { mw = 0; rcw = rw - lw; if (rcw < 0) { rcw = 0; lw = rw; } }
+    ScaledShapeBlit(dst, W, H, *L, rx,           ry, lw,  rh);
+    ScaledShapeBlit(dst, W, H, *C, rx + lw,      ry, mw,  rh);
+    ScaledShapeBlit(dst, W, H, *R, rx + lw + mw, ry, rcw, rh);
+}
+
 // Bright rect outline (hover highlight) on the 32bpp scratch.
 void Outline(std::uint32_t* px, int w, int h, int x, int y, int bw, int bh,
              std::uint32_t col) {
@@ -147,6 +182,12 @@ SdlMenuResult RunSdlMenu(shim::IGraphicsDevice& device, shim::IPlatform& plat,
     const bool haveAssets = !cfg.gameDir.empty() && assets.Load(assetFs);
     if (haveAssets) assets.InstallHooks();
 
+    // Resolve the eight localized (CP1251) main-menu captions from the shipped
+    // textbin (the same _OPTIONEN_MENUE_* strings the engine draws); indexed by
+    // button row. Empty entries fall back to the built-in English caption.
+    std::string menuLabels[8];
+    const bool haveLabels = haveAssets && ResolveMainMenuLabels(cfg.gameDir, menuLabels);
+
     int frame = 0;
     bool prevLeft = false;
     bool prevF11 = false;
@@ -162,19 +203,37 @@ SdlMenuResult RunSdlMenu(shim::IGraphicsDevice& device, shim::IPlatform& plat,
         plat.getMouse(ms);
 
         if (haveAssets) {
-            // Real artwork: draw the shipped background, then paint the real
-            // gfx-174 button sprite at each menu row via the installed hook
-            // (this bypasses RenderMainMenu's flat-fill backdrop so the town
-            // banner stays visible), with the caption text on top.
+            // Real artwork: draw the shipped background, then paint each menu row
+            // as the real _BUTTON_RED (gfx 174) 3-slice sized to its caption, with
+            // the localized caption rendered in the real engine _FONT (record 66).
             DrawBackground(scratch.data(), W, H, assets.background().data(),
                            assets.backgroundWidth(), assets.backgroundHeight());
+            const MenuFont& fnt = assets.font();
+            const int rh = 33;   // _BUTTON_RED native height (shape 0..5 are all *x33)
             for (int i = 0; i < gui::kMainMenuButtonCount; ++i) {
                 const int by = gui::MainMenu_ButtonY(i);
-                gui::GetMenuRenderHooks().drawSprite(
-                    &tgt.surf, gui::kMainMenuButtonX, by,
-                    gui::kMainMenuButtonSprite, gui::GetMenuRenderHooks().userData);
-                DrawLabel(tgt.surf, gui::kMainMenuButtonX + 8, by + 12,
-                          gui::kMainMenuButtons[i].label, 255, 235, 200);
+                const int rx = gui::kMainMenuButtonX;
+                // Localized caption (CP1251); fall back to the built-in English one.
+                const char* lab = (haveLabels && !menuLabels[i].empty())
+                                      ? menuLabels[i].c_str()
+                                      : gui::kMainMenuButtons[i].label;
+                if (fnt.loaded()) {
+                    // Button width = caption width + both 12px caps + 4 (the engine's
+                    // Object_RecomputeSize @0x41b164 sprite-kind-9 sizing).
+                    const int btnW = fnt.ButtonWidth(lab);
+                    DrawMenuButton(scratch.data(), W, H, assets, rx, by, btnW, rh, false);
+                    // Centre the real-glyph caption inside the button face.
+                    const int textW = fnt.MeasureWidth(lab);
+                    const int textH = fnt.lineHeight() > 0 ? fnt.lineHeight() : 17;
+                    fnt.DrawText(scratch.data(), W, H,
+                                 rx + (btnW - textW) / 2, by + (rh - textH) / 2,
+                                 lab, 1, 255, 235, 200);
+                } else {
+                    // Font missing: still draw the real 3-slice, ASCII caption on top.
+                    const int btnW = 124;
+                    DrawMenuButton(scratch.data(), W, H, assets, rx, by, btnW, rh, false);
+                    DrawLabel(tgt.surf, rx + 8, by + 12, lab, 255, 235, 200);
+                }
             }
         } else {
             gui::RenderMainMenu(tgt);

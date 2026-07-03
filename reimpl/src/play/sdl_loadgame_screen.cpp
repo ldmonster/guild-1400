@@ -237,6 +237,12 @@ int LoadGameScreenLayout::HitRow(int mx, int my, int scroll) const {
         return kLoadGameSlotCount;
     return -1;
 }
+int LoadGameScreenLayout::HitScrollBtn(int mx, int my) const {
+    if (mx < btnX || mx >= btnX + btnW) return -1;
+    if (my >= upBtnY   && my < upBtnY   + btnH) return 0;   // up
+    if (my >= downBtnY && my < downBtnY + btnH) return 1;   // down
+    return -1;
+}
 LoadGameScreenLayout LoadGameComputeLayout(int W, int H) {
     LoadGameScreenLayout L;
     L.W = W; L.H = H;
@@ -259,8 +265,18 @@ LoadGameScreenLayout LoadGameComputeLayout(int W, int H) {
     L.thumbW = io::kThumbWidth;      // 160
     L.thumbH = io::kThumbHeight;     // 120
     L.nameDX = 168;                  // Object_AddTextLabel(168,..) @0x569ebd
-    L.scrollX = 532 + L.ox;          // Hud_BuildSliderPanel(532,..) @0x56a30b
+    L.scrollX = 532 + L.ox;          // (legacy; scrollbar removed)
     L.scrollW = 16;
+    // Scroll up/down buttons + count, bottom-right of the green frame interior.
+    // The frame (_TOOL_TIP_GREEN_BIGGER, 574x450) is centered at px0=(W-574)/2 with
+    // its top at win0Y=136; the arrows sit just inside the lower-right border.
+    const int fpx0 = (W - 574) / 2;
+    const int fpy0 = 136 + L.oy;
+    L.btnW = 12; L.btnH = 24;         // _AUSWAHL[1]/[2] blue gem arrows (12x24)
+    L.btnX     = fpx0 + 528;          // ~screen x641 — inside the right gold border
+    L.upBtnY   = fpy0 + 358;          // ~screen y494
+    L.countY   = fpy0 + 388;          // ~screen y524 (count label)
+    L.downBtnY = fpy0 + 408;          // ~screen y544
     // Synthetic back hit box (the real screen has no back button — ESC closes).
     L.backX = L.px;  L.backY = L.py + L.viewH + 4;
     L.backW = L.pw;  L.backH = 20;
@@ -295,14 +311,16 @@ bool LoadLoadGameTexts(const std::string& gameDir, LoadGameTexts& out) {
     // hole, 0x56a0fb); the `_OPTIONEN_LOAD_GAME_SLOT_INFO_LEER+0/+1` family holds
     // the empty-row info captions — pick the member with the %i hole.
     {
-        std::string s0, s1;
+        std::string s0, s1, r0, r1;
         const int e0 = db.FindIndex("_OPTIONEN_LOAD_GAME_SLOT_INFO_LEER+0");
         const int e1 = db.FindIndex("_OPTIONEN_LOAD_GAME_SLOT_INFO_LEER+1");
-        if (e0 >= 0 && db.Text(e0)) s0 = StripMarkup(db.Text(e0));
-        if (e1 >= 0 && db.Text(e1)) s1 = StripMarkup(db.Text(e1));
-        if (s1.find("%i") != std::string::npos)      out.emptyFmt = s1;
-        else if (s0.find("%i") != std::string::npos) out.emptyFmt = s0;
-        else                                         out.emptyFmt = !s1.empty() ? s1 : s0;
+        if (e0 >= 0 && db.Text(e0)) { r0 = db.Text(e0); s0 = StripMarkup(r0); }
+        if (e1 >= 0 && db.Text(e1)) { r1 = db.Text(e1); s1 = StripMarkup(r1); }
+        // The member with the %i hole is the slot NAME row; the OTHER is the field-
+        // label block (Город/Дата/Имя игрока/Профессия), kept RAW for its $A breaks.
+        if (s1.find("%i") != std::string::npos)      { out.emptyFmt = s1; out.emptyInfo = r0; }
+        else if (s0.find("%i") != std::string::npos) { out.emptyFmt = s0; out.emptyInfo = r1; }
+        else                                         { out.emptyFmt = !s1.empty() ? s1 : s0; out.emptyInfo = r0; }
     }
     // Occupied-row info captions (`_OPTIONEN_LOAD_GAME_SLOT_INFO+0/+1`): the rich
     // strings 0x18D2/0x18D3 the original renders to the right of the save name.
@@ -430,6 +448,18 @@ struct NativeLoadGameHooks : gui::LoadGameRunHooks {
     int  selection = -1;      // keyboard selection over occupied rows
     int  scroll = 0;          // list scroll offset (px), 0..layout.maxScroll()
     bool overlayConfirm = false;
+    // Scroll-button hold/repeat state (click = one row; hold = continuous).
+    int  scrollHoldDir = -1;  // 0 up, 1 down, -1 none
+    int  scrollHoldFrames = 0;
+    static constexpr int kScrollHoldDelay = 16;   // frames before auto-repeat starts
+    static constexpr int kScrollHoldRepeat = 4;   // repeat every N frames while held
+    void ScrollByRows(int dir) {
+        selection = -1;                            // manual scroll: drop the keyboard pick
+        scroll += dir * layout.rowH;
+        if (scroll < 0) scroll = 0;
+        const int maxS = layout.maxScroll();
+        if (scroll > maxS) scroll = maxS;
+    }
 
     // Keep the selected (or first) row inside the viewport (the scrollbar follows
     // the selection, like the engine's slider panel).
@@ -501,6 +531,23 @@ struct NativeLoadGameHooks : gui::LoadGameRunHooks {
         EnsureVisible();
         hoveredRow = layout.HitRow(mouse.x, mouse.y, scroll);
         if (res) res->hoveredRow = hoveredRow;
+
+        // Scroll buttons: press = scroll one row; hold = continuous after a delay.
+        const int sb = layout.HitScrollBtn(mouse.x, mouse.y);
+        if (mouse.left && sb >= 0) {
+            const int dir = (sb == 0) ? -1 : +1;
+            if (clickEdgeNow) {                       // initial press
+                ScrollByRows(dir);
+                scrollHoldDir = sb; scrollHoldFrames = 0;
+            } else if (sb == scrollHoldDir) {         // still holding the same button
+                ++scrollHoldFrames;
+                if (scrollHoldFrames >= kScrollHoldDelay &&
+                    (scrollHoldFrames - kScrollHoldDelay) % kScrollHoldRepeat == 0)
+                    ScrollByRows(dir);
+            }
+        } else {
+            scrollHoldDir = -1; scrollHoldFrames = 0;
+        }
     }
 
     void RenderAndPresent() {
@@ -510,6 +557,10 @@ struct NativeLoadGameHooks : gui::LoadGameRunHooks {
         const bool art = assets && assets->loaded();
         const MenuFont* font = art ? &assets->font() : nullptr;
         if (!font || !font->loaded()) font = nullptr;
+        // Small engine font (_FONT+1) for the per-slot info field labels (the
+        // original renders Город/Дата/... noticeably smaller than the save name).
+        const MenuFont* sfont = (art && assets->smallFont().loaded())
+                                    ? &assets->smallFont() : font;
 
         // --- background: real _OPTIONEN_PIC (res variant chosen at load) ---
         if (art)
@@ -520,26 +571,92 @@ struct NativeLoadGameHooks : gui::LoadGameRunHooks {
             gui::MenuFillRect(&tgt.surf, 0, 0, W, H, pal.bgR, pal.bgG, pal.bgB);
         }
 
-        // --- body panel behind the slot list (the form's WIN0/WIN1 backing
-        // surface, flags 0x11). A dark tinted plate spanning the viewport keeps
-        // the rows legible over _OPTIONEN_PIC; a gold border frames it. ---
+        // Slot-list viewport (used by the row loop + scrollbar below).
         const int pX = layout.px, pY = layout.py, pW = layout.pw, pVH = layout.viewH;
-        gui::MenuFillRect(&tgt.surf, pX - 8, pY - 8, pW + layout.scrollW + 24, pVH + 16,
-                          28, 22, 14);
-        Outline(scratch.data(), W, H, pX - 8, pY - 8, pW + layout.scrollW + 24, pVH + 16,
-                0xFFB08C46u);
+        (void)pX; (void)pW;
 
-        // --- title rich string 0x1864 (_OPTIONEN_MENUE_LOAD), centered ---
-        {
+        // --- panel: the REAL _TOOL_TIP_GREEN_BIGGER jeweled green frame (the same
+        // chrome as the main-menu options sub-screens), centered horizontally, top
+        // at win0Y=136. The enclosed transparent centre is flood-filled dark (so the
+        // slot list is legible over the city backdrop), the title sits in the green
+        // marble bar, and the slot rows render inside the dark interior below. ---
+        const render::DecodedShape* frame =
+            art ? assets->SpriteByName("_TOOL_TIP_GREEN_BIGGER", 0) : nullptr;
+        if (frame && frame->width > 0 && frame->height > 0) {
+            const int fw = frame->width, fh = frame->height;
+            const int px0 = (W - fw) / 2;
+            const int py0 = 136 + layout.oy;
+            const std::uint32_t* fa = frame->argb.data();
+            static const render::DecodedShape* s_maskFor = nullptr;
+            static std::vector<unsigned char> s_interior;
+            if (s_maskFor != frame) {
+                s_maskFor = frame;
+                s_interior.assign((std::size_t)fw * fh, 0);
+                std::vector<int> stk;
+                const int seed = (fh / 2) * fw + (fw / 2);
+                if (!(fa[seed] & 0xFF000000u)) { s_interior[seed] = 1; stk.push_back(seed); }
+                while (!stk.empty()) {
+                    const int p = stk.back(); stk.pop_back();
+                    const int x = p % fw, y = p / fw;
+                    const int nb[4] = { x + 1 < fw ? p + 1 : -1, x > 0 ? p - 1 : -1,
+                                        y + 1 < fh ? p + fw : -1, y > 0 ? p - fw : -1 };
+                    for (int k = 0; k < 4; ++k) {
+                        const int q = nb[k];
+                        if (q < 0 || s_interior[q] || (fa[q] & 0xFF000000u)) continue;
+                        s_interior[q] = 1; stk.push_back(q);
+                    }
+                }
+            }
+            for (int ry = 0; ry < fh; ++ry) {
+                const int dy = py0 + ry; if (dy < 0 || dy >= H) continue;
+                std::uint32_t* drow = scratch.data() + (std::size_t)dy * W;
+                for (int rx = 0; rx < fw; ++rx) {
+                    const int dx = px0 + rx; if (dx < 0 || dx >= W) continue;
+                    const std::size_t fi = (std::size_t)ry * fw + rx;
+                    const std::uint32_t ap = fa[fi];
+                    if (ap & 0xFF000000u) drow[dx] = ap;
+                    else if (s_interior[fi]) {
+                        const std::uint32_t c = drow[dx];
+                        const int r = ((((c >> 16) & 0xFF) * 82) + 22 * 174) >> 8;
+                        const int g = ((((c >> 8) & 0xFF) * 82) + 26 * 174) >> 8;
+                        const int b = (((c & 0xFF) * 82) + 16 * 174) >> 8;
+                        drow[dx] = 0xFF000000u | ((std::uint32_t)r << 16) | ((std::uint32_t)g << 8) | (std::uint32_t)b;
+                    }
+                }
+            }
+            // Title centered on the green marble bar (frame-y 11..41, centre 26).
+            if (font && !texts.title.empty()) {
+                const int tw = MeasureRealText(font, texts.title);
+                const int th = font->lineHeight() > 0 ? font->lineHeight() : 17;
+                DrawRealText(tgt.surf, font, px0 + (fw - tw) / 2, py0 + 11 + (31 - th) / 2,
+                             texts.title, 255, 255, 214);
+            }
+        } else {
+            // Asset-less fallback: dark plate + plain centered title.
+            gui::MenuFillRect(&tgt.surf, pX - 8, pY - 8, pW + layout.scrollW + 24, pVH + 16, 28, 22, 14);
+            Outline(scratch.data(), W, H, pX - 8, pY - 8, pW + layout.scrollW + 24, pVH + 16, 0xFFB08C46u);
             const int tw = MeasureRealText(font, texts.title);
-            DrawRealText(tgt.surf, font, layout.cx - tw / 2, layout.titleY,
-                         texts.title, 255, 226, 150);
+            DrawRealText(tgt.surf, font, layout.cx - tw / 2, layout.titleY, texts.title, 255, 226, 150);
         }
 
         // --- slot rows: 130px-tall rows, each = 160x120 thumbnail (left) + save
         // name (gold) and date/wealth info at x+168, clipped to the viewport and
         // scrolled. (VIBE_SaveBrowser_LoadSlotMetadata @0x569d00.) ---
         const int clipY0 = pY, clipY1 = pY + pVH;
+        // Empty-slot placeholder is the rolling gold "?" (_FRAGEZEICHEN, ~25 frames
+        // that rotate). Pick the current animation frame from the present counter.
+        const render::DecodedShape* qmark = nullptr;
+        if (art) {
+            static int s_qcount = -1;
+            if (s_qcount < 0) {
+                s_qcount = 0;
+                while (s_qcount < 64 && assets->SpriteByName("_FRAGEZEICHEN", s_qcount)) ++s_qcount;
+            }
+            if (s_qcount > 0) {
+                const int qf = (res ? res->framesPresented / 2 : 0) % s_qcount;
+                qmark = assets->SpriteByName("_FRAGEZEICHEN", qf);
+            }
+        }
         for (int i = 0; i < kLoadGameSlotCount; ++i) {
             int rx, ry, rw, rh;
             layout.RowRect(i, scroll, rx, ry, rw, rh);
@@ -565,6 +682,24 @@ struct NativeLoadGameHooks : gui::LoadGameRunHooks {
                 const int xr = tX + layout.thumbW - 1;
                 if (xr >= 0 && xr < W) scratch[(std::size_t)yy * W + xr] = 0xFF8A6E36u;
             }
+            // Empty-slot placeholder: the rolling gold "?" (_FRAGEZEICHEN) centered
+            // in the dark thumbnail (the original's animated no-preview indicator).
+            if (!occ && qmark && qmark->width > 0) {
+                const int qx = tX + (layout.thumbW - qmark->width) / 2;
+                const int qy = tY + (layout.thumbH - qmark->height) / 2;
+                for (int yy = 0; yy < qmark->height; ++yy) {
+                    const int Y = qy + yy;
+                    if (Y < clipY0 || Y >= clipY1 || Y < 0 || Y >= H) continue;
+                    const std::uint32_t* srow = qmark->argb.data() + (std::size_t)yy * qmark->width;
+                    std::uint32_t* drow = scratch.data() + (std::size_t)Y * W;
+                    for (int xx = 0; xx < qmark->width; ++xx) {
+                        const std::uint32_t p = srow[xx];
+                        if (!(p & 0xFF000000u)) continue;
+                        const int X = qx + xx; if (X < 0 || X >= W) continue;
+                        drow[X] = p;
+                    }
+                }
+            }
 
             // Save name (gold; Object_SetColor 66) / empty placeholder, at x+168.
             const int nx = rx + layout.nameDX;
@@ -586,20 +721,67 @@ struct NativeLoadGameHooks : gui::LoadGameRunHooks {
                 const int iy = ry + 6 + (font ? font->lineHeight() + 4 : 18);
                 if (iy >= clipY0 && iy < clipY1)
                     DrawRealText(tgt.surf, font, nx, iy, info, 210, 196, 150);
+            } else {
+                // Empty slot: the field-label block (Город:/Дата:/Имя игрока:/
+                // Профессия:) from _OPTIONEN_LOAD_GAME_SLOT_INFO_LEER, one line per
+                // $A break (the original renders these greyed under the slot name).
+                const int lh = sfont ? sfont->lineHeight() + 3 : 13;
+                int ly = ny + (font ? font->lineHeight() + 6 : 20);
+                const std::string& ei = texts.emptyInfo;
+                std::size_t p = 0;
+                while (p <= ei.size() && ly + lh <= clipY1) {
+                    const std::size_t nl = ei.find("$A", p);
+                    const std::string seg = ei.substr(p, nl == std::string::npos ? std::string::npos : nl - p);
+                    const std::string line = StripMarkup(seg);
+                    if (!line.empty() && ly >= clipY0)
+                        DrawRealText(tgt.surf, sfont, nx, ly, line, 190, 178, 140);
+                    ly += lh;
+                    if (nl == std::string::npos) break;
+                    p = nl + 2;
+                }
             }
         }
 
-        // --- scrollbar (Hud_BuildSliderPanel(532,360) @0x4bd388) — drawn when the
-        // 16-row content exceeds the viewport. Track + a thumb sized to the ratio. ---
-        if (layout.maxScroll() > 0) {
-            const int sX = layout.scrollX, sW = layout.scrollW;
-            const int sY = pY, sH = pVH;
-            FillClip(scratch.data(), W, H, sX, sY, sW, sH, clipY0, clipY1 + 1, 0xFF1A140Cu);
-            Outline(scratch.data(), W, H, sX, sY, sW, sH, 0xFF8A6E36u);
-            const int thumbH = sH * sH / layout.contentH();
-            const int thH = thumbH < 16 ? 16 : thumbH;
-            const int thY = sY + (sH - thH) * scroll / layout.maxScroll();
-            gui::MenuFillRect(&tgt.surf, sX + 2, thY, sW - 4, thH, 200, 170, 90);
+        // --- scroll up/down buttons + count (Hud_BuildSliderPanel @0x4bd388): a
+        // blue gem triangle pointing up and one down, with the slot count between
+        // them, at the bottom-right of the panel. No scrollbar. The engine draws
+        // these arrows as primitives, so we render them the same way. ---
+        {
+            const int hovBtn = layout.HitScrollBtn(mouse.x, mouse.y);
+            const bool atTop = scroll <= 0;
+            const bool atBot = scroll >= layout.maxScroll();
+            // The real blue gem arrows: _AUSWAHL shape 1 (up) / 2 (down). Brighten
+            // on hover, dim when the list can't scroll that way.
+            const render::DecodedShape* upA   = art ? assets->SpriteByName("_AUSWAHL", 1) : nullptr;
+            const render::DecodedShape* downA = art ? assets->SpriteByName("_AUSWAHL", 2) : nullptr;
+            auto blitArrow = [&](const render::DecodedShape* sh, int bx, int by, bool hovered, bool disabled) {
+                if (!sh || sh->width <= 0) return;
+                for (int yy = 0; yy < sh->height; ++yy) {
+                    const int Y = by + yy; if (Y < 0 || Y >= H) continue;
+                    const std::uint32_t* srow = sh->argb.data() + (std::size_t)yy * sh->width;
+                    std::uint32_t* drow = scratch.data() + (std::size_t)Y * W;
+                    for (int xx = 0; xx < sh->width; ++xx) {
+                        std::uint32_t p = srow[xx];
+                        if (!(p & 0xFF000000u)) continue;
+                        const int X = bx + xx; if (X < 0 || X >= W) continue;
+                        int r = (p >> 16) & 0xFF, g = (p >> 8) & 0xFF, b = p & 0xFF;
+                        if (disabled) { r = r * 5 / 8; g = g * 5 / 8; b = b * 5 / 8; }     // darker
+                        else if (hovered) {                                                // lighter
+                            r += (255 - r) / 3; g += (255 - g) / 3; b += (255 - b) / 3;
+                        }
+                        drow[X] = 0xFF000000u | ((std::uint32_t)r << 16) | ((std::uint32_t)g << 8) | (std::uint32_t)b;
+                    }
+                }
+            };
+            blitArrow(upA,   layout.btnX, layout.upBtnY,   hovBtn == 0, atTop);
+            blitArrow(downA, layout.btnX, layout.downBtnY, hovBtn == 1, atBot);
+            // Count label (total slots) centered between the arrows.
+            if (sfont) {
+                char num[8]; std::snprintf(num, sizeof num, "%d", kLoadGameSlotCount);
+                const int tw = sfont->MeasureWidth(num);
+                DrawRealText(tgt.surf, sfont, layout.btnX + layout.btnW / 2 - tw / 2,
+                             layout.countY, num, 235, 215, 150);
+            }
         }
 
         // Confirm overlay (byte_63CC40 gate -> RunMessageBox 257,
@@ -716,19 +898,20 @@ LoadGameScreenResult RunLoadGameScreen(shim::IGraphicsDevice& device,
     if (h.texts.emptyFmt.empty()) h.texts.emptyFmt = "- empty slot %i -";
     if (h.texts.confirm.empty())  h.texts.confirm  = "Load this game?";
 
-    // The options/menu sub-screens use _OPTIONEN_PIC as the full backdrop (NOT
-    // _MENUE_BACKGROUND); resolution variants _1024/_1152 by framebuffer width
-    // (MENU-SUBSCREENS-GROUNDTRUTH). See native_main_menu's bgName selection.
-    const char* bgName = cfg.fbW >= 1152 ? "_OPTIONEN_PIC_1152"
-                       : cfg.fbW >= 1024 ? "_OPTIONEN_PIC_1024"
-                                         : "_OPTIONEN_PIC";
+    // Load-Game is a MAIN-MENU sub-screen, so it sits over the live title-screen
+    // CITY backdrop (_MENUE_BACKGROUND), exactly like the main-menu options pages
+    // — NOT the in-game _OPTIONEN_PIC bookshelf (verified against gilde.exe).
+    // Resolution variants _1024/_1152 by framebuffer width.
+    const char* bgName = cfg.fbW >= 1152 ? "_MENUE_BACKGROUND_1152"
+                       : cfg.fbW >= 1024 ? "_MENUE_BACKGROUND_1024"
+                                         : "_MENUE_BACKGROUND";
     shim::DiskFileSystem assetFs(cfg.gameDir);
     MenuAssets assets;
     bool haveAssets =
         !cfg.gameDir.empty() && assets.Load(assetFs, "gfx/gilde.gfx", bgName);
-    // Fall back to the base 800x600 _OPTIONEN_PIC if the res variant is absent.
+    // Fall back to the base 800x600 _MENUE_BACKGROUND if the res variant is absent.
     if (!haveAssets && !cfg.gameDir.empty() && cfg.fbW >= 1024)
-        haveAssets = assets.Load(assetFs, "gfx/gilde.gfx", "_OPTIONEN_PIC");
+        haveAssets = assets.Load(assetFs, "gfx/gilde.gfx", "_MENUE_BACKGROUND");
     if (haveAssets) h.assets = &assets;
 
     gui::LoadGameRunState st;
