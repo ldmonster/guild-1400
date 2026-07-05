@@ -27,9 +27,12 @@ int ProjectObjectVertices(Vertex* verts, int count, Polygon* polys, int polyCoun
                 continue;
             if (v.z == 0.0f)            // guard the 1/z divide (engine assumes z != 0)
                 continue;
+            // invZ IS rounded to float (fstp var_C @0x5acc4e reused by both fmuls),
+            // but the products/sums stay on the x87 stack (80-bit) until the single
+            // fstp per coordinate (@0x5acc7e/0x5acc81) — model with double.
             const float invZ = 1.0f / v.z;
-            v.screenX = s.xScale * v.x * invZ + s.xOffset;   // +16
-            v.screenY = s.yScale * v.y * invZ + s.yOffset;   // +20
+            v.screenX = (float)((double)s.xScale * v.x * invZ + s.xOffset);   // +16
+            v.screenY = (float)((double)s.yScale * v.y * invZ + s.yOffset);   // +20
             ++projected;
         }
     }
@@ -50,8 +53,10 @@ int ProjectObjectVertices(Vertex* verts, int count, Polygon* polys, int polyCoun
             const Vertex* b = poly.v1;
             const Vertex* c = poly.v2;
             // (v0.sx - v2.sx)*(v0.sy - v1.sy) > (v0.sx - v1.sx)*(v0.sy - v2.sy)  -> back.
-            const float lhs = (a->screenX - c->screenX) * (a->screenY - b->screenY);
-            const float rhs = (a->screenX - b->screenX) * (a->screenY - c->screenY);
+            // The diffs/products are compared at x87 width (fcompp @0x5accae, no
+            // intermediate float store, 0x5acc92..0x5accac) — model with double.
+            const double lhs = ((double)a->screenX - c->screenX) * ((double)a->screenY - b->screenY);
+            const double rhs = ((double)a->screenX - b->screenX) * ((double)a->screenY - c->screenY);
             if (lhs > rhs && (poly.flags38 & 4) == 0)
                 poly.flags36 = (u8)(poly.flags36 & 0x7F);   // clear sign bit (cull)
         }

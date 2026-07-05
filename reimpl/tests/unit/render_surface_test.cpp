@@ -291,23 +291,39 @@ TEST(RenderHiColTab, RampEndpoints) {
 // ---------------------------------------------------------------------------
 TEST(RenderBmp, Save24MatchesReference) {
     // top-down R,G,B source 2x2: red, green / blue, white
+    // gilde.exe 0x5f18f4: the engine writes a 14-byte file header, then a
+    // 44-byte info block (biSize=40 + 4 trailing zero bytes), dataOffset=58,
+    // fileSize = 3*w*h + 58, rows unpadded (stride = 3*w).
     u8 src[12] = {255,0,0, 0,255,0,  0,0,255, 255,255,255};
     std::vector<u8> out = BmpSave24Bit(2, 2, src);
-    CHECK_EQ((int)out.size(), 66);
+    CHECK_EQ((int)out.size(), 70);
     CHECK_EQ((int)out[0], 'B'); CHECK_EQ((int)out[1], 'M');
-    // dataOffset
-    CHECK_EQ((int)out[10], 54);
+    // dataOffset (v45 = 58 @0x5f18f4)
+    CHECK_EQ((int)out[10], 58);
+    // biSize stays 40 even though 44 bytes are written
+    CHECK_EQ((int)out[14], 40);
     // info bpp at file offset 14+14 = 28
     CHECK_EQ((int)out[28], 24);
     // first on-disk pixel = bottom-up row0 = source row1 col0 = blue -> B,G,R
-    CHECK_EQ((int)out[54], 255); // B
-    CHECK_EQ((int)out[55], 0);
-    CHECK_EQ((int)out[56], 0);   // R
+    CHECK_EQ((int)out[58], 255); // B
+    CHECK_EQ((int)out[59], 0);
+    CHECK_EQ((int)out[60], 0);   // R
 }
 
-TEST(RenderBmp, Save24LoadRoundtrip) {
+TEST(RenderBmp, Load24StandardLayout) {
+    // gilde.exe 0x5f0ce4 (VIBE_Bmp_LoadBuffer) SEEKS to the fixed offset 0x36
+    // for 24-bit data — it does NOT honor the header's dataOffset. Real game
+    // assets are tool-produced with data at 0x36, so feed the loader a
+    // standard-layout file. (The engine's own Save24Bit output, data at 58,
+    // is NOT loader-compatible — a genuine engine quirk: Save24 is an
+    // export/screenshot path, never re-loaded.)
     u8 src[12] = {255,0,0, 0,255,0,  0,0,255, 255,255,255};
     std::vector<u8> file = BmpSave24Bit(2, 2, src);
+    // Convert to standard layout: drop the 4 zero pad bytes after the 40-byte
+    // info header so pixel data lands at 0x36, and patch dataOffset/fileSize.
+    file.erase(file.begin() + 54, file.begin() + 58);
+    file[10] = 54;
+    file[2] = (u8)file.size();
     int w, h;
     std::vector<u8> back = BmpLoadBuffer(file, 24, w, h);
     CHECK_EQ(w, 2);

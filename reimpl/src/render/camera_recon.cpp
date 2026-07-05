@@ -150,16 +150,20 @@ void Camera_AnchorToTerrain(CameraObject& obj, CameraState& st, const CameraHook
     const f32 wq[3] = {obj.posX, obj.posY, obj.posZ};
     const f32 v3 = h.terrainHeight(a1, a2, wq, h.terrainUser);
 
-    // position triple (read +76/+80/+84, replace Y)
+    // position triple (read +76/+80/+84, replace Y). The whole expression is
+    // one x87 chain with a single fstp (80-bit intermediates -> double model).
     f32 v[3];
     v[0] = obj.posX;
-    v[1] = v3 + st.baseHeight + (st.spanHeight - st.baseHeight) * st.zoomT;
+    v[1] = (f32)((double)v3 + (double)st.baseHeight
+                 + ((double)st.spanHeight - (double)st.baseHeight) * (double)st.zoomT);
     v[2] = obj.posZ;
     h.setPosition(&obj, v);                  // writes +76/+80/+84
 
-    // world-translation triple (read +132/+136/+140, replace X)
+    // world-translation triple (read +132/+136/+140, replace X); same single-
+    // fstp x87 chain.
     f32 w[3];
-    w[0] = st.baseAngle + (st.spanAngle - st.baseAngle) * zoomTAsFloat;
+    w[0] = (f32)((double)st.baseAngle
+                 + ((double)st.spanAngle - (double)st.baseAngle) * (double)zoomTAsFloat);
     w[1] = obj.worldY;
     w[2] = obj.worldZ;
     h.setWorldTranslation(&obj, w);          // writes +132/+136/+140
@@ -224,16 +228,22 @@ void Camera_ClampToTerrainHeight(CameraObject& obj, CameraState& st, const Camer
     const f32 wq[3] = {obj.posX, obj.posY, obj.posZ};
     const f32 v11 = h.terrainHeight(thisX, /*node ptr leftover*/ 0, wq, h.terrainUser);
 
-    const double v12 = (double)st.baseHeight
-                     + (double)(st.spanHeight - st.baseHeight) * (double)st.zoomT
-                     + (double)v11
-                     - ((double)obj.posY + (double)obj.pos2Y);
+    // v1 stays on the x87 stack (80-bit; spanH-baseH is NOT rounded to float
+    // mid-chain) and is ALSO stored to the float v12 (fstp) before the step
+    // multiply reads it back.
+    const double v1 = (double)st.baseHeight
+                    + ((double)st.spanHeight - (double)st.baseHeight) * (double)st.zoomT
+                    + (double)v11
+                    - ((double)obj.posY + (double)obj.pos2Y);
+    const f32 v12 = (f32)v1;             // fstp [v12] @0x4b2a63
 
-    if (std::fabs(v12) <= kClamp_dbl_61DD70) {
+    if (std::fabs(v1) <= kClamp_dbl_61DD70) {
         st.clampResultBits = 0;          // dword_631DDC = 0
         // fallthrough to the LABEL_12 world-X ease (no object write there)
     } else {
-        f32 step = (f32)(v12 * kClamp_flt_61DD78);
+        // 0x4b2a90: *(float*)&v17 = v12 * flt_61DD78 — the FLOAT copy v12 is
+        // the multiplicand, not the 80-bit v1.
+        f32 step = (f32)((double)v12 * (double)kClamp_flt_61DD78);
         if (step <= 0.0f) {
             if (step >= 0.0f) {
                 // step == 0: LABEL_9 (apply with step==0)
@@ -310,20 +320,25 @@ i32 Camera_ComputeZoomScale(const ComputeZoomScaleCtx& ctx) {
     const double w    = (double)ctx.wealth;
     const double ratio = w * (double)kZoom_flt_61E578 / area;
 
-    double result;
+    // The binary stores the band result through FLOAT locals (v15/v16/v17 —
+    // fstp dword) before comparing/truncating; model those float roundings.
+    f32 v16;
+    const f32 v15 = (f32)(w * (double)kZoom_flt_61E578 / area);
     if (ratio < (double)kZoom_flt_61E57C
-        || (w * (double)kZoom_flt_61E578 / area) <= (double)kZoom_flt_61E580) {
+        || (double)kZoom_flt_61E580 >= (double)v15) {
         const double ratio3 = w * (double)kZoom_flt_61E578 / area;
+        f32 v17;
         if (ratio3 >= (double)kZoom_flt_61E57C) {
-            result = w * (double)kZoom_flt_61E578 / area;   // mid band
+            v17 = (f32)(w * (double)kZoom_flt_61E578 / area);  // mid band
         } else {
-            result = (double)kZoom_const_1600;              // low band
+            v17 = kZoom_const_1600;                            // low band
         }
+        v16 = v17;
     } else {
-        result = (double)kZoom_const_16000;                 // high band
+        v16 = kZoom_const_16000;                               // high band
     }
 
-    const i32 truncated = trunc_toward_zero(result);
+    const i32 truncated = trunc_toward_zero((double)v16);
     if (ctx.truncMax <= truncated)
         return 0;
     return truncated;

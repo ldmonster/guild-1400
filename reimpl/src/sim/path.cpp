@@ -23,19 +23,41 @@
 
 namespace guild::sim {
 
-// gilde.exe unk_62E630 (profile 0). 15 floats; negative == impassable.
-const float kPathTypeCost[kPathCostTypes] = {
+// gilde.exe unk_62E630 — FIVE cost profiles of 15 floats each (60 bytes per
+// profile, 0x62E630..0x62E75B; get_bytes-verified). dword_765308 is set to
+// &unk_62E630 + 60*profile at 0x43bfe9. Profile 3 is live (the door-cell
+// scanner 0x577320 calls BuildWaypointList with a7=3 at 0x57744d).
+// Negative == impassable.
+const float kPathCostProfiles[kPathCostProfileCount * kPathCostTypes] = {
+    // profile 0 @0x62E630
     999.0f, 20.0f, 30.0f, 30.0f, 30.0f, 30.0f, 1.0f, 30.0f,
     40.0f,  30.0f, -1.0f, 10.0f, 0.5f,  -1.0f, 99.0f,
+    // profile 1 @0x62E66C
+    99.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+    1.0f,  1.0f, 1.0f, 1.25f, 0.75f, -1.0f, 99.0f,
+    // profile 2 @0x62E6A8
+    99.0f, 50.0f, 50.0f, 50.0f, 50.0f, 50.0f, 1.0f, 50.0f,
+    60.0f, 50.0f, -1.0f, 10.0f, 0.5f, -1.0f, 99.0f,
+    // profile 3 @0x62E6E4
+    99.0f, 50.0f, 50.0f, 50.0f, 50.0f, 50.0f, 1.0f, 50.0f,
+    50.0f, 50.0f, -1.0f, 1.0f, 1.0f, -1.0f, 99.0f,
+    // profile 4 @0x62E720
+    99.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+    1.0f,  1.0f, 99.0f, 1.0f, 1.0f, -1.0f, 1.0f,
 };
 
-float PathTypeCost(u8 typeByte, int /*profile*/) {
+// Profile 0 view kept for existing external references.
+const float* const kPathTypeCost = kPathCostProfiles;
+
+float PathTypeCost(u8 typeByte, int profile) {
     // The original indexes by the *signed* tile byte (char); negative bytes
     // would read before the table, but real cell types are 0..14.
     int idx = static_cast<i8>(typeByte);
     if (idx < 0 || idx >= kPathCostTypes)
         return -1.0f;
-    return kPathTypeCost[idx];
+    if (profile < 0 || profile >= kPathCostProfileCount)
+        return -1.0f;
+    return kPathCostProfiles[kPathCostTypes * profile + idx];
 }
 
 // ---- search scratch (gilde.exe module globals) ----------------------------
@@ -140,7 +162,12 @@ static int PathExpandNode(int a2, int /*j_in*/) {
         }
 
         float typeCost = g_costTable[static_cast<i8>(nb[kF_type])];
-        float tentativeG = g_stepMul[dir] * typeCost + RdF(cur, kF_g);
+        // 0x43c288: fld flt_62E610[i]; fmul [costTable+..]; fadd cur.g; fstp v23
+        // — the whole chain stays on the x87 stack until the single fstp, so
+        // model the intermediates as double and narrow once (tree convention).
+        float tentativeG = static_cast<float>(
+            static_cast<double>(g_stepMul[dir]) * static_cast<double>(typeCost) +
+            static_cast<double>(RdF(cur, kF_g)));
 
         // Relax only if the type is passable and this is a fresh node OR we
         // found a cheaper g. The original compares against nb.g (+8 == kF_g).
@@ -182,7 +209,9 @@ static int PathExpandNode(int a2, int /*j_in*/) {
             nb[kF_flags] = (nb[kF_flags] | 1);               // on open list
             nb[kF_flags] = g_touchSelf | nb[kF_flags];
 
-            if (v28 == 0xFFFF) {
+            // 0x43c395: the binary tests only the LOW WORD of v28
+            // (`(_WORD)v28 == 0xFFFF`); v28 may carry v27's upper bits.
+            if (static_cast<u16>(v28) == 0xFFFF) {
                 WrW(nb, kF_next, 0xFFFF);
                 WrW(nb, kF_prev, 0xFFFF);
                 v28 = v27;
@@ -289,8 +318,8 @@ int PathFindRoute(const MapGrid& g, int startX, int startY,
         WrW(gn, kF_parent, 0xFFFF);
     }
 
-    g_costTable = kPathTypeCost;      // dword_765308 = &unk_62E630 + 60*profile
-    (void)profile;
+    // 0x43bfe9: dword_765308 = &unk_62E630 + 60*profile (5 shipped profiles).
+    g_costTable = kPathCostProfiles + kPathCostTypes * profile;
 
     // If either endpoint sits on an impassable cell, fail.
     {

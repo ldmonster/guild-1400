@@ -238,17 +238,21 @@ bool MissionReqEvaluate(ObjectiveRecord* objective) {
     case 43:
         return h.checkCumulativeStats ? h.checkCumulativeStats(person, row) : false;
 
-    // case 44 — CheckMemberStats(person, objective).
+    // case 44 — CheckMemberStats(objective, row). Call site 0x539bb9 loads
+    // edx=esi(objective); the leaf (0x539642 mov ecx,edx) uses it as the
+    // AccumulateTimer record and ebx=row for threshold/timerMin.
     case 44:
-        return h.checkMemberStats ? h.checkMemberStats(person, objective) : false;
+        return h.checkMemberStats ? h.checkMemberStats(objective, row) : false;
 
     // case 45 — CheckMinThresholds(person).
     case 45:
         return h.checkMinThresholds ? h.checkMinThresholds(person) : false;
 
-    // case 46 — CheckTimeElapsed(person, row).
+    // case 46 — CheckTimeElapsed(objective, row). Call site 0x539bd9 loads
+    // edx=esi(objective); inside 0x539728, 0x53972c mov ecx,edx preserves it as
+    // the record handed to AccumulateTimer (eax) on both branches.
     case 46:
-        return h.checkTimeElapsed ? h.checkTimeElapsed(person, row) : false;
+        return h.checkTimeElapsed ? h.checkTimeElapsed(objective, row) : false;
 
     // case 47 — CountGuildMembers(0,out); (double)threshold * 0.01 <= out.average.
     case 47: {

@@ -62,8 +62,10 @@ static const float  kZR_flt_61DE70 = 0.0005000000237487257f;
 // OrientToTarget (0x4b562c):
 static const float  kOT_flt_61DE74 = 600.0f;
 static const float  kOT_flt_61DE78 = 900.0f;
-static const double kOT_dbl_61DE80 = 0.0;
-static const float  kOT_flt_61DE88 = -1.875f;
+// dbl_61DE80 bytes 00 00 00 00 00 00 f0 bf = -1.0 (get_bytes @0x61DE80); the
+// dot-product clamp floor. flt_61DE88 bytes 00 00 2f 44 = 700.0f (@0x61DE88).
+static const double kOT_dbl_61DE80 = -1.0;
+static const float  kOT_flt_61DE88 = 700.0f;
 
 // ZoomOut (0x4b5974):
 static const float  kZO_flt_61DE8C = -600.0f;
@@ -264,10 +266,13 @@ i32 Camera_RotateView(CameraObject& obj, Camera2State& st, Camera2Input& in,
         f32 v20 = (f32)(v16 * v2);
         f32 v21 = (f32)(v17 * v2);
         f32 v22 = (f32)(v2 * v18);
+        // 0x4b3241..: v34 = v20*m'[0] + v21*m'[4] + v22*m'[8] etc — the copy is a
+        // 16-float 4x4 (row stride 4); the decompile's v7/v10/v13 stack offsets
+        // (+0/+0x10/+0x20) are indices 0/4/8.
         f32 v34[3];
-        v34[0] = v20 * m[0] + v21 * m[3] + v22 * m[6];
-        v34[1] = v20 * m[1] + v21 * m[4] + v22 * m[7];
-        v34[2] = v20 * m[2] + v21 * m[5] + v22 * m[8];
+        v34[0] = v20 * m[0] + v21 * m[4] + v22 * m[8];
+        v34[1] = v20 * m[1] + v21 * m[5] + v22 * m[9];
+        v34[2] = v20 * m[2] + v21 * m[6] + v22 * m[10];
 
         if (in.byte671D6F) {
             v36 = st.rotPrevY - in.d672174;
@@ -287,9 +292,10 @@ i32 Camera_RotateView(CameraObject& obj, Camera2State& st, Camera2Input& in,
             v20 = (f32)(v26 * v5);
             v21 = (f32)(v27 * v5);
             v22 = (f32)(v5 * v28);
-            f32 v23 = v20 * m[0] + v21 * m[3] + v22 * m[6];
-            f32 v24 = v20 * m[1] + v21 * m[4] + v22 * m[7];
-            f32 v25 = v20 * m[2] + v21 * m[5] + v22 * m[8];
+            // Same 4x4 stride: indices 0/4/8, 1/5/9, 2/6/10 (decompile v7/v10/v13).
+            f32 v23 = v20 * m[0] + v21 * m[4] + v22 * m[8];
+            f32 v24 = v20 * m[1] + v21 * m[5] + v22 * m[9];
+            f32 v25 = v20 * m[2] + v21 * m[6] + v22 * m[10];
             f32 v35 = (f32)std::sqrt((double)v23 * v23 + (double)v24 * v24 + (double)v25 * v25);
             v34[0] = v34[0] + v23;
             v34[2] = v34[2] + v25;
@@ -359,16 +365,19 @@ i32 Camera_UpdateMovement(CameraObject& obj, CameraState& cs, Camera2State& st,
         f32 zoomBitsF; std::memcpy(&zoomBitsF, &cs.zoomTBits, sizeof(f32)); // v0 = *(float*)&dword_6316E0
         const double v1 = (double)kMv_flt_61DE10;
         const double v2 = (1.0 - (double)zoomBitsF) * v1;
-        // VIBE_Coord_ConvertX() truncates v2 (the FPU top) -> v3.
-        const i32 v3 = trunc_toward_zero(v2);
-        st.mvPrevView2 = v3;               // dword_11BC33C = v3
+        // 0x4b42dc: VIBE_Coord_ConvertX() sets RC=chop; fistp truncates v2.
+        // 0x4b42ee: dword_11BC33C = eax = viewShift (sar'd at 0x4b42d9 BEFORE the
+        // call; ConvertX preserves eax) — NOT the truncated float.
+        st.mvPrevView2 = in.viewShift;     // dword_11BC33C = viewShift
         st.mvPanInit = 1;                  // dword_631E08 = 1
         st.mvPrevY2 = in.d672174;          // dword_11BC340 = dword_672174>>16
-        st.box1 = in.d672174 + (i32)v2;    // 62D0C8 = (dword_672174>>16) + (int)v2
-        // second ConvertX: v59 = (int)(v1 * -v0). v0 = *(float*)&dword_6316E0.
+        st.box1 = in.d672174 + (i32)trunc_toward_zero(v2); // 62D0C8 = Y + (int)v2 (0x4b4314)
+        // second ConvertX @0x4b431a: v59 = (int)(v1 * -v0), v0 = *(float*)&dword_6316E0.
         const i32 v59 = trunc_toward_zero(v1 * -(double)zoomBitsF);
-        st.mvWorldY0 = obj.worldY;         // flt_631E18 = *(v4+136) where v4 alias obj
-        st.box3 = trunc_toward_zero(0.0) + v59; // 62D0D0 = v5 + v59 (v5 from ConvertX top)
+        st.mvWorldY0 = obj.worldY;         // flt_631E18 = *(node+136) (0x4b4335)
+        // 0x4b4333: add ebx, eax — eax STILL holds dword_672174>>16 (preserved
+        // across ConvertX): 62D0D0 = (dword_672174>>16) + v59.
+        st.box3 = in.d672174 + v59;
     }
 
     // 0x4b4355: drag/button released -> finalize pan-init zoom-T.
@@ -389,8 +398,10 @@ i32 Camera_UpdateMovement(CameraObject& obj, CameraState& cs, Camera2State& st,
             // 0x4b43f1: pan branch (drag + button + pan-init).
             if (in.d672238 && in.d672220 && st.mvPanInit) {
                 i32 v57 = in.d672254 - in.d672250;
+                // 0x4b4408..: + (double)SHIWORD(dword_672174) — the Y coordinate
+                // (d672174), matching mvPrevY2 (also a d672174 snapshot).
                 double v7 = ((double)v57 * kMv_flt_61DE20
-                             + (double)in.viewShift - (double)st.mvPrevY2) * kMv_flt_61DE24;
+                             + (double)in.d672174 - (double)st.mvPrevY2) * kMv_flt_61DE24;
                 f32 v55 = (f32)((double)st.mvZoomT0 + v7);
                 cs.zoomT = v55;            // LODWORD(flt_6316DC) = v55
                 // build position triple: pos with Y replaced.
@@ -462,8 +473,11 @@ i32 Camera_UpdateMovement(CameraObject& obj, CameraState& cs, Camera2State& st,
         f32 v65 = (f32)v17d;
         f32 v66 = (f32)(v16d * ((double)v57 * kMv_flt_61DE40));
 
-        f32 v37 = kAxis0 * m[0] + kAxis1 * m[3] + kAxis2 * m[6];
-        f32 v39 = kAxis0 * m[1] + kAxis1 * m[4] + kAxis2 * m[7];
+        // 0x4b47dc..: v37 = axis·(m[0],m[4],m[8]) (X column), v39 =
+        // axis·(m[2],m[6],m[10]) (Z column) — decompile v31/v33/v35 and
+        // v32/v34/v36 sit at 16-float indices 0/4/8 and 2/6/10.
+        f32 v37 = kAxis0 * m[0] + kAxis1 * m[4] + kAxis2 * m[8];
+        f32 v39 = kAxis0 * m[2] + kAxis1 * m[6] + kAxis2 * m[10];
         f32 v38 = 0.0f;
         f32 v43, v44, v45;
         if (std::sqrt((double)v37 * v37 + 0.0 * 0.0 + (double)v39 * v39) >= (double)kMv_flt_61DE2C) {
@@ -476,8 +490,8 @@ i32 Camera_UpdateMovement(CameraObject& obj, CameraState& cs, Camera2State& st,
             v39 = (f32)(s * -(double)v65 + (double)v66 * c);
             v38 = 0.0f;
         } else {
-            v37 = (f32)((double)v65 * m[0] + (double)v66 * m[3] + 0.0 * m[6]);
-            v39 = (f32)((double)v65 * m[1] + (double)v66 * m[4] + 0.0 * m[7]);
+            v37 = (f32)((double)v65 * m[0] + (double)v66 * m[4] + 0.0 * m[8]);
+            v39 = (f32)((double)v65 * m[2] + (double)v66 * m[6] + 0.0 * m[10]);
             v38 = 0.0f;
         }
         v43 = v37 + obj.posX;
@@ -538,17 +552,26 @@ i32 Camera_UpdateMovement(CameraObject& obj, CameraState& cs, Camera2State& st,
     st.box0 = st.mvSaveBox0;
     st.box1 = st.mvSaveBox1;
     st.box2 = st.mvSaveBox2;
-    st.mvActive = in.d672238;              // dword_631E20 = dword_672238 (==0)
+    st.mvActive = in.d672238;              // dword_631E20 = ecx = dword_672238 (==0)
     st.box3 = st.mvSaveBox3;
-    st.boxFlag = 1;                        // dword_62D0D4 = 1
-    in.disableMove = 1;                    // dword_62D4E4 = 1
-    // VIBE_Coord_ConvertY(dword_631E00, dword_631E04) -> v26 (truncated). The
-    // original stores that into 631E00/04/08; with our snapshot it is the same
-    // pair fed back. Model as the truncated identity of the X snapshot.
-    const i32 v26 = trunc_toward_zero((double)st.mvCoordX0);
-    st.mvCoordX0 = v26;
-    st.mvCoordY0 = v26;
-    st.mvPanInit = v26;
+    st.boxFlag = 1;                        // 0x4b4b1c: dword_62D0D4 = 1
+    // (No dword_62D4E4 write here — its only xref inside 0x4b41a8 is the head
+    // read at 0x4b41b4.)
+    // 0x4b4b22: VIBE_Coord_ConvertY(eax=dword_631E00, dx=LOWORD(dword_631E04))
+    // — the cursor-coordinate writer @0x40da48: restores the packed mouse
+    // globals (672174/6721C4/672210) to the drag-start coords. 62D0D4 was just
+    // set to 1, so its SetCursorPos leg is skipped. Modeled on the pre-shifted
+    // mirrors (see Camera_CursorCoordWrite @camera_update_recon.cpp).
+    const i32 yi = (i32)(i16)(st.mvCoordY0 & 0xFFFF);
+    const i32 xi = (i32)(i16)(st.mvCoordX0 & 0xFFFF);
+    in.d672174 = yi;                       // HIWORD(dword_672174) = dx
+    in.d672210 = yi;                       // HIWORD(dword_672210) = dx
+    in.d67220E = xi;                       // LOWORD(dword_672210) = ax
+    // 0x4b4b27..33: dword_631E00/04/08 = ecx — preserved across ConvertY
+    // (push/pop ecx @0x40da48/0x40da85) = dword_672238 == 0 on this path.
+    st.mvCoordX0 = in.d672238;
+    st.mvCoordY0 = in.d672238;
+    st.mvPanInit = in.d672238;
     return 0;
 }
 
@@ -718,9 +741,12 @@ i32 Camera_ZoomOut(CameraObject& obj, CameraState& cs, Camera2State& st,
         hi[1] = v13;                              // v33[1] = v13
     }
     double v14 = (double)v13;
-    // VIBE_Coord_ConvertX() truncates v14 -> the listener distance.
+    // 0x4b5c95: VIBE_Coord_ConvertX() + fistp truncates v14 -> listener distance.
     i32 dist = trunc_toward_zero(v14);
-    return h.sound3dSetListener(&obj, /*posVec*/ v31, dist, /*angVec*/ v31, 104);
+    // 0x4b5c8c: edx = &var_90 = &v19 — the eased POSITION triple {v19,v20,v21};
+    // 0x4b5c85: ebx = &var_50 = v31 (saved world triple) is the angle arg.
+    f32 posv[3] = {v19, v20, v21};
+    return h.sound3dSetListener(&obj, /*posVec*/ posv, dist, /*angVec*/ v31, 104);
 }
 
 // ===========================================================================
@@ -876,6 +902,8 @@ bool Camera_UpdateTrackTargetFromMouse(Camera2Input& in, const Camera2Hooks& h,
             if (ctx.btnX) { v0 = 1; v7 = in.d67220E - ctx.prevX; } else { v7 = 0; }
             i32 dyv;
             if (ctx.btnY) { dyv = in.d672210 - ctx.prevY; v0 = 1; } else { dyv = 0; }
+            v3 = dyv;   // the binary reuses ecx (v3) for the tilt dy — it is the
+                        // value later fed to VIBE_Scene_HandleDebugKeyToggle.
             double v27 = 1.0 / (double)ctx.screenW;
             double v20 = std::fabs((double)v7);
             ctx.prevX = in.d67220E;

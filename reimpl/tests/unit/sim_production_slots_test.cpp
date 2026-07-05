@@ -113,38 +113,40 @@ TEST(ProdSlots, ProductionSlotMatch_OwnerEqualsSlotId) {
 // ===========================================================================
 // (C) CollectProductionSlots — capacity/level/worth accumulation.
 // ===========================================================================
+// 0x5922d4 (disasm-proven): nodes[0] is the ROOT work-product node — it is NOT
+// a slot itself (the loop iterates its children, QueryFind(v4[5],1,5) at
+// 0x59231d) and BOTH capacity branches read the ROOT's level ([ebx+0Eh] at
+// 0x59234d / 0x5923e1), so every slot gets the same capacity. (The old pins
+// assumed per-slot levels and a root-included slot set.)
 TEST(ProdSlots, CollectProduction_RootNotHighCap) {
     MockHooks h; HookGuard g(&h);
     ProdSlotCollect out;
     std::vector<ProdSlotNode> nodes = {{10, 2}, {477, 3}, {20, 1}};
     int rc = InventoryCollectProductionSlots(nodes, out);
     CHECK_EQ(rc, 1);
-    CHECK_EQ(out.count, 3);
-    // root type 10 != 477 -> per-slot capacity uses the level table:
-    //   {10,2}->40, {477,3}->80 (level 3), {20,1}->20  => capTotal 140
-    CHECK_EQ(out.capTotal, 140);
-    CHECK_EQ(out.levTotal, 6);
-    CHECK_EQ(out.types.size(), static_cast<size_t>(3));
+    CHECK_EQ(out.count, 2);              // slots = children only
+    // root {10,2}: type != 477, level 2 -> cap 20*2 = 40 for EVERY slot.
+    CHECK_EQ(out.capTotal, 80);
+    CHECK_EQ(out.levTotal, 4);           // per-slot levels 3 + 1
+    CHECK_EQ(out.types.size(), static_cast<size_t>(2));
     CHECK_EQ(out.caps[0], 40);
-    CHECK_EQ(out.caps[1], 80);
-    CHECK_EQ(out.caps[2], 20);
-    // worth = price*level, price==type: 10*2 + 477*3 + 20*1 = 1471
-    CHECK(out.worth == 1471.0);
+    CHECK_EQ(out.caps[1], 40);
+    // worth (int, per-iteration trunc), price==type: 477*3=1431; +20*1 -> 1451
+    CHECK(out.worth == 1451.0);
 }
 TEST(ProdSlots, CollectProduction_RootHighCap) {
     MockHooks h; HookGuard g(&h);
     ProdSlotCollect out;
-    // root type 477 -> EVERY slot uses 5*level+10 (capacity keys on root type).
+    // root {477,3} -> EVERY slot uses 5*ROOTlevel+10 = 25 (0x592353).
     std::vector<ProdSlotNode> nodes = {{477, 3}, {10, 2}, {20, 4}};
     int rc = InventoryCollectProductionSlots(nodes, out);
     CHECK_EQ(rc, 1);
-    // caps: 25, 20, 30 => 75
+    CHECK_EQ(out.count, 2);
     CHECK_EQ(out.caps[0], 25);
-    CHECK_EQ(out.caps[1], 20);
-    CHECK_EQ(out.caps[2], 30);
-    CHECK_EQ(out.capTotal, 75);
-    CHECK_EQ(out.levTotal, 9);
-    CHECK(out.worth == 1531.0);  // 477*3 + 10*2 + 20*4
+    CHECK_EQ(out.caps[1], 25);
+    CHECK_EQ(out.capTotal, 50);
+    CHECK_EQ(out.levTotal, 6);           // 2 + 4
+    CHECK(out.worth == 100.0);           // 10*2=20; +20*4 -> 100
 }
 TEST(ProdSlots, CollectProduction_NoRoot) {
     MockHooks h; HookGuard g(&h);

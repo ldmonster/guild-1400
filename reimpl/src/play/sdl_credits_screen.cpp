@@ -244,14 +244,18 @@ CreditsScreenResult RunCreditsScreen(shim::IGraphicsDevice& device,
         }
         shim::MouseState ms{};
         plat.getMouse(ms);
-        if (plat.keyDown(kVkEscape)) {                // ESC -> back (0x56e6c3)
+        // Exit affordance — the original skip gate @0x56e6c3 is
+        // `dword_672230 (right-button release) || byte_67225C (ANY key latch)`;
+        // the native front maps it to the ESC / left-click pair every native
+        // screen uses (rule-4 input adaptation, pinned by the screen tests).
+        if (plat.keyDown(kVkEscape)) {                // key skip (byte_67225C arm)
             res.quitByEsc = true;
             res.back = true;
             break;
         }
         const bool leftEdge = ms.left && !prevLeft;
         prevLeft = ms.left;
-        if (leftEdge) {                               // click -> back (byte_67225C)
+        if (leftEdge) {                               // click skip (dword_672230 arm)
             res.quitByClick = true;
             res.back = true;
             break;

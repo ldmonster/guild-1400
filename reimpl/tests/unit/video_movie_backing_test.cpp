@@ -56,7 +56,7 @@ private:
 MovieControlHooks MakeCtl() {
     MovieControlHooks ctl;
     ctl.fadeStatusByte = []() -> u8 { return 0x4; };  // done bit set
-    ctl.fadeTimer      = []() -> float { return 0.0f; }; // 0.0 <= timer -> exit
+    ctl.fadeTimer      = []() -> float { return kMovieFadeTimerSentinel; }; // -1.0: fade complete -> exit (@0x534a8e)
     return ctl;
 }
 

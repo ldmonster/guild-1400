@@ -173,22 +173,29 @@ int ResultFinalize(Surface* src, Surface* dst,
         int srcRect[4] = { a1, a2, a1 + v31, a2 + v32 };  // v25[0..3]
         int dstRect[4] = { v9, v11, v9 + v31, v11 + v32 }; // v24[0..3]
 
-        // 0x4237fd: COM blit. Nonzero return -> 0x4238d0 return 0.
-        bool blitFailed = false;
-        if (hooks.gpuBlit)
-            blitFailed = !hooks.gpuBlit(hooks.ctx, dst, dstRect, src, srcRect, alpha);
-        else
-            blitFailed = true;   // no GPU backend -> behave as E_NOTIMPL fallthrough
-
-        if (hooks.gpuBlit && !blitFailed) {
-            // GPU reported success (original returns 0 at 0x4238d0).
-            return 0;
-        }
-        // 0x423812: dword_7626C8 == E_NOTIMPL(0x80004001) -> software fallback.
-        if (hooks.gpuNotImplemented || !hooks.gpuBlit) {
-            dst->decompressed = 1;  // *(a8+60)=1
-            src->decompressed = 1;  // *(a5+60)=1
-            if (hooks.decompressBlob) hooks.decompressBlob(hooks.ctx, dst, /*v18*/0);
+        // 0x4237fd: COM Blt (vtable[5]). A NONZERO HRESULT (failure) returns 0
+        // at 0x4238d0 — nothing copied, NO LABEL_33 bookkeeping. On DD_OK (0,
+        // success) the original falls THROUGH to the E_NOTIMPL check and then
+        // the LABEL_33 bookkeeping / return 1. (The previous mapping returned 0
+        // on hook success — inverted vs the binary; fixed against the decompile.)
+        if (hooks.gpuBlit) {
+            if (!hooks.gpuBlit(hooks.ctx, dst, dstRect, src, srcRect, alpha))
+                return 0;   // COM error -> 0x4238d0 return 0
+            // 0x423812: dword_7626C8 == E_NOTIMPL(0x80004001) -> the "successful"
+            // blit was a no-op; do the software fallback before the bookkeeping.
+            if (hooks.gpuNotImplemented) {
+                dst->decompressed = 1;  // *(a8+60)=1
+                src->decompressed = 1;  // *(a5+60)=1
+                if (hooks.decompressBlob) hooks.decompressBlob(hooks.ctx, dst, /*v18*/0);
+                if (hooks.decompressBlob) hooks.decompressBlob(hooks.ctx, src, 0);
+                softwareCopy();
+            }
+        } else {
+            // Headless inert default: no GPU backend — behave as blit-succeeded
+            // with the E_NOTIMPL flag set (software copy + bookkeeping).
+            dst->decompressed = 1;
+            src->decompressed = 1;
+            if (hooks.decompressBlob) hooks.decompressBlob(hooks.ctx, dst, 0);
             if (hooks.decompressBlob) hooks.decompressBlob(hooks.ctx, src, 0);
             softwareCopy();
         }

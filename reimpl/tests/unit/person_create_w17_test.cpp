@@ -84,8 +84,24 @@ TEST(PersonCreateW17, DeterministicFieldStamps) {
     // guild branch: kind 9 (<10, not 6/7/5) -> +0x50 = dword_64771C (first == 0)
     CHECK_EQ((int)R16(r, 0x50), 0);
 
-    // face scalar constants written on LABEL_189 (0x58ed70/0x58edfa)
-    CHECK_EQ(RF(r, 0x1C), 384.0f);          // +0x1C = 384.0f
+    // face scalar constants written on LABEL_189 (0x58ed70/0x58edfa).
+    // +0x1C starts at 384.0f (0x58ed70) but is REFINED by the block at
+    // 0x58e377..0x58e41f whenever (u16)ownerWord(+0x0A) > +0x20 (12.0f):
+    // iters = (int)(34 - 12) = 22 steps of x = x - v152 + v152/x from 384.0,
+    // clamped to >= 1.0f by a signed bit compare (0x58e405..0x58e41f).
+    // (The previous raw-384.0f pin matched a transcription that stubbed the
+    // refinement out — disasm-refuted.)
+    {
+        double x = 384.0;
+        const float v152 = RF(r, 0x14);
+        for (int i = 0; i < 22; ++i)
+            x = x - static_cast<double>(v152) + static_cast<double>(v152) / x;
+        float expect = static_cast<float>(x);
+        i32 bits; std::memcpy(&bits, &expect, 4);
+        if (bits <= 0x3F800000) bits = 0x3F800000;
+        std::memcpy(&expect, &bits, 4);
+        CHECK_EQ(RF(r, 0x1C), expect);
+    }
     CHECK_EQ(RF(r, 0x20), 12.0f);           // +0x20 = 12.0f
 }
 
@@ -209,7 +225,10 @@ TEST(PersonCreateW17, PlayerFamilySlotWordAndCounters) {
 
     CHECK_EQ((int)r[2], 6);                     // kind 6
     CHECK_EQ((int)(u16)R16(r, 0x50), 0x8000);   // familyCount 0 | 0x8000
-    CHECK_EQ(R32(r, 0x1E4), 1);                 // playermode arm (ownerWord 16)
+    // 0x58dc42 `mov bh,[ebp+2]` / 0x58dc69: the playermode arm keys on the KIND
+    // byte (3/16/19), NOT the ownerWord — kind 6 leaves +0x1E4 at 0. (The old
+    // ==1 pin matched an ownerWord-keyed transcription — disasm-refuted.)
+    CHECK_EQ(R32(r, 0x1E4), 0);
     CHECK_EQ(g_personLiveCount, 1);             // dword_647724 incremented once
 
     // A second family person takes the next slot word 0x8001.

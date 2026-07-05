@@ -342,17 +342,26 @@ TEST(MaterialsW4C, AugsburgSeasonalResolveAndFrameDelta) {
     CHECK_EQ(on.viaSet, 143);
 
     // The frame: vegetation + the palettized 24-bit slots leave the
-    // white-default family, and the live binds rise (3142/3636 -> 3177/3671).
-    // Pinned 320x240 overview counts, re-pinned after the wave-4 raster
-    // verification (progress/raster-verify-wave4.md): the textured leaf now
-    // applies the evidence-exact 16.16 UV scale (vu = u_texels * 65536,
-    // 0x5f6c30 v53) and the white default shades by the AVG +66 light byte
-    // (dword_13FC5E0, 0x5f70bd) instead of the max — 11043 -> 10814 (set -1)
-    // and 8201 -> 8392 (set 0).
+    // white-default family, and the live binds rise to 3177/3671 (VERIFIED —
+    // the material-resolution semantics above all match the pinned counts).
+    //
+    // The two absolute white-default-grey PIXEL counts are whole-frame
+    // characterization: they fell (10814->9239 set-1, 8392->2245 set-0) because
+    // the city building/ground texture render has since been wired up — the
+    // dumped frame now shows the real BMP texels (warm 96,80,64 / 128,116,96
+    // roof+wall browns) where the old grey-heavy pins predate that binding. The
+    // material accounting (951/917/34/937/14/143) and the bound counts (3177/
+    // 3671) are unchanged and verified; only these two whole-frame pixel totals
+    // are re-pinned to the current render. (The exact 1:1 per-pixel city-mesh
+    // frame remains a deferred verification against the original game.)
+    // after.gray 2245->2244: one pixel moved when the projection/reprojection
+    // x87 80-bit intermediates were corrected to the binary's precision
+    // (object_project.cpp @0x5acc2b, meshlist.cpp @0x5aee26, BuildEngineFrustum
+    // @0x5accd0 — all disasm-verified).
     CHECK(after.gray < before.gray);
     CHECK(afterBound > beforeBound);
-    CHECK_EQ(before.gray, 10814);
-    CHECK_EQ(after.gray, 8392);
+    CHECK_EQ(before.gray, 9239);
+    CHECK_EQ(after.gray, 2244);
     CHECK_EQ(beforeBound, 3177);
     CHECK_EQ(afterBound, 3671);
 }

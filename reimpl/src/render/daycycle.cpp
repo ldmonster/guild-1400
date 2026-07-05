@@ -46,11 +46,17 @@ int UpdateBrightness(const i32 kf[6], int hour, int minute) {
 }
 
 SkyBandSelect BrightnessToBand(int brightness) {
-    double scaled = (double)brightness * kBandScale; // v3
-    int whole = TruncToward(scaled);                 // (int)v3 toward zero
+    double scaled = (double)brightness * kBandScale; // v3 (fild + fmul dbl_61DD68, kept x87)
+    // fst dword [var_34] @0x4b2677: the scaled value is float-ROUNDED into v7 with
+    // `fst` (the 80-bit register survives for the truncation below). The BLEND is
+    // later computed from this float copy (fsubr var_34 @0x4b272f), NOT the
+    // unrounded register value.
+    float v7 = (float)scaled;
+    int whole = TruncToward(scaled); // fistp @0x4b267f after ConvertX — chops the register value
     SkyBandSelect s;
     s.band = whole % 7;            // dword_631DD0 = v11 % 7
-    s.blend = (float)(scaled - (double)whole); // flt_631DD4 = v7 - v11
+    // flt_631DD4 = v7 - (double)v11: fild whole, fsubr var_34, fstp @0x4b2733.
+    s.blend = (float)((double)v7 - (double)whole);
     return s;
 }
 

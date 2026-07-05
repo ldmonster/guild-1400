@@ -11,10 +11,12 @@ namespace guild::render {
 
 namespace {
 
-// Plane dot: a*Px + b*Py + c*Pz (the original reads the vertex's xyz from +0/+4/+8
+// Plane dot: Px*a + Py*b + Pz*c (the original reads the vertex's xyz from +0/+4/+8
 // and the plane's a/b/c from the plane quad). Matches v9/v15 in the pseudocode.
-inline float PlaneDot(const ClipPlane& pl, const Vertex* p) {
-    return pl.a * p->x + pl.b * p->y + pl.c * p->z;
+// Kept on the FPU stack (80-bit) in the original — modeled as double; the callers
+// decide where the float rounding happens (v24/v35 stores vs register compares).
+inline double PlaneDot(const ClipPlane& pl, const Vertex* p) {
+    return (double)p->x * pl.a + (double)p->y * pl.b + (double)p->z * pl.c;
 }
 
 // Truncate-toward-zero into a byte the lerped colour channel:
@@ -60,21 +62,26 @@ Vertex** ClipPolygonToPlane(ClipScratch& scratch, const ClipContext& ctx,
 
         scratch.outCount = 0;                // dword_649D74 = 0
         Vertex* first = in[0];               // v8 = *v5
-        float dotFirst = PlaneDot(pl, first);// v9
+        // v24 = (float)v9 (fstp), and the FIRST inside test compares the
+        // float-stored v24 against (double)v27[3].
+        float dotFirst = (float)PlaneDot(pl, first); // v9 -> v24
         i32 inCount = scratch.inCount;       // v10 = dword_649D78
         in[inCount] = in[0];                 // v5[dword_649D78] = *v5 (close poly)
 
         Vertex** out = scratch.listPtrs[(i + 1) & 1]; // v12 = other side
         Vertex** outCur = out;
-        bool prevInside = (dotFirst >= pl.d);// v23 = v24 >= v27[3]
+        bool prevInside = ((double)dotFirst >= (double)pl.d); // v23 = v24 >= v27[3]
         float dotPrev = dotFirst;            // v24
 
         Vertex** walk = in;                  // v11 = v5
         for (u32 e = 0; e < (u32)inCount; ++e) { // v28 < dword_649D78
             Vertex* cur = walk[1];           // v13 = v11[1]
             Vertex* prev = walk[0];          // v14 = *v11
-            float dotCur = PlaneDot(pl, cur);// v15
-            bool curInside = (dotCur >= pl.d); // v16 = v35 >= v27[3]
+            // v35 = (float)v15, but the inside test uses the 80-bit REGISTER
+            // value v15 (`v16 = v15 >= v27[3]`), not the float store.
+            double dotCurD = PlaneDot(pl, cur);          // v15
+            float dotCur = (float)dotCurD;               // v35
+            bool curInside = (dotCurD >= (double)pl.d);  // v16
 
             if (prevInside) {                // emit prev
                 *outCur++ = prev;            // *(v12-1) = v14 ; ++v12
@@ -82,20 +89,28 @@ Vertex** ClipPolygonToPlane(ClipScratch& scratch, const ClipContext& ctx,
             }
 
             if (curInside != prevInside) {   // v16 != v23 -> generate a vertex
-                float t = (pl.d - dotPrev) / (dotCur - dotPrev); // v18
+                // v18 = (v27[3]-v24)/(v35-v24) stays on the FPU stack; v20 is
+                // its float store. The X lerp consumes the RAW v18; the other
+                // components reload the float v20.
+                double tRaw = ((double)pl.d - (double)dotPrev)
+                            / ((double)dotCur - (double)dotPrev); // v18
+                float t = (float)tRaw;                            // v20
                 Vertex* nv = poolCursor;     // v3
 
-                // xyz + w (+0/+4/+8/+12) lerp prev->cur.
-                nv->x  = t * (cur->x - prev->x) + prev->x;
-                nv->y  = t * (cur->y - prev->y) + prev->y;
-                nv->z  = t * (cur->z - prev->z) + prev->z;
-                nv->_pad0c = t * (cur->_pad0c - prev->_pad0c) + prev->_pad0c;
-                // +44 float (v3[11]) — the original interpolates this scalar too.
+                // xyz + w (+0/+4/+8/+12) lerp prev->cur. The float differences
+                // v29/v31/v33/v36 are fstp'd to float before the multiply.
+                nv->x  = (float)(tRaw * (double)(cur->x - prev->x) + (double)prev->x);
+                nv->y  = (float)((double)t * (double)(cur->y - prev->y) + (double)prev->y);
+                nv->z  = (float)((double)t * (double)(cur->z - prev->z) + (double)prev->z);
+                nv->_pad0c = (float)((double)t * (double)(cur->_pad0c - prev->_pad0c)
+                                     + (double)prev->_pad0c);
+                // +44 float (v3[11]) — whole chain on the FPU stack (no float
+                // store of the difference), single fstp.
                 {
                     const float* pc = (const float*)((const u8*)cur + 44);
                     const float* pp = (const float*)((const u8*)prev + 44);
                     float* po = (float*)((u8*)nv + 44);
-                    *po = (*pc - *pp) * t + *pp;
+                    *po = (float)(((double)*pc - (double)*pp) * (double)t + (double)*pp);
                 }
                 // Colour bytes +64..+67 and +79, byte-truncated lerp.
                 const u8* cb = (const u8*)cur;

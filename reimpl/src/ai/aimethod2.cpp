@@ -95,10 +95,12 @@ MethodEnv Bind(const MethodEnv& in) {
 // original pointer arithmetic (id>>24 at +3, int weight at +7, base float at +11,
 // randScale float at +15 — the last 3 bytes of randScale overlap the next entry's
 // leading zero bytes, which is exactly how the shipped table is laid out).
-// 119 bytes: the seven 16-byte entries (112 B) plus the 3 leading bytes of the
-// adjacent table that class 6's randScale float (+15) reads into (00 00 20 43 ==
-// 160.0). This is the deliberate overlap of the original packed layout.
-const u8 kDrinkTable[119] = {
+// 115 bytes: the seven 16-byte entries (112 B) plus the 3 trailing bytes that
+// class 6's randScale float (+15, bytes 111..114) reads into (00 00 20 43 ==
+// 160.0). This is the deliberate overlap of the original packed layout. (The
+// bytes past index 114 belong to the adjacent kChoiceTable @0x4664B8 and are
+// never read here, so the array owns exactly indices 0..114.)
+const u8 kDrinkTable[115] = {
     0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x41, 0x00,
     0x00, 0x20, 0x42, 0x01, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x42, 0x00,
     0x00, 0x70, 0x42, 0x02, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x42, 0x00,

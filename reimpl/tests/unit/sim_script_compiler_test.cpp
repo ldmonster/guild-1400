@@ -22,7 +22,7 @@ TEST(SimScriptLex, CharClassTableSpotChecks) {
     CHECK_EQ((int)kCharClass[0x0a], 0x03);
     CHECK_EQ((int)kCharClass[0x31], 0x38);   // index '0'+1
     CHECK_EQ((int)kCharClass[0x42], 0x58);
-    CHECK_EQ((int)kCharClass[0x7f], 0x01);
+    CHECK_EQ((int)kCharClass[0x7f], 0x0c);   // byte_64A208[127] (was 0x01 pre-shift-fix)
 }
 
 // --- operator / keyword token tables ---------------------------------------

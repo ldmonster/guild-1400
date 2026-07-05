@@ -47,8 +47,14 @@ double TradeTransportLookupMarketPrice(i32 goodId, u8 context);
 // gilde.exe 0x53ff3c — VIBE_TradeTransport_ComputeCargoValue.
 // Sums over the cargo slots:  value += quantity * unitPrice * priceFactor,
 // where priceFactor is 1.1 (dbl_623F30) when the owner building is a market
-// (ownerKind==10) and `priceMul` otherwise. For modes 2/4 ("sell at the
-// remote contor") the price is re-looked-up with `sellContext` and NO factor.
+// (ownerKind==10) and `priceMul` otherwise. `panelMode` is the dispatcher's
+// dl mode byte (1 = market, 2 = import, 4 = export — the a3 argument, NOT the
+// cart's TransportMode); for panelMode 2/4 ("sell at the remote contor") the
+// price is re-looked-up with `sellContext` and NO factor (`a3 == 2 || a3 == 4`
+// in the original).
+// PRECISION: the per-slot unit price (v15) and the running total (v13) live in
+// 32-bit float stack slots in the original (fstp dword each iteration); the
+// reimpl reproduces that float rounding exactly.
 // The original stores the negated total (it is a cost/credit); we return the
 // positive total and let the caller negate. `priceMul` is the per-cart price
 // scalar at object+73; `marketCtx`/`sellContext` are the two price-lookup
@@ -56,7 +62,7 @@ double TradeTransportLookupMarketPrice(i32 goodId, u8 context);
 double TradeTransportComputeCargoValue(const std::vector<CargoSlot>& slots,
                                        bool ownerIsMarket, float priceMul,
                                        u8 marketCtx, u8 sellContext,
-                                       TransportMode mode);
+                                       int panelMode);
 
 // Constant exposed for tests / callers.
 constexpr double kMarketPriceFactor = 1.1; // dbl_623F30 (0x3FF199999999999A)

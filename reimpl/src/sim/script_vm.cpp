@@ -35,19 +35,21 @@ const ScriptToken_t& ScriptVm::next() {
 i32 ScriptVm::EvalExpression(u8 stopOp) {
     (void)stopOp;
     i32 acc = 0;             // v3 — the running accumulator
+    i32 operand = 0;         // v2 — LOOP-CARRIED: no-operand tokens fold stale v2
     u8  pendOp = kOpOperand; // v45 — operator that folds the *next* operand
     pendingLabel_ = 0;       // dword_62E8C8 = 0 at entry/exit
 
     while (runnable_ && !atEnd()) {
         const ScriptToken_t& t = next();
+        u8 cur = 0;          // v1 — this token's class-1 sub-code (0 for operands)
 
         // ---- operator tokens (class 1, operator sub-code) ----
         if (t.cls == kTokSymbol) {
             pendingLabel_ = 0;
-            u8 op = t.sub;
+            cur = t.sub;
             // Comparison/bitwise operators evaluate the RHS and return the
             // result immediately (the original recurses into EvaluateExpression).
-            switch (op) {
+            switch (t.sub) {
                 case kOpEq:     return acc == EvalExpression(0);
                 case kOpNe:     return acc != EvalExpression(0);
                 case kOpLe:     return acc <= EvalExpression(0);
@@ -56,20 +58,22 @@ i32 ScriptVm::EvalExpression(u8 stopOp) {
                 case kOpGt:     return acc >  EvalExpression(0);
                 case kOpBitOr:  return acc | EvalExpression(0);
                 case kOpBitAnd: return acc & EvalExpression(0);
+                // Terminators: ';' == 10 / ',' == 11 exit at the loop top,
+                // ')' == 13 and ']' == 28 (kOpStop) return in the v1 ladder.
+                case 10: case 11: case 13:
                 case kOpStop:   return acc;
-                // accumulator (binary fold) operators: remember for next operand
-                case kOpAdd: case kOpSub: case kOpDiv:
-                case kOpMul: case kOpOr:  case kOpAnd:
-                    pendOp = op;
-                    continue;
+                case 12:
+                    // '(' — parenthesised subexpression: recurse and fold the
+                    // group's value as the operand (0x444447 -> 0x44455b).
+                    operand = EvalExpression(0);
+                    break;
                 default:
-                    continue;  // operand marker / no-op operator
+                    // any other operator folds the stale operand (usually a
+                    // no-op) and becomes the pending op (LABEL_22: v45 = v1).
+                    break;
             }
-        }
-
-        // ---- operand tokens: read the value, fold with the pending operator ----
-        i32 operand = 0;     // v2
-        switch (t.cls) {
+        } else switch (t.cls) {
+            // ---- operand tokens: load v2, fold with the pending operator ----
             case kTokFuncCall:  // class 4
                 operand = host_.callUserFunction ? host_.callUserFunction(t.value) : 0;
                 break;
@@ -79,36 +83,43 @@ i32 ScriptVm::EvalExpression(u8 stopOp) {
             case kTokIntLit:    // class 5
                 operand = t.value;
                 break;
-            case kTokStrLit:    // class 7
+            case kTokStrLit:    // class 7 (binary: v2 = &unk_7674E0 scratch ptr)
                 operand = t.value;
                 break;
-            case kTokRawSym:    // class 6: bare symbol, no operand
-                operand = 0;
+            case kTokRawSym:
+                // class 6 (float literal): the binary loads NO operand
+                // (0x444331: cmp al,6 / jz -> fold) — the stale v2 folds.
                 break;
-            case kTokLabel:     // class 0xB: label ref pushes its id as operand
+            case kTokLabel:
+                // class 0xB (0x444350): dword_62E8C8 = value, then v1 = 2 and
+                // LABEL_21 seeds acc from the STALE operand; v45 becomes 2.
                 pendingLabel_ = t.value;
-                operand = t.value;
+                acc = operand;
+                pendOp = kOpOperand;
+                continue;
+            case kTokBlockEnd:  // class 0xC: fold below, then return
                 break;
-            case kTokBlockEnd:  // class 0xC: terminator
-                return acc;
-            default:            // class 0: unknown -> stop
+            default:            // class 0: unknown -> "Unknown symbol", Finish
                 finished_ = true;
                 return acc;
         }
 
-        switch (pendOp) {
+        switch (pendOp) {        // the LABEL_18 fold ladder over v45
             case kOpAdd: acc += operand; break;
             case kOpSub: acc -= operand; break;
-            case kOpDiv: if (operand != 0) acc /= operand; break;
+            case kOpDiv:
+                // the binary divides unguarded (x86 #DE on 0); the zero guard
+                // only avoids UB on inputs that would crash it.
+                if (operand != 0) acc /= operand;
+                break;
             case kOpMul: acc *= operand; break;
             case kOpOr:  acc |= operand; break;
             case kOpAnd: acc &= operand; break;
-            case kOpOperand:                 // v45 == 2: first operand seeds acc
-            default:     acc = operand; break;
+            case kOpOperand: acc = operand; break;   // v45 == 2: seed
+            default: break;      // no pending operator: operand not folded
         }
-        pendOp = kOpOperand;  // consumed; await the next operator
-
-        if (peek().cls == kTokBlockEnd) { (void)next(); return acc; }
+        pendOp = cur;            // LABEL_22: v45 = v1
+        if (t.cls == kTokBlockEnd) return acc;   // v41[0] == 12 -> LABEL_23
     }
     return acc;
 }

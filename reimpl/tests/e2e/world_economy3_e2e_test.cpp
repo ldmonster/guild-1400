@@ -105,7 +105,7 @@ TEST(WorldEconomy3E2E, AgendaWindowBuckets) {
 // Level2 join: fee floor vs 1% of wealth, then office name for the join dialog.
 TEST(WorldEconomy3E2E, Level2JoinDialogFee) {
     // 50000 * (float)0.01 == 499.99998.. (float-precision rate) -> truncates to 499.
-    CHECK_EQ(GuildLevel2JoinFee(50000), 499);
+    CHECK_EQ(GuildLevel2JoinFee(50000), 500);   // 499.99999 -> 500.0f (fstp dword @0x520a8e)
     CHECK_EQ(GuildLevel2JoinFee(10000), 160);   // 100.0 < 160 -> floor
     // poorest player still pays the floor.
     CHECK_EQ(GuildLevel2JoinFee(0), 160);

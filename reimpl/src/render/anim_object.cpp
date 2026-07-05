@@ -45,19 +45,22 @@ AnimStream* FindFreeMeshSlot(const char* name) {
 
 // ---------------------------------------------------------------------------
 // gilde.exe 0x5d3858 — VIBE_Anim_LoadStreamToStock.
+// The stock lookup + the record name use the a3/edx KEY string, not the built
+// I/O path (`FindFreeMeshSlot(a3)`; `LoadBinaryAnimation(v16, a3, loop)` —
+// LoadBinaryAnimation @0x5e450c StrNCopyPads its a2 into the record name).
 // ---------------------------------------------------------------------------
-AnimStream* LoadStreamToStock(const char* name, u8 loopFlag) {
+AnimStream* LoadStreamToStock(const char* name, u8 loopFlag, const char* key) {
     // strcpy("animations/") then append name (the two char-copy loops). 0x5d386b
     std::string path = "animations/";
     path += name;
 
-    AnimStream* existing = FindFreeMeshSlot(path.c_str());  // 0x5d38b9
+    AnimStream* existing = FindFreeMeshSlot(key);   // 0x5d38b9 (key = a3/edx)
     if (existing) {
         // d3_LoadAnimStream(): animation already in stock: %s  (logged) 0x5d38ec
         return existing;                            // 0x5d3914
     }
     AnimStream* loaded = g_hooks.loadBinaryAnimation
-                             ? g_hooks.loadBinaryAnimation(path.c_str(), loopFlag)
+                             ? g_hooks.loadBinaryAnimation(path.c_str(), key, loopFlag)
                              : nullptr;             // 0x5d38c8
     if (loaded) {                                   // 0x5d38d1
         // Prepend to the stock list: result[89]=head; head=result;
@@ -182,8 +185,12 @@ i32 AttachToBone(AnimNode* model, const char* name, i32 ctrlWord) {
     }
 
     ch.nameId   = ctrlWord;                          // +108 = a2 0x5d0c38
-    ch.flags110 = (0 & 0xA7) | 0x10;                 // +110: &0xA7 then |0x10 0x5d0c3b/0x5d0c4e
-    ch.flags109 = 0;                                 // &~0x20 0x5d0c4b
+    // The binary PRESERVES the channel's existing flag bits: +110 = (old & 0xA7)
+    // | 0x10 (0x5d0c3b/0x5d0c4e) and +109 &= ~0x20 (0x5d0c4b) — channels are
+    // reused across attach/prune cycles, so stale bits (e.g. the +109 loop bit
+    // tested below) survive by design.
+    ch.flags110 = static_cast<u8>((ch.flags110 & 0xA7) | 0x10);
+    ch.flags109 = static_cast<u8>(ch.flags109 & ~0x20u);
     if ((ctrlWord & 0xff) == 1)                      // (BYTE)a2 == 1
         ch.flags109 |= 0x10;                         // 0x5d0c56
 
@@ -242,7 +249,12 @@ void PruneExpiredAttachments(AnimNode* model, const char* name) {
             // case-SENSITIVE compare (VIBE_Util_StrCmp @0x5d3f10), drop on match.
             if (s && std::strcmp(s->name.c_str(), name) == 0) {  // !StrCmp -> equal
                 ch.flags110 &= static_cast<u8>(~2u);  // &~2 0x5d0dac
-                if (s->refCount > 0) --s->refCount;   // ReleaseMeshData 0x5d0dbb
+                // VIBE_Anim_ReleaseMeshData(stream, 0) @0x5d0dbb decrements the
+                // refcount UNCONDITIONALLY (and at <= 0 runs the budget/eviction
+                // path — the full LRU form lives in anim_recon4_mesh_lru.cpp
+                // over the raw record arena; this modeled AnimStream keeps the
+                // count bookkeeping only).
+                --s->refCount;
                 ch.stream = nullptr;                   // +132 = 0 0x5d0dc0
                 ch.used   = false;
             }

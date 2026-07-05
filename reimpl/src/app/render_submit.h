@@ -74,8 +74,12 @@ struct EntitySubmitRecord {
     i32 flag68;        // +0x44 (+68) bit1 => add the grid offset (byte_62D220)
     u8  pad2[4];       // +0x48
     i32 linkIndex;     // +0x4C (+76) partner record index
-    i16 subStateA;     // +0x50 (+80) packed sub-state hi-word
-    i16 subStateB;     // +0x4E (+78) packed sub-state hi-word
+    // The State_GetCurrent tail reads two overlapping DWORDs and keeps their
+    // high words (gilde.exe 0x413700/0x413703 + sar 16):
+    //   arg3 = *(int *)(rec+0x50) >> 16  ->  the i16 at +0x52 (+82)
+    //   arg4 = *(int *)(rec+0x4E) >> 16  ->  the i16 at +0x50 (+80)
+    i16 subStateLo;    // +0x50 (+80) sub-state low word  (State_GetCurrent arg4)
+    i16 subStateHi;    // +0x52 (+82) sub-state high word (State_GetCurrent arg3)
 };
 #pragma pack(pop)
 static_assert(sizeof(EntitySubmitRecord) == 84, "entity record must be 84 bytes");
@@ -121,8 +125,11 @@ struct RenderSubmitHooks {
     // scratch; returns the original's result (Entities returns it).
     int (*decompressionFinalize)(int out) = nullptr;
 
-    // The per-record compressed-state blob pointer the Entities path decodes:
-    // *(dword_62D204 + 4*(21*idx) + 60). Returns 0 when no blob is present.
+    // The per-record compressed-state blob dword the Entities path decodes:
+    // *(dword_62D204 + 4*(21*idx) + 60) — NOTE 4*21 == 84, i.e. this is the SAME
+    // +60 dword the kind reads come from; the binary compares this very value
+    // (edx at 0x4136b3) for the per-kind animation dispatch. When null, the
+    // builder reads entities[idx].kind directly (byte-identical source).
     int (*stateBlob)(int idx) = nullptr;
     // byte_62D220 grid-cell offset added to a +68-bit1 record's index.
     u8 gridOffset = 0;

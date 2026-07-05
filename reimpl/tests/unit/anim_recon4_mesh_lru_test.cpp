@@ -578,7 +578,9 @@ TEST(AnimRecon4, ShapeRegisterSingleType1) {
 
     i32 count = Shape_RegisterLoaded(table.data(), start, blob.data(),
                                      /*blobSize=*/4321, name, hooks);
-    CHECK_EQ(count, start + 1);
+    // gilde.exe 0x41f5e0: dword_62D208 = v38 stays at startIndex for a
+    // single-frame shape (old pin start+1 predates the exact tail store).
+    CHECK_EQ(count, start);
 
     const i32 base = 84 * start;
     CHECK_EQ(rd_u32(table.data(), base + shape_off::TYPE), 1u);
@@ -611,7 +613,7 @@ TEST(AnimRecon4, ShapeRegisterType17) {
 
     i32 count = Shape_RegisterLoaded(table.data(), 0, blob.data(), 100,
                                      nullptr, hooks);
-    CHECK_EQ(count, 1);
+    CHECK_EQ(count, 0);   // v38 unchanged for a single-frame (type 17) shape
     CHECK_EQ(rd_u32(table.data(), shape_off::TYPE), 17u);
     CHECK_EQ(rd_u16(table.data(), shape_off::BOUND_W), static_cast<u16>(0x1234));
     CHECK_EQ(rd_u16(table.data(), shape_off::BOUND_H), static_cast<u16>(0x5678));
@@ -639,8 +641,9 @@ TEST(AnimRecon4, ShapeRegisterMultiFrameType5) {
     const i32 start = 1;
     i32 count = Shape_RegisterLoaded(table.data(), start, blob.data(), 999,
                                      nullptr, hooks);
-    // 1 primary + 2 sub-frames -> next free slot = start + 3.
-    CHECK_EQ(count, start + 3);
+    // v38 = startIndex + (frames-1) = start + 2 (gilde.exe 0x41f5e0 tail store;
+    // old pin start+3 predates the exact semantics).
+    CHECK_EQ(count, start + 2);
 
     const i32 base = 84 * start;
     CHECK_EQ(rd_u32(table.data(), base + shape_off::TYPE), 5u);

@@ -506,11 +506,12 @@ TEST(TrialHarden, TallyVerdictZeroAndManyJurors) {
 
 TEST(TrialHarden, SessionTortureInstrumentClamped) {
     int votes[3] = {0, 0, 0};            // convict
-    CrimeRecord ev[1] = {};
+    CrimeRecord ev[3] = {};              // torture gate needs evidenceCount > 2
     TrialSetup st;
     st.juryVotes = votes; st.juryCount = 3;
-    st.evidence = ev; st.evidenceCount = 1;
-    st.torture = true;
+    st.evidence = ev; st.evidenceCount = 3;
+    st.defendantPleadsGuilty = false;    // NICHT_SCHULDIG plea
+    st.torturerPresent = true;           // ctx+72 resolves -> torture path
     // Run with an out-of-range and a negative instrument index; the FSM clamps
     // into [0, kTrialTortureInstrumentCount-1] before indexing the .esc table.
     for (int inst : {999, -3, 7, 6, 0}) {

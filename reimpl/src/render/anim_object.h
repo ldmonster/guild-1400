@@ -146,8 +146,11 @@ struct AnimObjHooks {
     // VIBE_Anim_AssignSubMeshBones(drawData) / VIBE_Anim_ComputeBoneMatrices(drawData).
     void (*assignSubMeshBones)(i32 drawData) = nullptr;
     void (*computeBoneMatrices)(i32 drawData) = nullptr;
-    // VIBE_ModelIo_LoadBinaryAnimation(path, loopFlag) -> stream (.baf loader).
-    AnimStream* (*loadBinaryAnimation)(const char* path, u8 loopFlag) = nullptr;
+    // VIBE_ModelIo_LoadBinaryAnimation(path, key, loopFlag) -> stream (.baf
+    // loader). `key` is the a2/edx name copied into the record (StrNCopyPad 63)
+    // — the stock lookup key, DISTINCT from the I/O path.
+    AnimStream* (*loadBinaryAnimation)(const char* path, const char* key,
+                                       u8 loopFlag) = nullptr;
     // dword_62EB38 (global render frame counter) and dword_649D58 (anim epoch).
     i32 frameCounter = 0;   // dword_62EB38
     i32 animEpoch    = 0;   // dword_649D58
@@ -173,13 +176,15 @@ void ResetAnimStock();
 AnimStream* FindFreeMeshSlot(const char* name);
 
 // ===========================================================================
-// gilde.exe 0x5d3858 — VIBE_Anim_LoadStreamToStock.
-// Build "animations/" + `name`, look it up in stock (already-loaded => return
-// it, log the dup); else load the .baf via the model IO hook and PREPEND it to
-// the stock list. Returns the stream (existing or new), or nullptr on load fail.
-// `loopFlag` is the bl arg passed through to the loader.
+// gilde.exe 0x5d3858 — VIBE_Anim_LoadStreamToStock (eax=name, bl=loopFlag,
+// edx=key). Build "animations/" + `name` (the I/O path), but look the stock up
+// by `key` (a3/edx — the short display key the callers build, e.g.
+// "%s_%s"; see VIBE_Character_AttachMotion @0x403408: eax=full .baf path,
+// edx=short key). Already-loaded => return it (logs the dup); else load the
+// .baf via the model IO hook — which copies `key` into the record name — and
+// PREPEND it to the stock list. Returns the stream, or nullptr on load fail.
 // ===========================================================================
-AnimStream* LoadStreamToStock(const char* name, u8 loopFlag);
+AnimStream* LoadStreamToStock(const char* name, u8 loopFlag, const char* key);
 
 // ===========================================================================
 // gilde.exe 0x5cef14 — VIBE_Anim_CreateObjectAnim (eax=node,edx=src,ebx=frameCount).

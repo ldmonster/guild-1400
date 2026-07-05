@@ -484,8 +484,10 @@ HeRecord* NpcAction3_RecruitmentState(HeRecord* h) {
         }
         if (prox) {
             if (prox == 1) {
+                // Disasm 0x4cd46d/0x4cd473: mov edx,[ebp+0B0h] (=+176 FilterB);
+                // mov eax,[ebp+0ACh] (=+172 FilterA) — __usercall(eax=idA, edx=idB).
                 He_RecruitRequired(h) =
-                    H->recruitCost ? H->recruitCost(1, He_FilterB(h)) : 0; // +185
+                    H->recruitCost ? H->recruitCost(He_FilterA(h), He_FilterB(h)) : 0; // +185
                 ++He_RecruitProgress(h);    // +184
             }
             // prox != 0 here: in-range. If progress >= required -> arm phase 1;

@@ -15,15 +15,22 @@ u32 ReadLe32(const u8* p, std::size_t off) {
          | (static_cast<u32>(p[off + 3]) << 24);
 }
 
-// On-disk strides recovered from VIBE_Sound_LoadSampleBank @0x446b2c and a real
-// europe_guild_1400_original/sfx/*.sbf hexdump (see real_audio.h).
+// On-disk strides recovered from VIBE_Sound_LoadSampleBank @0x446b2c and
+// VIBE_Sound_LoadEntry @0x446830 (verified against a real
+// europe_guild_1400_original/sfx/*.sbf hexdump):
+//   header 0x144 bytes (entryCount u32 @0x134), then count 0x40-byte entries.
+//   Entry record (LoadEntry): +0 u32 data-block file offset (the
+//   VIBE_File_Seek(*(_DWORD*)entry, 0) target @0x44688c), +4 name (50),
+//   +54 format byte (1 single / 2 variation, @0x44689d), +60 runtime scratch
+//   (written 13*dword_62EB38 @0x44697a — NOT persisted).
 constexpr std::size_t kHeaderSize   = 0x144; // 324
-constexpr std::size_t kEntryBase    = 0x148; // first entry follows the 0x144 header + 4
+constexpr std::size_t kEntryBase    = 0x144; // entry table starts right after the header
 constexpr std::size_t kEntrySize    = 0x40;  // 64
 constexpr std::size_t kCountOff     = 0x134; // entryCount within the header
 constexpr std::size_t kNameLen      = 50;
-constexpr std::size_t kEntryFmtOff  = 0x32;  // u32 format (1 single / 2 variation)
-constexpr std::size_t kEntryDataOff = 0x3C;  // u32 file offset of the data block
+constexpr std::size_t kEntryNameOff = 0x04;  // name follows the data-offset dword
+constexpr std::size_t kEntryFmtOff  = 0x36;  // format (byte @entry+54)
+constexpr std::size_t kEntryDataOff = 0x00;  // u32 file offset of the data block
 constexpr std::size_t kBlockHdr     = 12;    // 12-byte data-block / sub-entry header
 
 std::string DecodeName(const u8* p, std::size_t avail, std::size_t max) {
@@ -116,9 +123,9 @@ bool ParseRealSampleBank(const u8* data, std::size_t size, RealSbBank& out) {
     for (u32 i = 0; i < count; ++i) {
         const u8* rec = data + kEntryBase + static_cast<std::size_t>(i) * kEntrySize;
         RealSbEntry e;
-        e.name       = DecodeName(rec, kNameLen, kNameLen);
-        e.format     = ReadLe32(rec, kEntryFmtOff);
-        e.dataOffset = ReadLe32(rec, kEntryDataOff);
+        e.name       = DecodeName(rec + kEntryNameOff, kNameLen, kNameLen);
+        e.format     = rec[kEntryFmtOff];               // byte @entry+54 (0x44689d)
+        e.dataOffset = ReadLe32(rec, kEntryDataOff);    // seek target (0x44688c)
         // Resolve the first audio block (best-effort; leaves codec=kUnknown if the
         // offset is bogus, as happens for a couple of stray entry slots on disk).
         if (e.dataOffset >= kHeaderSize && e.dataOffset < size)

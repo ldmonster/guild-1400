@@ -65,7 +65,11 @@ TEST(SaveReconWorldIo, WriteObjectCase0Golden) {
     PutU32(exp, 7); PutU32(exp, 8); PutU32(exp, 9);      // vec3 @144
     PutU8(exp, 0);                                       // child present = 0
     PutU8(exp, 0);                                       // sibling present = 0
-    PutU8(exp, 0);                                       // event-names terminator
+    PutU32(exp, 0);                                      // event-names terminator: the
+                                                         // binary's WriteEventNames
+                                                         // (0x5f4b60) emits a 4-byte 0
+                                                         // count dword for a null list
+                                                         // (old pin: single 0 byte)
 
     u8 out[256];
     WorldIoSink sink = WorldIoSinkOpen(out, sizeof(out));
@@ -84,7 +88,7 @@ TEST(SaveReconWorldIo, WriteObjectNoBodyWhenBit1Clear) {
     PutU8(exp, 0);                                       // bit1 of 0x00
     PutU8(exp, 0);                                       // child = 0
     PutU8(exp, 0);                                       // sibling = 0
-    PutU8(exp, 0);                                       // event terminator
+    PutU32(exp, 0);                                      // event terminator (dword, 0x5f4b60)
 
     u8 out[64];
     WorldIoSink sink = WorldIoSinkOpen(out, sizeof(out));
@@ -112,7 +116,7 @@ TEST(SaveReconWorldIo, WriteObjectCallbackSeversSibling) {
     PutU8(exp, 0);                                       // WriteObject: bit1 of 0x00
     PutU8(exp, 0);                                       // child = 0
     PutU8(exp, 0);                                       // sibling = 0 (severed!)
-    PutU8(exp, 0);                                       // event terminator
+    PutU32(exp, 0);                                      // event terminator (dword, 0x5f4b60)
 
     u8 out[64];
     WorldIoSink sink = WorldIoSinkOpen(out, sizeof(out));

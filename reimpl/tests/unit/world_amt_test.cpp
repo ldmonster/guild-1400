@@ -227,11 +227,11 @@ TEST(WorldTradeTransport, CargoValueGolden) {
         return static_cast<double>(gid * 10 + ctx);
     });
     std::vector<CargoSlot> slots = {{5,3},{7,2},{-1,9},{2,0},{11,4}};
-    double v1 = TradeTransportComputeCargoValue(slots, false, 1.0f, 1, 2, TransportMode::Slow);
+    double v1 = TradeTransportComputeCargoValue(slots, false, 1.0f, 1, 2, /*panelMode=*/1);
     CHECK(v1 > 738.99 && v1 < 739.01);
-    double v2 = TradeTransportComputeCargoValue(slots, true, 1.0f, 1, 2, TransportMode::Slow);
+    double v2 = TradeTransportComputeCargoValue(slots, true, 1.0f, 1, 2, /*panelMode=*/1);
     CHECK(v2 > 812.89 && v2 < 812.91);
-    double v3 = TradeTransportComputeCargoValue(slots, false, 2.0f, 1, 2, TransportMode::Medium);
+    double v3 = TradeTransportComputeCargoValue(slots, false, 2.0f, 1, 2, /*panelMode=*/2);
     CHECK(v3 > 747.99 && v3 < 748.01); // sell-at-contor uses sellctx, no factor
     TradeTransportSetMarketPriceHook(nullptr);
 }

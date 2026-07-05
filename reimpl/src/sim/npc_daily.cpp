@@ -236,9 +236,14 @@ HeRecord* NpcDaily_DailyRoutineStep(HeRecord* h) {
     }
 
     // ----------------------------- STATE 1 -----------------------------------
-    // Social / evening sweep. Entry requires the saved-day == clock-day (the
-    // original compares (DWORD)qword_13CE852 == *(+68)); else free.
+    // Social / evening sweep. Entry gates (decompile 0x4e7e88, state-1 head):
+    //   1) (word_63C740 & 0x80) != 0  -> free (LABEL_2)   [global pause gate]
+    //   2) clock.day != saved day (+68) -> free
     if (state == 1) {
+        if (H->pauseFlag80 && H->pauseFlag80()) {
+            (void)FreeResult(h);
+            return h;
+        }
         if (clk.day != He_SavedTime(h).day) {
             (void)FreeResult(h);
             return h;
@@ -247,8 +252,45 @@ HeRecord* NpcDaily_DailyRoutineStep(HeRecord* h) {
         const int candidates = H->candidateCount ? H->candidateCount() : 0;  // v21
         int dispatched = 0;   // v4
 
-        // Pass A: social dispatch for player-owned (kind 6/7) persons; one per
-        // round (the original counts v4 and stops at >=1 in pass B).
+        // The shared social emission (pass A @0x4e84xx / pass B @0x4e86xx):
+        //   RequestBuildOp77 first; then the tavern roll
+        //   (candidates && currency>3200 && RandomModulo(2)):
+        //     roll PASSES -> PickClosestByWeight; on pick success emit the
+        //       "Go to wirtshaus" named53; on pick FAILURE emit NOTHING
+        //       (disasm 0x4e8527/0x4e8716: jz straight to the bits/args25 block);
+        //     roll FAILS -> "Go home" named53 (obj==-1 variant flag 1).
+        //   Always: args25(+456 col, 2048, 4, 4096), BYTE1 |= 8 (0x800), ++v4,
+        //   He+172 = i.
+        auto socialDispatch = [&](int i, DailyPersonRow& row, i32 u, i32 obj) {
+            if (H->requestBuildOp77) H->requestBuildOp77(row.personId);
+            bool rollPassed = candidates && H->currencyHeld && H->currencyHeld(i) > 3200
+                              && (util::RandomModulo(2) & 0xFFFF);
+            if (rollPassed) {
+                i32 tu = u, tobj = obj;
+                if (H->pickTavern && H->pickTavern(i, &tu, &tobj)) {
+                    if (H->queueRequestNamedObject53)
+                        H->queueRequestNamedObject53(row.personId, tu, 0, tobj, 0,
+                                                     "Go to wirtshaus");
+                }
+                // pick failure: no movement command (binary behaviour).
+            } else if (obj == -1) {
+                if (H->queueRequestNamedObject53)
+                    H->queueRequestNamedObject53(row.personId, u, 0, -1, 1, "Go home");
+            } else {
+                if (H->queueRequestNamedObject53)
+                    H->queueRequestNamedObject53(row.personId, u, 0, obj, 0, "Go home");
+            }
+            if (H->queueRequestArgs25)
+                H->queueRequestArgs25(row.personId, kPfTurnBits, 2048, 4, 4096);
+            row.turnBits |= kDailyDispSocial;
+            if (H->setTurnBits) H->setTurnBits(i, row.turnBits);
+            ++dispatched;
+            He_Counter172(h) = i;
+        };
+
+        // Pass A (0x4e8383..0x4e85bc): every player-owned (owner kind 6/7)
+        // person; NO dispatch cap (the loop runs the full 768 slots — the v4<1
+        // cap belongs to pass B only).
         for (int i = 0; i < count; ++i) {
             DailyPersonRow row = H->personRow ? H->personRow(i) : DailyPersonRow{};
             if (!RowLive(row)) continue;
@@ -263,38 +305,29 @@ HeRecord* NpcDaily_DailyRoutineStep(HeRecord* h) {
             if (u == d44 && obj == d48) continue;
             if ((row.turnBits & kDailySocialReq) != 0) continue;  // & 0x800
             u8 ownerKind = H->ownerKind ? H->ownerKind(i) : 0;
-            if (ownerKind != 6 && ownerKind != 7) continue;
+            if (ownerKind != 6 && ownerKind != 7) continue;       // pass A only
+            socialDispatch(i, row, u, obj);
+        }
 
-            if (H->requestBuildOp77) H->requestBuildOp77(row.personId);
-            // Tavern roll: candidates>0 && currency>3200 && RandomModulo(2).
-            bool tavern = false;
-            if (candidates && H->currencyHeld && H->currencyHeld(i) > 3200
-                && (util::RandomModulo(2) & 0xFFFF)) {
-                i32 tu = 0, tobj = 0;
-                if (H->pickTavern && H->pickTavern(i, &tu, &tobj)) {
-                    if (H->queueRequestNamedObject53)
-                        H->queueRequestNamedObject53(row.personId, tu, 0, tobj, 0,
-                                                     "Go to wirtshaus");
-                    tavern = true;
-                }
+        // Pass B (0x4e85c2..0x4e87b0): only when pass A dispatched nothing
+        // (cmp edi,1 / jge skip); same gates WITHOUT the owner-kind filter;
+        // stops after the first dispatch (v4 >= 1).
+        if (dispatched < 1) {
+            for (int i = 0; i < count && dispatched < 1; ++i) {
+                DailyPersonRow row = H->personRow ? H->personRow(i) : DailyPersonRow{};
+                if (!RowLive(row)) continue;
+                if (row.homeBld == 0 || row.destBld == 0) continue;
+                u8 cls = H->aiPlayerClass ? H->aiPlayerClass(i) : 0;
+                if (cls == 4 || cls == 16 || cls == 19) continue;
+                i32 u = 0, obj = 0;
+                if (!(H->findInteractionTarget && H->findInteractionTarget(i, &u, &obj)))
+                    continue;
+                i32 d44 = 0, d48 = 0;
+                if (!(H->destDoorIds && H->destDoorIds(i, &d44, &d48))) continue;
+                if (u == d44 && obj == d48) continue;
+                if ((row.turnBits & kDailySocialReq) != 0) continue;
+                socialDispatch(i, row, u, obj);
             }
-            if (!tavern) {
-                if (obj == -1) {
-                    if (H->queueRequestNamedObject53)
-                        H->queueRequestNamedObject53(row.personId, u, 0, -1, 1, "Go home");
-                } else {
-                    if (H->queueRequestNamedObject53)
-                        H->queueRequestNamedObject53(row.personId, u, 0, obj, 0, "Go home");
-                }
-            }
-            // QueueRequestArgs25(id, fieldOffset(+456 col), 2048, 4, 4096); BYTE1 |= 8 (0x800).
-            if (H->queueRequestArgs25)
-                H->queueRequestArgs25(row.personId, kPfTurnBits, 2048, 4, 4096);
-            row.turnBits |= kDailyDispSocial;
-            if (H->setTurnBits) H->setTurnBits(i, row.turnBits);
-            ++dispatched;
-            He_Counter172(h) = i;
-            break;
         }
 
         if (dispatched) {
@@ -302,7 +335,10 @@ HeRecord* NpcDaily_DailyRoutineStep(HeRecord* h) {
             GameTimeAdvance(&He_ApptTime(h), 0, 0, 5);   // +5 min
         }
 
-        // Evening go-home sweep: once hour > workEnd+2, send everyone home.
+        // Evening go-home sweep: once hour > workEnd+2, send everyone home (or,
+        // on a passed tavern roll + pick, to the picked tavern via chr-move).
+        // The sweep runs the full 768 slots and then FREES the handler entry
+        // (0x4e8ab1 loop exit -> LABEL_2 VIBE_He_FreeHandlerEntry).
         const double homeWindow =
             static_cast<double>(kWorkEndHour[season] + kEveningOffset);
         if (ClockHour() > homeWindow) {
@@ -322,7 +358,23 @@ HeRecord* NpcDaily_DailyRoutineStep(HeRecord* h) {
                 if (u == d44 && obj == d48) continue;
                 if ((row.turnBits & kDailySocialReq) != 0) continue;  // & 0x800
                 if (H->requestBuildOp77) H->requestBuildOp77(row.personId);
-                if (obj == -1) {
+                // Tavern roll (0x4e89xx, same shape as the social passes) —
+                // on pick success the picked location replaces u/obj and the
+                // move is emitted via chr-move dummy_EINGANG + string47; on
+                // pick FAILURE nothing moves (bits/args25 only).
+                bool rollPassed = candidates && H->currencyHeld
+                                  && H->currencyHeld(i) > 3200
+                                  && (util::RandomModulo(2) & 0xFFFF);
+                if (rollPassed) {
+                    i32 tu = u, tobj = obj;
+                    if (H->pickTavern && H->pickTavern(i, &tu, &tobj)) {
+                        if (H->requestChrMoveToUniverse)
+                            H->requestChrMoveToUniverse(row.personId, tu, tobj,
+                                                        "dummy_EINGANG");
+                        if (H->queueRequestString47)
+                            H->queueRequestString47(row.personId, tu, tobj);
+                    }
+                } else if (obj == -1) {
                     if (H->requestChrMoveToUniverse)
                         H->requestChrMoveToUniverse(row.personId, u, -1, "dummy_TUER");
                 } else {
@@ -336,6 +388,7 @@ HeRecord* NpcDaily_DailyRoutineStep(HeRecord* h) {
                 if (H->queueRequestArgs25)
                     H->queueRequestArgs25(row.personId, kPfTurnBits, 2048, 4, 4096);
             }
+            (void)FreeResult(h);   // LABEL_2 after the full sweep
         }
         return h;
     }

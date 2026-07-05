@@ -59,14 +59,14 @@ int StatDumpNpcIdentity(const u8* record, char* out, const StatDumpEnv& env) {
     //   class    : *(int*)(record+6)   >> 24  == record[+9]
     //   origin   : *(int*)(record+9)   >> 24  == record[+12]
     //   religion : record[+13]
-    //   status   : *(int*)(record+356) >> 24  == record[+359]   (a1+177 word = +354; +356 dword>>24 -> +359)
-    //   location : *(int*)(record+354) >> 24  == record[+357]
+    //   status   : *(int*)((char*)a1+353) >> 24  == record[+356]
+    //   location : *(int*)(a1+177)        >> 24  == record[+357]  (a1 is u16*, +177 words = +354 bytes)
     // The decompile expresses these as `*(int*)addr >> 24`; on little-endian that
     // selects the byte at addr+3 (arithmetic shift, but the value is a u8 index here).
     u8 classIdx = static_cast<u8>(RdI32(record, 6) >> 24);
     u8 originIdx = static_cast<u8>(RdI32(record, 9) >> 24);
     u8 religionIdx = record[13];
-    u8 statusIdx = static_cast<u8>(RdI32(record, 356) >> 24);
+    u8 statusIdx = static_cast<u8>(RdI32(record, 353) >> 24);
     u8 locationIdx = static_cast<u8>(RdI32(record, 354) >> 24);
 
     return CrtSprintf(

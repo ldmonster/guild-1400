@@ -39,15 +39,18 @@ u8 Movie_PlayOutro(MovieDllHooks& dll, MovieControlHooks& ctl, MovieGlobals& g,
     (void)overlay;
 
     // 0x53496B: spin the game frame loop until the fade overlay reports done
-    // (status & 0x4) AND the fade timer has elapsed (0.0 > flt_62DA00 keeps it
-    // spinning).  Loop body: VIBE_GameLogic_RunFrameLoop.
-    //   while ( (status & 4) == 0 || 0.0 > flt_62DA00 ) runFrame();
+    // (status & 0x4) AND the music-fade timer has completed (flt_62DA00 < 0.0;
+    // VIBE_Audio_MixerUpdate @0x43a3e4 parks it at -1.0 when the fade ends).
+    // Loop body: VIBE_GameLogic_RunFrameLoop.
+    //   while ( (status & 4) == 0 || 0.0 <= flt_62DA00 ) runFrame();
     for (;;) {
         u8 status = ctl.fadeStatusByte ? ctl.fadeStatusByte() : 0x4;     // *esi
         if ((status & 0x4) != 0) {
-            // 0x534A83: fldz / fcomp flt_62DA00 ; jbe (0.0 <= timer) -> exit loop
-            float timer = ctl.fadeTimer ? ctl.fadeTimer() : 0.0f;
-            if (!(0.0f > timer))   // jbe: 0.0 <= timer -> done
+            // 0x534A83: fldz / fcomp flt_62DA00 / fnstsw / sahf ;
+            // jbe loc_534974 — 0.0 <= timer jumps BACK into the loop body;
+            // the fall-through exit @0x534A94 requires 0.0 > flt_62DA00.
+            float timer = ctl.fadeTimer ? ctl.fadeTimer() : kMovieFadeTimerSentinel;
+            if (0.0f > timer)   // fade complete (-1.0 sentinel) -> exit loop
                 break;
         }
         if (ctl.runFrameLoop) ctl.runFrameLoop();                        // 0x53497C

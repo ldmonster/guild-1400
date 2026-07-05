@@ -1,6 +1,7 @@
 #include "sim/person_personnel2.h"
-#include "sim/person.h"     // PersonGetByte/Word/Dword field accessors
-#include "sim/entity.h"     // g_persons, kPersonCapacity
+#include "sim/person.h"         // PersonGetByte/Word/Dword field accessors
+#include "sim/entity.h"         // g_persons, kPersonCapacity
+#include "sim/person_create.h"  // g_personLiveCount (dword_647724 mirror)
 
 #include <cstdint>
 #include <cstdlib>   // std::abs
@@ -150,28 +151,22 @@ int PersonFindEmploymentRelation(Person* rec) {
     next_slot:;
     }
 
-    // Array exhausted. Slow path only when the person table is nearly full.
-    int liveCount = 0;
-    {
-        // dword_647724 — live person count. We approximate it as the number of
-        // occupied slots so the "near full" guard is faithful and self-contained.
-        for (int i = 0; i < kPersonCapacity; ++i)
-            if (g_persons[i].marker != -1)
-                ++liveCount;
-    }
-    if (kPersonCapacity - liveCount >= 32)
-        return 1;  // table not near full: original returns 1 here too (the
-                   // goto LABEL_4 path falls out of the bounded scan to LABEL_7
-                   // then exits with eax=1 once v12 >= 768 — modeled as 1).
+    // Array exhausted (v12 >= 768). 0x58d9d6:
+    //   if (768 - dword_647724 < 32) return 1;    // table NEAR FULL -> 1, NO scan
+    //   else scan the staff book (0x58d9ec).      // >= 32 free -> book scan
+    // (An earlier transcription inverted this guard — decompile-refuted.)
+    // dword_647724 is mirrored 1:1 by g_personLiveCount (person_create.cpp).
+    if (kPersonCapacity - g_personLiveCount < 32)
+        return 1;
 
     int bookCount = 0;
     const StaffBookRecord* book = g_pp2Hooks->StaffBook(&bookCount);
     if (book) {
         for (int i = 0; i < bookCount; ++i)
             if (book[i].personId == selfId && book[i].active != 0)
-                return 0;  // found in staff book
+                return 0;  // found in staff book (0x58d9ec -> return 0)
     }
-    return 1;  // orphaned, book full / no booking
+    return 1;  // scan exhausted (0x58d9f6)
 }
 
 // ===========================================================================
@@ -245,15 +240,19 @@ bool PersonCheckDebtRatioCritical(Person* rec, int reserve) {
 
 // ===========================================================================
 // VIBE_Person_SyncMasterShopObjects  0x594c94
-//   for (m = QueryBegin(slot,1,0,30); m; m = IterNext())  // filter tag 30
+//   for (m = QueryBegin(slot,1,0,30); m; m = IterNext())  // filter {op 0, 30}
 //     for (child shop objects of m) child.owner = m.owner; // propagate
-// The whole scene-walk + child propagation is hooked; we iterate the matched
-// masters (QueryFirst yields one per tag here) and let the hook do the sync.
+// The original iterates EVERY matching master record (0x594ca7 for-loop with
+// IterNext), not just the first — we walk the real in-tree query (the same
+// PersonQueryBegin/PersonIterNext pair the binary calls) and hook only the
+// child-propagation scene walk. (An earlier adaptation synced only the first
+// match via the QueryFirst hook — decompile-refuted.)
 // ===========================================================================
 void PersonSyncMasterShopObjects(int slotArg) {
-    Person* master = g_pp2Hooks->QueryFirst(slotArg, 30);
-    if (master)
-        g_pp2Hooks->SyncShopChildren(master);
+    (void)slotArg;  // QueryBegin seed (match-neutral; see person_query.cpp note)
+    PersonFilter filter{0, 30};                        // op 0: alive/type byte 30
+    for (ObjectRec* m = PersonQueryBegin(&filter, 1); m; m = PersonIterNext())
+        g_pp2Hooks->SyncShopChildren(reinterpret_cast<Person*>(m));
 }
 
 // ===========================================================================
@@ -288,7 +287,10 @@ u8 PersonBeginQueryThenOpenBuilding(u8 stateLow, int slotArg) {
     Person* rec = g_pp2Hooks->QueryFirst(slotArg, 10);
     if (rec)
         return g_pp2Hooks->OpenBuildingForActiveChar(rec);
-    return stateLow;  // rec null: low byte still 1 (LODWORD set, low unchanged)
+    // 0x596487: `LODWORD(a1) = QueryBegin(...)` REPLACES the low byte — a null
+    // result makes the returned al 0, not the incoming 1 (decompile-refuted an
+    // earlier "low byte unchanged" reading).
+    return 0;
 }
 
 // ===========================================================================

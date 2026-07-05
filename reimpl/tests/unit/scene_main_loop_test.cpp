@@ -556,7 +556,9 @@ TEST(SceneMainLoop, AutoEnterRequest1Production) {
     CHECK(Contains(h.log, "slot60(27,900,0)"));
     CHECK(Contains(h.log, "foreignShop(900)"));
 
-    // slot60 != 1 -> no enter.
+    // slot60(27) != 1 -> no foreign-shop enter, but the binary FALLS THROUGH
+    // to the storage/op-25 path (jnz loc_50F57C @0x50f32e -> IsStorageType
+    // @0x50f57e -> slot60(25,...) @0x50f59a).
     RecHooks h2 = RecHooks();
     SceneMainLoopRun r2; r2.smokePhase = 3;
     h2.selFlagsResult = 1; h2.isProduction = true; h2.slot60Result = 0;
@@ -564,6 +566,9 @@ TEST(SceneMainLoop, AutoEnterRequest1Production) {
     SceneMainLoop_StepFrame(s, h2, r2);
     CHECK(Contains(h2.log, "slot60(27,900,0)"));
     CHECK(!Contains(h2.log, "foreignShop(900)"));
+    CHECK(Contains(h2.log, "isStore"));
+    CHECK(Contains(h2.log, "slot60(25,900,0)"));
+    CHECK(!Contains(h2.log, "enter(900,0)"));
 }
 
 TEST(SceneMainLoop, AutoEnterRequest1NonProduction) {

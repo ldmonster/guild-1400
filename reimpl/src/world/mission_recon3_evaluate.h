@@ -101,9 +101,13 @@ struct MissionReq3Hooks {
     bool (*checkMultiStat)(const ObjectiveRecord* obj) = nullptr;                          // 0x5393ec
     bool (*checkStatCombo)(const ObjectiveRecord* obj) = nullptr;                          // 0x53945c
     bool (*checkCumulativeStats)(const u8* person, const ReqTableRow* row) = nullptr;      // 0x539534
-    bool (*checkMemberStats)(const u8* person, const ObjectiveRecord* obj) = nullptr;      // 0x53963c
+    // 0x53963c takes edx=objective record (AccumulateTimer target), ebx=row
+    // (dispatcher call site 0x539bb9: mov edx,esi(objective); ebx=row).
+    bool (*checkMemberStats)(ObjectiveRecord* obj, const ReqTableRow* row) = nullptr;      // 0x53963c
     bool (*checkMinThresholds)(const u8* person) = nullptr;                                // 0x539778
-    bool (*checkTimeElapsed)(const u8* person, const ReqTableRow* row) = nullptr;          // 0x539728
+    // 0x539728 takes edx=objective record (0x53972c mov ecx,edx feeds the inner
+    // AccumulateTimer eax), ebx=row (call site 0x539bd9: mov edx,esi(objective)).
+    bool (*checkTimeElapsed)(ObjectiveRecord* obj, const ReqTableRow* row) = nullptr;      // 0x539728
     bool (*checkNoActiveCombat)(const ObjectiveRecord* obj) = nullptr;                     // 0x5397bc
     // VIBE_MissionReq_AccumulateTimer(obj, conditionMet, requiredMinutes).
     bool (*accumulateTimer)(ObjectiveRecord* obj, bool met, i32 requiredMinutes) = nullptr;// 0x539c44

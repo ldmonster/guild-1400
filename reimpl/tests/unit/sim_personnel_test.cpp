@@ -95,9 +95,11 @@ TEST(SimRecruitCost, GoldenFee) {
     PersonSetByte(cand, 0x84, 220);
 
     // feeF = 24/80 * (a+b); a = 500/1000*5+1 = 3.5; b = (100-40)*0.1 = 6.0;
-    // feeF = 0.3*9.5 = 2.85 -> lrint = 3; rep bonus 200>168(+1),170>168(+1),
-    // 220>210(+2) = +4 => 7.
-    CHECK_EQ(RecruitComputeRecruitmentCost(1, 2), 7);
+    // feeF = 0.3*9.5 = 2.85 -> TRUNCATED to 2 (0x55d84d calls ConvertX@0x5c6b08,
+    // which frndint's with RC=11 / toward zero, before the fistp at 0x55d852 —
+    // the old pin of 7 assumed round-to-nearest); rep bonus 200>168(+1),
+    // 170>168(+1), 220>210(+2) = +4 => 6.
+    CHECK_EQ(RecruitComputeRecruitmentCost(1, 2), 6);
 }
 
 TEST(SimRecruitCost, DebugHalveAndClamp) {

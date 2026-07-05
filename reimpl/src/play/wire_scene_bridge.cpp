@@ -16,7 +16,8 @@ namespace {
 bool g_realDispatch = false;
 
 // SceneDrawNode link accessors for render::WalkVTable (the engine's node[127] /
-// node[124] / +528 bit0 / +530 type-byte reads).
+// node[124] / +528 bit0 reads, and the +533 type byte — HIBYTE of the dword
+// at +530: `mov eax,[esi+212h]; sar eax,18h` @0x5ac7ba).
 bool VtTestFlag(void* node, i16 walkMask) {
     auto* n = static_cast<const SceneDrawNode*>(node);
     // gilde.exe 0x5ac6d8 — VIBE_SceneGraph_TestNodeFlag (type byte -> mask bit).

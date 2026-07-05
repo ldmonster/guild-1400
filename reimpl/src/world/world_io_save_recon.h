@@ -54,8 +54,11 @@ void WorldIoSetLinkResolver(LinkResolver resolver);
 
 // VIBE_Event_WriteEventNames @0x5f4b60 is owned by the event module (out of this
 // slice). WriteObject's trailing call is routed through this hook; the default
-// (no hook) emits the no-events terminator (a single 0 byte). A hook receives the
-// sink's (buf,cap,&pos,&ok) and the event-name list head (node+468).
+// (no hook) emits the binary's null/empty-list terminator byte-exactly (a 4-byte
+// 0 count dword via Bio_WriteDwordPair — NOT a single byte; see 0x5f4b60). A list
+// with entries needs VIBE_EventTable_LookupIdToName, so without a hook the sink
+// fails instead of emitting unfaithful bytes. A hook receives the sink's
+// (buf,cap,&pos,&ok) and the event-name list head (node+468).
 using EventNamesHook = guild::u32 (*)(guild::u8* buf, guild::u32 cap, guild::u32* pos,
                                       bool* ok, guild::u8* listHead);
 void WorldIoSetEventNamesHook(EventNamesHook hook);

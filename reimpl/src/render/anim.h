@@ -19,10 +19,12 @@ namespace guild::render {
 // t*(b-a); for IEEE floats this is commutative so the result is identical. Returns a.
 const float* VectorLerp(const float* a, const float* b, float t, float* out);
 
-// A single keyframe's translation sample (the +32/+36/+40 float triple the original
-// read from each 192-byte bone-frame record). The full record carries rotation and
-// flags too; the translation blend below only needs these three.
+// A single keyframe's duration + translation sample (the +0x04 dword and the
+// +32/+36/+40 float triple the original reads from each 192-byte bone-frame
+// record: durations at record+4 @0x5cbc39/0x5cbc6b, translation @+0x20/24/28).
+// The full record carries rotation and flags too; the blend needs only these.
 struct BoneKeyframe {
+    int   dur; // +0x04 — per-frame segment duration (phase denominator)
     float tx;  // +0x20 (frame+32)
     float ty;  // +0x24 (frame+36)
     float tz;  // +0x28 (frame+40)
@@ -36,20 +38,20 @@ struct BoneKeyframe {
 // adds the bone's base translation. This function reconstructs that accumulation in
 // isolation, given the keyframe array and the phase parameters:
 //
-//   keys      : array of per-frame translation samples (192-byte stride in the
-//               original; here a flat BoneKeyframe array indexed by frame).
-//   fromFrame : current frame index (v35 / v27 in the original)
-//   toFrame   : target frame index
-//   phaseNum  : numerator of the sub-frame phase (v29 .. v31 progression)
-//   segLen    : per-segment length (v28 = frames[from].duration)
-//   out       : receives the accumulated translation delta (3 floats), BEFORE the
-//               bone-matrix rotation and base-translation add (those are applied by
-//               the caller; see UpdateSkeletonPose, not reconstructed here).
+//   keys        : array of per-frame duration+translation samples (192-byte stride
+//                 in the original; here a flat BoneKeyframe array indexed by frame).
+//   fromFrame   : current frame index (v35 = obj+0x0C in the original)
+//   toFrame     : target frame index (v27 = ecx arg)
+//   curPhase    : current sub-frame phase at fromFrame (v29 = obj+0x10)
+//   targetPhase : target sub-frame phase at toFrame (v31 = ebx arg)
+//   out         : receives the accumulated translation delta (3 floats), BEFORE the
+//                 bone-matrix rotation and base-translation add (those are applied
+//                 by the caller; see UpdateSkeletonPose, not reconstructed here).
 //
-// At from==to with phaseNum==segLen the delta equals the full from->to translation
-// difference; intermediate phases prorate linearly. Matches the original's
-// (delta * phase/segLen) accumulation.
+// Leading segment prorated by 1 - curPhase/keys[fromFrame].dur; trailing segment by
+// targetPhase/keys[toFrame].dur — or (targetPhase-curPhase)/keys[toFrame].dur when
+// fromFrame == toFrame (branch @0x5cbe08). No zero guards on the durations.
 void AccumulateBoneTranslation(const BoneKeyframe* keys, int fromFrame, int toFrame,
-                               int phaseNum, int segLen, float* out);
+                               int curPhase, int targetPhase, float* out);
 
 } // namespace guild::render

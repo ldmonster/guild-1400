@@ -285,7 +285,10 @@ TEST(InputRecon4, StoreDefaultEntry_WorkProduct) {
     ResetModule();
     static u8 bld[8];  bld[0] = 5;       // type byte != 29
     put4(bld, 1, 1234);                  // building id @+1
-    static u8 obj[8];  put4(obj, 1, 5678); // object id @+1 (StoreDefaultEntry uses +1)
+    static u8 obj[8];  put4(obj, 2, 5678); // object id @+2 — disasm 0x4ff97a
+                                           // `mov edx, [ecx+2]` (the decompile's
+                                           // `*(WorkProductObject + 1)` is __int16*
+                                           // arithmetic, i.e. byte +2)
 
     HotkeyHooks h;
     h.buildingFindWorkProduct = [&](u8* b) -> u8* { return b == bld ? obj : nullptr; };
@@ -301,7 +304,7 @@ TEST(InputRecon4, StoreDefaultEntry_WorkProduct) {
 TEST(InputRecon4, StoreDefaultEntry_StorableFallback) {
     ResetModule();
     static u8 bld[8];  bld[0] = 1;  put4(bld, 1, 11);
-    static u8 obj[8];  put4(obj, 1, 22);
+    static u8 obj[8];  put4(obj, 2, 22);   // object id @+2 (disasm 0x4ff97a)
     HotkeyHooks h;
     h.buildingFindWorkProduct = [&](u8*) -> u8* { return nullptr; };  // no work product
     h.buildingFindStorable    = [&](u8* b) -> u8* { return b == bld ? obj : nullptr; };

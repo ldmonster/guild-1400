@@ -173,51 +173,71 @@ int GameLogicEntities(i16 scrX, i16 scrY, int entityIdx, int out,
     if (idx <= entityCount) {
         int v6 = (idx >= 0 && idx <= entityCount) ? entities[idx].kind : 0; // +60
         int v7 = -1;       // partner index (-1 => no redirect happened)
+        int v12 = 0;       // ecx — state handle (xor ecx,ecx @0x413598)
 
         // if ( (v6 == 5 || v6 == 8) && !*(_DWORD *)(rec(idx)+48) )
         if ((v6 == 5 || v6 == 8) && entities[idx].suppress == 0) {
             int partner = entities[idx].linkIndex; // *(rec(idx)+76)
-            // if ( !*(_DWORD *)(rec(partner)+52) ) VIBE_State_Update(idx);
+            // if ( !*(_DWORD *)(rec(partner)+52) ) ecx = VIBE_State_Update(idx);
+            // (0x41360f call + 0x413614 mov ecx, eax — the result IS kept.)
             if (partner >= 0 && partner <= entityCount &&
                 entities[partner].stateHandle == 0) {
                 if (hooks.stateUpdate)
-                    hooks.stateUpdate(idx);
+                    v12 = hooks.stateUpdate(idx);
             }
             v7 = idx;
             idx = partner;  // *(int *)v13 = *(rec(idx)+76)
         }
-        // else if ( !*(_DWORD *)(rec(idx)+52) ) VIBE_State_Update(idx);
+        // else if ( !*(_DWORD *)(rec(idx)+52) ) ecx = VIBE_State_Update(idx);
+        // (0x41374d call + 0x413752 mov ecx, eax)
         else if (idx >= 0 && idx <= entityCount && entities[idx].stateHandle == 0) {
             if (hooks.stateUpdate)
-                hooks.stateUpdate(idx);
+                v12 = hooks.stateUpdate(idx);
         }
 
         // if ( (*(_BYTE *)(rec(idx)+68) & 2) != 0 ) idx += byte_62D220;
         if (idx >= 0 && idx <= entityCount && (entities[idx].flag68 & 2) != 0)
             idx += hooks.gridOffset;
 
-        // blob index: v7 == -1 ? 21*idx : 21*v7  (the 21-dword state row).
+        // 0x413663: if ( !ecx ) ecx = *(rec(idx)+52);  — the state-handle
+        // fallback loads the POST-redirect/POST-offset record's +52 dword.
+        if (v12 == 0 && idx >= 0 && idx <= entityCount)
+            v12 = entities[idx].stateHandle;
+
+        // blob index: v7 == -1 ? 21*idx : 21*v7  (21 dwords == the 84-byte rec).
         int blobIdx = (v7 == -1) ? idx : v7;
-        // result = VIBE_DecompressState_Blob(out, *(rec_state(blobIdx)+60));
-        int blob = hooks.stateBlob ? hooks.stateBlob(blobIdx) : 0;
+        // 0x4136a4: edx = *(dword_62D204 + 4*(21*blobIdx) + 60) — the +60 dword
+        // of record blobIdx (the same dword the kind reads use).
+        int blob = hooks.stateBlob
+                       ? hooks.stateBlob(blobIdx)
+                       : ((blobIdx >= 0 && blobIdx <= entityCount)
+                              ? entities[blobIdx].kind
+                              : 0);
+        // result = VIBE_DecompressState_Blob(out, blob);
         result = hooks.decompressBlob ? hooks.decompressBlob(out, blob) : 0;
 
         if (result) {
-            unsigned v11 = (idx >= 0 && idx <= entityCount)
-                               ? static_cast<unsigned>(entities[idx].kind)
-                               : 0u;
+            // 0x4136b3: cmp edx, 5 — the dispatch selector is the BLOB VALUE
+            // itself (edx survives the call), i.e. the +60 dword of the blobIdx
+            // record — NOT the post-redirect record's kind.
+            const unsigned v11 = static_cast<unsigned>(blob);
             bool doBasic = false;
             // if ( v11 >= 5 ) { if (v11>5 && v11!=8) goto L16;
-            //                   if (v7 != -1) { Animation_Basic(...,v7-idx); goto L16; } }
+            //                   if (v7 != -1) { Animation_Basic(..., (u8)(v7-idx)); goto L16; } }
             // else if ( !v11 || v11>1 && v11!=4 ) goto L16;
             // Animation_Basic(...,0);
             if (v11 >= 5) {
                 if (v11 > 5 && v11 != 8) {
                     /* goto LABEL_16 */
                 } else if (v7 != -1) {
-                    // VIBE_Animation_Basic(v4, scrY>>16, v12, out, v7 - v13[0]);
+                    // 0x41377d..0x41378f: al = (u8)v7 - (u8)idx; and eax, 0FFh;
+                    // push eax — the delta is a BYTE subtraction zero-extended.
+                    // 3rd arg (ecx) is the state handle v12 (0x4136d5 call path).
                     if (hooks.animationBasic)
-                        hooks.animationBasic(v4, scrY, blob, out, v7 - idx);
+                        hooks.animationBasic(
+                            v4, scrY, v12, out,
+                            static_cast<int>(
+                                static_cast<u8>(v7 - idx)));
                     /* goto LABEL_16 */
                 } else {
                     doBasic = true;
@@ -229,14 +249,17 @@ int GameLogicEntities(i16 scrX, i16 scrY, int entityIdx, int out,
             }
 
             if (doBasic) {
-                // VIBE_Animation_Basic(v4, scrY>>16, v12, out, 0);
+                // VIBE_Animation_Basic(v4, scrY>>16, ecx=v12, out, 0);
                 if (hooks.animationBasic)
-                    hooks.animationBasic(v4, scrY, blob, out, 0);
+                    hooks.animationBasic(v4, scrY, v12, out, 0);
             }
 
-            // LABEL_16: VIBE_State_GetCurrent(v4, scrY>>16, rec(idx)+80>>16, rec(idx)+78>>16);
-            i32 w = (idx >= 0 && idx <= entityCount) ? entities[idx].subStateA : 0;
-            i32 h = (idx >= 0 && idx <= entityCount) ? entities[idx].subStateB : 0;
+            // LABEL_16 (0x4136da..0x41370c):
+            //   VIBE_State_GetCurrent(v4, scrY,
+            //       *(int *)(rec(idx)+0x50) >> 16,   // = i16 at +82 (subStateHi)
+            //       *(int *)(rec(idx)+0x4E) >> 16);  // = i16 at +80 (subStateLo)
+            i32 w = (idx >= 0 && idx <= entityCount) ? entities[idx].subStateHi : 0;
+            i32 h = (idx >= 0 && idx <= entityCount) ? entities[idx].subStateLo : 0;
             if (hooks.stateGetCurrent)
                 hooks.stateGetCurrent(v4, scrY, w, h);
             // return VIBE_Decompression_Finalize(out);

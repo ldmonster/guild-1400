@@ -63,19 +63,18 @@ TEST(ProdSlotsItest, CapacityMatchesRealInventoryTable) {
     ProdSlotCollect out;
     int rc = InventoryCollectProductionSlots(nodes, out);
     CHECK_EQ(rc, 1);
-    CHECK_EQ(out.count, 4);
+    CHECK_EQ(out.count, 3);              // children only (0x59231d)
 
-    // Root type 100 != 477 -> each slot's capacity == real per-level table.
+    // 0x59234d/0x5923e1: capacity keys on the ROOT node's type AND level for
+    // EVERY slot — root {100,1} -> 20*1 == the real table's value for the root.
+    int want = RealSlotCapacity(nodes[0].type, nodes[0].level);
     int expectTotal = 0;
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        int want = RealSlotCapacity(nodes[i].type, nodes[i].level);
-        // CollectProductionSlots keys capacity on the ROOT type; for a non-highcap
-        // root that is exactly the per-level branch, matching the table for any type.
+    for (size_t i = 0; i + 1 < nodes.size(); ++i) {
         CHECK_EQ(out.caps[i], want);
         expectTotal += want;
     }
     CHECK_EQ(out.capTotal, expectTotal);
-    CHECK_EQ(out.levTotal, 1 + 2 + 3 + 5);
+    CHECK_EQ(out.levTotal, 2 + 3 + 5);   // per-slot levels (children)
 }
 
 // ===========================================================================
@@ -90,8 +89,10 @@ TEST(ProdSlotsItest, WorthViaRealPriceModel) {
     ProdSlotCollect out;
     InventoryCollectProductionSlots(nodes, out);
 
-    double want = Building_ComputeMarketPrice(200, 100) * 2.0
-                + Building_ComputeMarketPrice(201, 100) * 3.0;
-    // exact: same calls, same operands.
-    CHECK(out.worth == want);
+    // nodes[0] is the root (not a slot); worth accumulates the CHILD slots as
+    // an int with a per-iteration truncation (fistp at 0x5923b8), the level
+    // narrowed to float first (0x59239e).
+    int want = static_cast<int>(
+        Building_ComputeMarketPrice(201, 100) * static_cast<double>(3.0f) + 0.0);
+    CHECK(out.worth == static_cast<double>(want));
 }

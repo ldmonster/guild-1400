@@ -229,16 +229,28 @@ TEST(GameTickRecon4, AdvanceTurnTimer_category1TableLookup) {
     CHECK_EQ(fired, 89);
     CHECK_EQ(st.pending, 1);
 
-    // table A index 8 -> 2; picked = 3 -> kind 80
+    // table A index 8 -> 1 (get_bytes @0x577954: index 8 is 1, not 2 —
+    // old pin was a transcription bug); picked = 2 -> kind 78
     emit.clear();
     TurnTimerState st2;
     st2.phase = 1; st2.base = 2.0f; st2.threshold = 1.0f; st2.category = 1;
     g_rm = 8;
     fired = 0;
     GameTick_AdvanceTurnTimer(st2, env, &fired);
-    CHECK_EQ(kEventWeightTableA[8], 2);
+    CHECK_EQ(kEventWeightTableA[8], 1);
+    CHECK_EQ(fired, 78);
+    CHECK_EQ(st2.pending, 2);
+
+    // table A index 9 -> 2; picked = 3 -> kind 80
+    emit.clear();
+    TurnTimerState st3;
+    st3.phase = 1; st3.base = 2.0f; st3.threshold = 1.0f; st3.category = 1;
+    g_rm = 9;
+    fired = 0;
+    GameTick_AdvanceTurnTimer(st3, env, &fired);
+    CHECK_EQ(kEventWeightTableA[9], 2);
     CHECK_EQ(fired, 80);
-    CHECK_EQ(st2.pending, 3);
+    CHECK_EQ(st3.pending, 3);
 }
 
 TEST(GameTickRecon4, AdvanceTurnTimer_forcedSuppressedWhenHandlerActive) {

@@ -23,11 +23,13 @@ DragSetVisibleHook     g_setVisible    = defSetVisible;
 DragBuildSliderRowHook g_buildSlider   = defBuildSliderRow;
 DragCommitStoreHook    g_commitStore   = defCommitStore;
 
-// LOWORD(x): the original adds the low 16 bits of the signed offset to the form
-// origin. Reproduce the exact 16-bit truncation (sign-extended back to int as the
-// `+ LOWORD(...)` to an int operand would be after the implicit widening).
-inline i32 loword(i32 v) {
-    return static_cast<i16>(static_cast<u16>(static_cast<u32>(v) & 0xFFFFu));
+// The original computes the widget position as a 16-bit add of the form-origin
+// word and the low word of the stored offset, THEN sign-extends the 16-bit sum
+// (gilde.exe 0x50b48b: `mov ax, word(yOff); add ax, [edx+6]; movsx edx, ax` and
+// 0x50b49d: `mov ax, word(xOff); add ax, [ecx+4]; cwde`). The wraparound happens
+// on the SUM, not on the offset alone.
+inline i32 addWord16(i32 origin, i32 off) {
+    return static_cast<i16>(static_cast<u16>(origin) + static_cast<u16>(off));
 }
 
 // The shared layout body. `rowPitch` is the per-row y accumulator step (28 / 35).
@@ -75,8 +77,8 @@ DragLayoutResult layoutCommon(const DragLayoutInputs& in, DragLayoutState& st,
             g_setVisible(st.objId[col], false); // field 52 = 1
         } else {
             g_setVisible(st.objId[col], true); // field 52 = 0
-            const i32 wx = in.formX + loword(st.xOff[col]);
-            const i32 wy = in.formY + loword(st.yOff[col]);
+            const i32 wx = addWord16(in.formX, st.xOff[col]);
+            const i32 wy = addWord16(in.formY, st.yOff[col]);
             res.widgetX[col] = wx;
             res.widgetY[col] = wy;
             g_layoutBounds(wx, wy, st.objId[col]);

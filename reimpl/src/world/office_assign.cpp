@@ -188,8 +188,8 @@ int OfficeApplyForCandidacy(OfficePersonRec& applicant, u8 officeType) {
 
     if (v7) {
         // Two-holder office: try to claim up to two open slots.
-        bool haveFirst = false; // v22 / v8
-        bool emit = false;      // v8 (any open found)
+        bool haveFirst = false; // v21
+        bool emit = false;      // v7 (first slot open)
         OfficeHolder& s0 = g_officeHolders[v4];
         if (s0.city == -1 && s0.state == 3 && s0.rank < 4) {
             emit = true;
@@ -197,19 +197,22 @@ int OfficeApplyForCandidacy(OfficePersonRec& applicant, u8 officeType) {
             applicantId = applicant.ownerId;
             holderA = s0.holder;
         }
-        // Advance to the next same-type slot.
-        int v4b = v4 + 1;
-        if (v4b < 30) {
-            int v11 = kOfficeHolderStride * v4b;
+        // Advance the SHARED cursor v4 to the next same-type slot — the binary
+        // mutates v4 in place (0x47e226 `if (++v4 < 30)` + rescan), and the
+        // LABEL_20 fallthrough below reuses that advanced cursor (second-slot
+        // index, or 30 when the rescan ran off the 720-byte bound).
+        ++v4;
+        if (v4 < 30) {
+            int v10 = kOfficeHolderStride * v4;
             do {
-                if (g_officeHolders[v4b].type == officeType)
+                if (g_officeHolders[v4].type == officeType)
                     break;
-                v11 += kOfficeHolderStride;
-                ++v4b;
-            } while (v11 < 720);
+                v10 += kOfficeHolderStride;
+                ++v4;
+            } while (v10 < 720);
         }
-        if (v4b < 30) {
-            OfficeHolder& s1 = g_officeHolders[v4b];
+        if (v4 < 30) {
+            OfficeHolder& s1 = g_officeHolders[v4];
             if (s1.city == -1 && s1.state == 3 && s1.rank < 4) {
                 if (!haveFirst) {
                     applicantId = applicant.ownerId;
@@ -224,7 +227,7 @@ int OfficeApplyForCandidacy(OfficePersonRec& applicant, u8 officeType) {
             }
         }
         if (!emit)
-            goto single_path; // !v8 -> fall to LABEL_20
+            goto single_path; // !v7 -> fall to LABEL_20 with the ADVANCED v4
 
         // LABEL_29: emit the candidacy command (one or two holders).
         {
@@ -236,6 +239,11 @@ int OfficeApplyForCandidacy(OfficePersonRec& applicant, u8 officeType) {
     }
 
 single_path:
+    // LABEL_20 (0x47e2c1): checks g_officeHolders[v4] — with the flag path's
+    // advanced cursor this is the second same-type slot (re-check fails: it was
+    // not open) or record 30 when no second slot exists (v4 capped at 30 by the
+    // 720-byte rescan bound; the holder table has 37 records, so record 30 is
+    // real data the original reads and can legitimately emit for).
     {
         OfficeHolder& s = g_officeHolders[v4];
         if (s.city != -1 || s.state != 3 || s.rank >= 4)
@@ -275,9 +283,11 @@ int OfficeAddEntryForCharacter(i32 cityId, const OfficePersonRec* successor,
     // GetHolderEntryByCity gates on the city's person record being valid + +358.
     if (!cityRec || !cityRec->valid || !cityRec->office358)
         return -1;
-    // Find the slot whose city (+4) == cityId.
+    // Find the slot whose city (+4) == cityId. GetHolderEntryByCity @0x47dfec
+    // bounds this scan at 30 records (`v8 += 6; if (v8 >= 180) break;` — 180
+    // dwords == 720 bytes), NOT the full 37-record table.
     bool found = false;
-    for (int i = 0; i < kOfficeDefCount; ++i) {
+    for (int i = 0; i < kOfficeHolderCount; ++i) {
         if (g_officeHolders[i].city == cityId) { entry = g_officeHolders[i]; found = true; break; }
     }
     if (!found || !successor)

@@ -544,17 +544,18 @@ void TrStoredBlock(DeflateState* s, int buf, unsigned stored_len, int last) {
 }
 
 // _tr_align — VIBE_Deflate_AlignBits @0x601b34.
+// NOTE: the binary reads the PREVIOUS block's last_eob_len for the `< 9` check
+// (load @0x601c24) and only stores 7 at the very end (@0x601d2b).
 void TrAlign(DeflateState* s) {
     SendBits(s, kStaticTrees << 1, 3);
     SendCode(s, kEndBlock, g_static_ltree);
-    s->last_eob_len = 7;
     BiFlush(s);
     if (1 + s->last_eob_len + 10 - s->bi_valid < 9) {
         SendBits(s, kStaticTrees << 1, 3);
         SendCode(s, kEndBlock, g_static_ltree);
-        s->last_eob_len = 7;
         BiFlush(s);
     }
+    s->last_eob_len = 7;
 }
 
 // _tr_flush_block — VIBE_Deflate_FlushBlock @0x601ea4.

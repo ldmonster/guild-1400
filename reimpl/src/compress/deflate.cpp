@@ -378,11 +378,10 @@ static int RunDeflate(DeflateState* s, int flush) {
     // header (status == INIT_STATE)
     if (s->status == kInitState) {
         unsigned header = (8 + ((s->w_bits - 8) << 4)) << 8; // Z_DEFLATED + cinfo
-        unsigned level_flags;
-        if (s->level < 2) level_flags = 0;
-        else if (s->level < 6) level_flags = 1;
-        else if (s->level == 6) level_flags = 2;
-        else level_flags = 3;
+        // gilde.exe 0x5ed5f0: level_flags = (level - 1) >> 1, clamped to 3
+        // (level 0 wraps to a huge value and clamps to 3 — zlib 1.1.4 formula).
+        unsigned level_flags = ((unsigned)s->level - 1) >> 1;
+        if (level_flags > 3) level_flags = 3;
         header |= (level_flags << 6);
         if (s->strstart != 0) header |= 0x20; // PRESET_DICT (unused here)
         header += 31 - (header % 31);

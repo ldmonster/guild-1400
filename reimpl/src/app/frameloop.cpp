@@ -83,9 +83,13 @@ int GameApp::RunFrameLoop(std::uint32_t featureMask) {
 
     // --- Outdoor music (music enabled & day-cycle) ---------------------------
     // if (dword_63C8F8 && (v54 & 0x40000) != 0) Music_UpdateOutdoorTrackPlayback();
-    // (folded into dayCycleAndOutdoorMusic; only emit standalone when render
-    //  world did not already run the day-cycle block above.)
-    if (has(v54, mask::kDayCycleMusic) && !has(v54, mask::kRenderWorld) && !headless)
+    // (gilde.exe 0x4c0d56 — the music test is on bit 0x40000 ALONE; it is not
+    //  gated by kRenderWorld or kHeadlessSuppress. Folded into
+    //  dayCycleAndOutdoorMusic: emit standalone exactly when the render-world
+    //  branch above did not already fire the fused hook, so the hook fires iff
+    //  bit 0x40000 is set — matching the binary's music gate.)
+    if (has(v54, mask::kDayCycleMusic) &&
+        !(has(v54, mask::kRenderWorld) && !headless))
         sub_.dayCycleAndOutdoorMusic();
 
     // --- Object update / HUD selection ---------------------------------------

@@ -79,15 +79,19 @@ TEST(Scene2ReconSmoke, SeasonMaskedToFour) {
 // ---------------------------------------------------------------------------
 // SpawnBuildingMesh bbox merge (pure kernel).
 // ---------------------------------------------------------------------------
-TEST(Scene2ReconBBox, MergeMinMaxOver20Verts) {
-    float verts[20 * 20];
+TEST(Scene2ReconBBox, MergeMinMaxOver8Verts) {
+    // gilde.exe 0x5036bc: the merge loop covers verts 1..7 ONLY (v16 runs
+    // v10+80 .. v10+640 step 80 bytes @0x503821/0x503838/0x503977); vert 0 is
+    // the seed. Old pin assumed 20 verts -> vert 9 contributed (4,-1,7); per
+    // the binary a vert beyond index 7 is never read.
+    float verts[8 * 20];
     std::memset(verts, 0, sizeof(verts));
     // vert0 = (1,1,1) seed
     verts[0] = 1.0f; verts[1] = 1.0f; verts[2] = 1.0f;
     // vert5 = (-3, 2, 0.5) -> pushes min x, max y
     verts[5 * 20 + 0] = -3.0f; verts[5 * 20 + 1] = 2.0f; verts[5 * 20 + 2] = 0.5f;
-    // vert9 = (4, -1, 7)    -> pushes max x, min y, max z
-    verts[9 * 20 + 0] = 4.0f; verts[9 * 20 + 1] = -1.0f; verts[9 * 20 + 2] = 7.0f;
+    // vert7 = (4, -1, 7)   -> pushes max x, min y, max z (last merged vert)
+    verts[7 * 20 + 0] = 4.0f; verts[7 * 20 + 1] = -1.0f; verts[7 * 20 + 2] = 7.0f;
     float mn[3], mx[3];
     SpawnBuildingMesh_MergeBBox(verts, mn, mx);
     CHECK_EQ(mn[0], -3.0f); CHECK_EQ(mx[0], 4.0f);
@@ -562,7 +566,10 @@ TEST(Scene2ReconDecor, IteratesSeasonListAndEmitsDecor) {
     g_decorIds.clear();
 
     guild::i32 last = Scene_SyncDecorObjects(h);
-    CHECK_EQ(last, 1);                  // last yielded person low word
+    // gilde.exe 0x501ddb: return (__int16)Begin — the iterator variable is
+    // exhausted (0) on every exit path, so the original always returns 0.
+    // (Old pin was 1 == "last yielded person"; proven wrong against the binary.)
+    CHECK_EQ(last, 0);
     // At least the secondary ids (458..467 range) should appear for season 30.
     bool sawDecor = false;
     for (int v : g_decorIds) if (v >= 458 && v <= 467) sawDecor = true;

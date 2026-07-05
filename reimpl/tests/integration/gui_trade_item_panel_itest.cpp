@@ -32,9 +32,10 @@ void Widget_LayoutBounds(int, int, int) {}
 namespace {
 std::string CurrName32(i32 id, void*) {
     // home (1) and none (0) are handled by the sort itself; the rest get localized
-    // names.  The world sort's rule swaps when name(j) > name(i), i.e. it orders the
-    // larger key toward the FRONT (descending).  Names chosen so currency 2 ("Bcur")
-    // outranks currency 3 ("Acur") and is pulled ahead.
+    // names.  The world sort's rule (gilde.exe 0x51b3ca via StrCmp @0x5d3f10) swaps
+    // when name(i) > name(j), i.e. it orders the SMALLER key toward the FRONT
+    // (ascending).  Names chosen so currency 3 ("Acur") outranks currency 2 ("Bcur")
+    // and is pulled ahead.
     if (id == 2) return "Bcur";
     if (id == 3) return "Acur";
     return "cur" + std::to_string(id);
@@ -87,14 +88,15 @@ TEST(GuiTradeItemPanelI, PopulateBuildsRealWidgetsAndChildLinks) {
 TEST(GuiTradeItemPanelI, ReorderUsesRealWorldSort) {
     // Drive the world sort directly with the same key function the gui re-sort uses,
     // proving the cross-module contract the populate routine relies on.
-    // Start with the SMALLER key first to force the descending swap to fire.
+    // Start with the LARGER key first to force the ascending swap to fire
+    // (gilde.exe 0x51b3ca swaps when name(i) > name(j)).
     std::vector<guild::world::SortSlot> view(2);
-    view[0].id = 20; view[0].currency = 3;  // "Acur" (smaller)
-    view[1].id = 10; view[1].currency = 2;  // "Bcur" (larger)
+    view[0].id = 10; view[0].currency = 2;  // "Bcur" (larger)
+    view[1].id = 20; view[1].currency = 3;  // "Acur" (smaller)
     int sortable = guild::world::TradeSortableCount(view);
     CHECK_EQ(sortable, 2);
     guild::world::TradeBuildSortedItemList(view, /*home*/1, CurrName32, nullptr);
-    // descending: currency 2 ("Bcur") is pulled to the front.
-    CHECK_EQ(view[0].currency, 2);
-    CHECK_EQ(view[1].currency, 3);
+    // ascending: currency 3 ("Acur") is pulled to the front.
+    CHECK_EQ(view[0].currency, 3);
+    CHECK_EQ(view[1].currency, 2);
 }

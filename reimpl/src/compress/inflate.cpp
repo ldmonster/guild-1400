@@ -471,11 +471,25 @@ static int InflateFast(unsigned bl, unsigned bd, InflateHuft* tl, InflateHuft* t
     unsigned k = s->bitk; // bits in bit buffer
     const u8* p = in;  // input data pointer
     std::size_t n = avail; // bytes available there
+    const std::size_t n0 = avail; // avail_in at entry (for UNGRAB)
     u8* q = s->write;  // output window write pointer
     unsigned m;        // bytes to end of window or read pointer
     unsigned ml = kMask[bl];
     unsigned md = kMask[bd];
     unsigned c, d;
+
+    // UNGRAB (zlib inffast.c) — gilde.exe 0x60a1f0 performs this on every exit
+    // path: return over-grabbed whole bytes from the bit buffer to the input
+    // stream (c = min(avail_in - n, k >> 3); n += c; p -= c; k -= c << 3).
+    // The bit buffer `b` is deliberately left untouched: refills re-OR the
+    // same bytes over their own copies.
+    auto ungrab = [&]() {
+        std::size_t cc = n0 - n;                 // bytes consumed this call
+        if ((std::size_t)(k >> 3) < cc) cc = k >> 3;
+        n += cc;
+        p -= cc;
+        k -= (unsigned)cc << 3;
+    };
 
     m = WindowFree(s, q);
 
@@ -552,6 +566,8 @@ static int InflateFast(unsigned bl, unsigned bd, InflateHuft* tl, InflateHuft* t
                         e = t->exop;
                         continue;
                     } else {
+                        // gilde.exe 0x60a1f0: "invalid distance code" exit
+                        ungrab();
                         s->bitb = b;
                         s->bitk = k;
                         avail = n;
@@ -573,6 +589,8 @@ static int InflateFast(unsigned bl, unsigned bd, InflateHuft* tl, InflateHuft* t
                 }
                 continue;
             } else if (e & 32) {                  // end of block
+                // gilde.exe 0x60a1f0: EOB exit also UNGRABs
+                ungrab();
                 s->bitb = b;
                 s->bitk = k;
                 avail = n;
@@ -580,6 +598,8 @@ static int InflateFast(unsigned bl, unsigned bd, InflateHuft* tl, InflateHuft* t
                 s->write = q;
                 return kZStreamEnd;
             } else {
+                // gilde.exe 0x60a1f0: "invalid literal/length code" exit
+                ungrab();
                 s->bitb = b;
                 s->bitk = k;
                 avail = n;
@@ -590,7 +610,8 @@ static int InflateFast(unsigned bl, unsigned bd, InflateHuft* tl, InflateHuft* t
         }
     } while (m >= 258 && n >= 10);
 
-    // not enough input or output -- restore pointers and return
+    // not enough input or output -- restore pointers (UNGRAB per 0x60a1f0) and return
+    ungrab();
     s->bitb = b;
     s->bitk = k;
     avail = n;

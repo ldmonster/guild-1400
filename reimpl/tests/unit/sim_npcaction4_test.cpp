@@ -221,7 +221,12 @@ TEST(NpcAction4_Patrol, Force1024_setsLapLoop_noActive_armsEntity29_3) {
     CHECK_EQ(He_State(h), 1024);         // lap loop stays in 1024
     CHECK(LogHas("entity29(3)"));        // all idle -> arm phase 3
     CHECK_EQ((int)He_ApptTime(h).minute, 2);
-    CHECK_EQ((int)He_ApptTime(h).day, -1);  // day sentinel
+    // Disasm 0x4ce4ea: mov dword ptr [eax+82h],-1 with eax=rec+0x52 → the -1
+    // store lands at rec+212 (the +212 force-1024 marker), NOT ApptTime.day.
+    // Old pin (day == -1) was based on a misread of the decompile; the appt day
+    // stays the stamped clock day and +212 is cleared to -1.
+    CHECK_EQ((int)He_ApptTime(h).day, 10);
+    CHECK_EQ((int)He_PatrolForce1024(h), -1);
     delete h;
 }
 
@@ -449,6 +454,7 @@ TEST(NpcAction4_Raid, State3_combatResolve_detected_to_stateMinus1) {
     SetClock(10, 9, 0, 0);
     HeRecord* h = NewHe();
     He_State(h) = 3;
+    He_Flags(h) = 2;   // 0x4cea84 case 4 gates the resolve on flag 0x02 (binary-proved)
     He_ReqHandle(h) = -1;
     He_FilterA4(h) = 100;
     He_CityIndex(h) = 4;
@@ -468,6 +474,7 @@ TEST(NpcAction4_Raid, State3_combatResolve_escorts_queues_cmd39) {
     SetClock(10, 9, 0, 0);
     HeRecord* h = NewHe();
     He_State(h) = 3;
+    He_Flags(h) = 2;   // 0x4cea84 case 4 gates the resolve on flag 0x02 (binary-proved)
     He_ReqHandle(h) = -1;
     He_FilterA4(h) = 100;
     He_Member8(h, 0) = 11;

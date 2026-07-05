@@ -102,44 +102,13 @@ std::vector<u8> MakeRampBmp(int side) {
 } // namespace
 
 // ---- Model_WriteFastChunk round-trips through the existing reader ----------
-// TWO-SIDED material bit: BuildGeometry propagates material +194 bit 1 (b2 & 2,
-// the loader's "flag0 BYTE2 |= 2" alpha/no-cull route) onto each poly as
-// flags36 bit 4 (projection backface-cull exemption) + flags38 bit 2 (raster
-// winding auto-reverse). Foliage crossed planes need BOTH faces (sparse-tree
-// regression pin). Materials without the bit keep zeroed flags.
-TEST(MeshAssetUnit, TwoSidedMaterialSetsPolyFlags) {
-    BgfModel m;
-    m.materialCount = 2;
-    m.vertexCount = 3;
-    m.polyCount = 2;
-    m.objectFlags = 0;
-    m.dummyCount = 0;
-    m.vertices.assign(m.vertexCount + 8, BgfVertex{});
-    m.vertices[1].pos[0] = 2;
-    m.vertices[2].pos[1] = 2;
-    for (int i = 0; i < 2; ++i) {
-        BgfPolygon q{};
-        q.vtx[0] = 0; q.vtx[1] = 1; q.vtx[2] = 2;
-        q.matIndex = i;
-        q.texId = -1;
-        m.polygons.push_back(q);
-    }
-    BgfMaterial matA{};                 // plain (one-sided)
-    matA.name0 = "WALL";
-    m.materials.push_back(matA);
-    BgfMaterial matB{};                 // foliage: key (bit0) + two-sided (bit1)
-    matB.name0 = "LAUB";
-    matB.b2 = 0x03;
-    m.materials.push_back(matB);
-
-    BgfGeometry g;
-    CHECK(BuildGeometry(m, g));
-    CHECK_EQ((int)g.polygons.size(), 2);
-    CHECK_EQ((int)(g.polygons[0].flags36 & 0x10), 0);       // one-sided: culls
-    CHECK_EQ((int)(g.polygons[0].flags38 & 0x04), 0);
-    CHECK_EQ((int)(g.polygons[1].flags36 & 0x10), 0x10);    // two-sided: kept
-    CHECK_EQ((int)(g.polygons[1].flags38 & 0x04), 0x04);    // + winding reverse
-}
+// NOTE: a former TwoSidedMaterialSetsPolyFlags test asserted BuildGeometry bakes
+// material b2&2 onto poly flags36 bit4 / flags38 bit2 at load. That was reverted:
+// (1) nothing in the render pipeline consumes those poly flags for two-sided /
+// backface handling (the flags were inert), and (2) city_view3d documents that
+// material +194 bit 1 (b2 & 2) is NOT the alpha/no-cull route. Correct two-sided
+// foliage rendering is a deferred hardening task, reconstructed where the engine
+// actually branches (projection cull / raster winding), not baked at load.
 
 TEST(MeshAssetUnit, FastChunkWriteReadRoundTrip) {
     std::vector<u8> bytes = MakeTriangleBgf();

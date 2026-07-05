@@ -54,30 +54,39 @@ i32 TradeTransportComputeCartCost(i32 goodValue, TransportMode mode) {
 // gilde.exe 0x53ff3c — VIBE_TradeTransport_ComputeCargoValue.
 //   for each slot: if id != -1 and qty != 0:
 //     price = LookupCachedMarketPrice(goodId, marketCtx);
-//     unit  = (ownerKind==10) ? price * 1.1 : price * priceMul;
-//     if (mode==2 || mode==4) unit = LookupCachedMarketPrice(goodId, sellContext);
-//     value += qty * unit;
+//     unit  = (float)((ownerKind==10) ? price * 1.1 : price * priceMul);  // fstp v15
+//     if (panelMode==2 || panelMode==4)
+//         unit = (float)LookupCachedMarketPrice(goodId, sellContext);
+//     value = (float)((double)qty * unit + value);                        // fstp v13
 //   result = -value;  (we return +value)
+// PRECISION (verified against the binary): the unit price (v15 @esp+8) and the
+// running total (v13 @esp+0) are 32-bit float stack slots — every product is
+// computed on the x87 in extended precision but stored back through `fstp
+// dword` each iteration. `panelMode` is the dispatcher's dl mode byte
+// (1 = market, 2 = import/contor 475, 4 = export/contor 476) — NOT the cart's
+// TransportMode; the original tests `a3 == 2 || a3 == 4`.
 // The original walks two physical slot arrays (8 + 16 entries); the caller
 // flattens both into `slots`. Behaviour is identical per slot.
 double TradeTransportComputeCargoValue(const std::vector<CargoSlot>& slots,
                                        bool ownerIsMarket, float priceMul,
                                        u8 marketCtx, u8 sellContext,
-                                       TransportMode mode) {
-    double value = 0.0;
-    bool sellAtContor = (mode == TransportMode::Medium); // mode 2; mode 4 not modeled here
+                                       int panelMode) {
+    float value = 0.0f;                                       // v13 (float slot)
+    bool sellAtContor = (panelMode == 2 || panelMode == 4);   // a3 == 2 || a3 == 4
     for (const CargoSlot& s : slots) {
         if (s.goodId == -1)
             continue;
         if (s.quantity == 0)
             continue;
         double price = TradeTransportLookupMarketPrice(s.goodId, marketCtx);
-        double unit = ownerIsMarket
+        float unit = static_cast<float>(ownerIsMarket
                           ? price * kMarketPriceFactor
-                          : price * static_cast<double>(priceMul);
+                          : price * static_cast<double>(priceMul));  // v15 (float slot)
         if (sellAtContor)
-            unit = TradeTransportLookupMarketPrice(s.goodId, sellContext);
-        value += static_cast<double>(s.quantity) * unit;
+            unit = static_cast<float>(
+                TradeTransportLookupMarketPrice(s.goodId, sellContext));
+        // fild qty; fmul v15; fadd v13; fstp v13 — 80-bit intermediate, float store.
+        value = static_cast<float>(static_cast<double>(s.quantity) * unit + value);
     }
     return value;
 }

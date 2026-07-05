@@ -103,7 +103,13 @@ std::string SortKey(i32 currency, i32 homeCurrency, CurrencyNameFn fn, void* ctx
 } // namespace
 
 // gilde.exe 0x51b26c sort core. Faithful to the original's nested loop and
-// swap-when-greater rule (StrCmp(name(j), name(i)) == 1).
+// swap rule: StrCmp(edx=name(j), eax=name(i)) == 1.
+// VIBE_Util_StrCmp @0x5d3f10 returns 1 when the SECOND (eax) operand is greater
+// at the first differing byte (0x5d3f89 cmp al,cl with al=eax-side; 0x5d3faa
+// sbb eax,eax / or al,1 -> CF(eax<edx) ? -1 : 1). The call site @0x51b3bc loads
+// edx=key(j) (esp buffer) and eax=key(i) (esp+0x80 buffer), so the swap fires
+// when name(i) > name(j): an ASCENDING order — "AAAAAAAAA" (home) first,
+// "ZZZZZZZZZ" (no currency) last.
 void TradeBuildSortedItemList(std::vector<SortSlot>& slots, i32 homeCurrency,
                               CurrencyNameFn nameFn, void* ctx) {
     int count = TradeSortableCount(slots);
@@ -111,8 +117,8 @@ void TradeBuildSortedItemList(std::vector<SortSlot>& slots, i32 homeCurrency,
         std::string keyI = SortKey(slots[i].currency, homeCurrency, nameFn, ctx);
         for (int j = i + 1; j < count; ++j) {
             std::string keyJ = SortKey(slots[j].currency, homeCurrency, nameFn, ctx);
-            // StrCmp(right=name(j), left=name(i)) == 1  <=>  name(j) > name(i).
-            if (keyJ > keyI) {
+            // StrCmp(keyJ, keyI) == 1  <=>  keyI > keyJ  (gilde.exe 0x51b3ca).
+            if (keyJ < keyI) {
                 std::swap(slots[i], slots[j]);
                 keyI = keyJ; // slots[i] now holds the (former) j record
             }

@@ -136,7 +136,9 @@ TEST(StatisticReconDump, Identity) {
     rec[13] = 6;                // religion idx
     putU16(rec, 10, 1500);      // word +10
     rec[357] = 8;               // location idx (*(int*)(rec+354)>>24 == rec[357])
-    rec[359] = 9;               // status idx (*(int*)(rec+356)>>24 == rec[359])
+    rec[356] = 9;               // status idx (*(int*)((char*)rec+353)>>24 == rec[356])
+                                // (0x594ff8: dword_8C3B48 index; pin was rec[359] before
+                                //  the +353 read was verified against the binary)
     char out[256];
     StatDumpNpcIdentity(rec, out, env);
     // round id marker kind name byte8 class word10 origin religion status location
@@ -337,7 +339,7 @@ TEST(StatisticReconDump, MaxIndexBytesIdentity) {
     std::strcpy(reinterpret_cast<char*>(rec) + 48, "N");
     char out[256];
     StatDumpNpcIdentity(rec, out, env);
-    // class/origin/status/location come from byte +9/+12/+359/+357 (all 0xFF here).
+    // class/origin/status/location come from byte +9/+12/+356/+357 (all 0xFF here).
     CHECK(std::string(out).find("\tC255\t") != std::string::npos);
     CHECK(std::string(out).find("\tO255\t") != std::string::npos);
     CHECK(std::string(out).find("\tS255\t") != std::string::npos);

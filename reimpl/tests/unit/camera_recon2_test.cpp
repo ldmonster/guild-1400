@@ -293,11 +293,14 @@ TEST(Camera2ReconZoomOut, ThreeBandDistClampBand3) {
     g_capDist = -1;
     Camera_ZoomOut(obj, cs, st, h, /*meshHandle*/ 7, 0, 0, 0);
     CHECK_EQ(g_capDist, 50);    // band 3: floored to minZoomDist
-    // posVec/angVec are the node world-translation triple (+132/+136/+140),
-    // i.e. obj.world (0.1,0.2,0.3) here. (Both posVec and angVec == v31.)
-    CHECK(feq(g_capPos[0], 0.1f));
-    CHECK(feq(g_capPos[1], 0.2f));
-    CHECK(feq(g_capPos[2], 0.3f));
+    // posVec is the EASED POSITION triple {v19,v20,v21} (disasm @0x4b5c8c:
+    // edx = &var_90 = &v19), NOT the world triple — harden fix old->new:
+    // (0.1,0.2,0.3) -> (0, 450, -1680). angVec (ebx @0x4b5c85 = &var_50 = v31)
+    // is the saved world triple. With inert hooks: v19=0; v20 = 0 + 450 +
+    // (1600-450)*0 = 450; v21 = -600 - (0 - (-600*1.8)) = -1680.
+    CHECK(feq(g_capPos[0], 0.0f));
+    CHECK(feq(g_capPos[1], 450.0f));
+    CHECK(feq(g_capPos[2], -1680.0f));
     CHECK(feq(g_capAng[0], 0.1f));
     CHECK(feq(g_capAng[1], 0.2f));
     CHECK(feq(g_capAng[2], 0.3f));
@@ -332,12 +335,13 @@ TEST(Camera2ReconOrientToTarget, ListenerKindAndFiniteAngles) {
     CHECK(std::isfinite(g_capAng[1]));
     CHECK_EQ((int)g_capAng[2], 0);   // v24 third angle component is 0
     // PINS the eye-offset constants flt_61DE74=600 / flt_61DE78=900 /
-    // flt_61DE88=-1.875 (camera_recon2.cpp:747-754,811). With this identity
-    // frame the bone-chain base is 0 and the local -Z axis maps to (-1,0,0)
-    // through the 3x3 (frame[107]=1): eye = (0 + -1*600, 0 + 0 + 900 - 1.875,
-    // 0) = (-600, 898.125, 0).
+    // flt_61DE88=700 (get_bytes @0x61DE88: 00 00 2f 44 = 700.0f; harden fix
+    // old->new: -1.875 -> 700, pin 898.125 -> 1600). With this identity frame
+    // the bone-chain base is 0 and the local -Z axis maps to (-1,0,0) through
+    // the 3x3 (frame[107]=1): eye = (0 + -1*600, 0 + 0 + 900 + 700, 0)
+    // = (-600, 1600, 0).
     CHECK(feq(g_capPos[0], -600.0f));
-    CHECK(feq(g_capPos[1], 898.125f));
+    CHECK(feq(g_capPos[1], 1600.0f));
     CHECK(feq(g_capPos[2], 0.0f));
 }
 

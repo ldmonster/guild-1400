@@ -3,7 +3,7 @@
 // See cloth_anim.h for the full provenance + the cloth-wave finding.
 //
 //   0x4b5d98  VIBE_Character_AttachFlag
-//   0x4b5e90  VIBE_Character_ShowFlag
+//   0x4b5e9c  VIBE_Character_ShowFlag
 //   0x4b5ef8  VIBE_Character_RefreshFlagAnimation
 //   0x4b62c0  VIBE_Character_CollectFlagNodes
 //
@@ -66,9 +66,10 @@ bool AttachFlag(FlagAnimHooks& H, const char* nodeName, void* node,
     // 0x4b5df2..0x4b5e0c — euler = {0, π, 0}; R = MatrixFromEuler(euler) (180° yaw).
     const float euler[3] = {0.f, kFlagYawPi, 0.f};
     Mat3 R = MatrixFromEuler(euler);
-    // 0x4b5e17 — ApplyParentTransform(obj, R).
+    // 0x4b5e17 — ApplyParentTransform(obj@eax, pos@edx = the bone-chain point,
+    // R@ebx). The position rides along (harden fix: it was dropped before).
     if (H.applyParentTransform)
-        H.applyParentTransform(H.ctx, obj, R.m);
+        H.applyParentTransform(H.ctx, obj, pos, R.m);
 
     // 0x4b5e1c..0x4b5e58 — heraldry texture set, only when heraldry != 0xFFFF.
     if (person.heraldry != kNoHeraldry) {
@@ -92,7 +93,7 @@ bool AttachFlag(FlagAnimHooks& H, const char* nodeName, void* node,
 }
 
 // =============================================================================
-// 0x4b5e90 — VIBE_Character_ShowFlag
+// 0x4b5e9c — VIBE_Character_ShowFlag
 // =============================================================================
 bool ShowFlag(FlagAnimHooks& H, const char* nodeName, FlagObject& obj,
               const FlagPerson& person, void* player) {

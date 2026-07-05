@@ -98,28 +98,40 @@ const double kD6268BC   = AsD(0x4020000000000000ULL); // 8.0
 const double kD6268CC   = AsD(0x408c200000000000ULL); // 900.0
 const float  kF6268D4   = AsF(0x42280000);            // 42.0
 
-// --- stat seed tables (get_bytes @0x582900; 28 floats / class, read every-other
-// => 14 values per class). flt_582900 = base, flt_582904 == flt_582900 + 4 bytes
-// (one float later) = base+delta. The static image is NOT zero-filled past the
-// first floats: get_bytes @0x582900 (CONFIRMED byte-for-byte) shows the flat float
-// array runs 2.0/3.0 alternating for indices 0..23, then 16.0,24.0,2.2,2.8,
-// 2.4,3.0,2.0,3.0,2.3,2.9,2.4,3.0,2.0,2.7. The no-game group is 0, so the loop
-// reads flt_582900[0..26] / flt_582904[0..26] (== flt_582900[1..27]). We model the
-// captured 40-float window verbatim; classes beyond it read 0.0 (the zero-filled
-// cold image for the unused new-game groups, which the new-game path never hits).
-const float kStat582900[40] = {
-    AsF(0x40000000), AsF(0x40400000), AsF(0x40000000), AsF(0x40400000), // 0..3   2,3,2,3
-    AsF(0x40000000), AsF(0x40400000), AsF(0x40000000), AsF(0x40400000), // 4..7
-    AsF(0x40000000), AsF(0x40400000), AsF(0x40000000), AsF(0x40400000), // 8..11
-    AsF(0x40000000), AsF(0x40400000), AsF(0x40000000), AsF(0x40400000), // 12..15
-    AsF(0x40000000), AsF(0x40400000), AsF(0x40000000), AsF(0x40400000), // 16..19
-    AsF(0x40000000), AsF(0x40400000), AsF(0x40000000), AsF(0x40400000), // 20..23
-    AsF(0x41800000), AsF(0x41c00000), AsF(0x400ccccd), AsF(0x40333333), // 24..27 16,24,2.2,2.8
-    AsF(0x4019999a), AsF(0x40400000), AsF(0x40000000), AsF(0x40400000), // 28..31 2.4,3,2,3
-    AsF(0x40133333), AsF(0x4039999a), AsF(0x4019999a), AsF(0x40400000), // 32..35 2.3,2.9,2.4,3
-    AsF(0x40000000), AsF(0x402ccccd), 0.f, 0.f };                       // 36..39 2,2.7
+// --- stat seed table (get_bytes @0x582900, full 896 bytes / 224 floats). ------
+// The stat loop (0x58ea8e..0x58eb2e) selects a per-GROUP row: `movsx eax,bl;
+// imul eax,0x70` (0x58ea91) — 112 bytes == 28 floats per group, 8 groups, index
+// flt_582900[28*group + i] with i = 0,2,..,26 (edi steps 8 bytes) and
+// flt_582904[...] == flt_582900[...+1]. An earlier transcription modeled only a
+// 40-float window and assumed the other groups were zero-filled — get_bytes
+// @0x582900 (896 B) shows all 8 groups populated. Byte-for-byte verified.
+const float kStat582900[224] = {
+    // group 0 @0x582900: 13x (2,3) then 16,24
+    2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f,
+    2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 2.0f,3.0f, 16.0f,24.0f,
+    // group 1 @0x582970
+    2.2f,2.8f, 2.4f,3.0f, 2.0f,3.0f, 2.3f,2.9f, 2.4f,3.0f, 2.0f,2.7f, 2.3f,2.9f,
+    2.5f,3.0f, 2.1f,2.7f, 2.5f,3.0f, 2.0f,2.6f, 2.4f,3.0f, 2.4f,3.0f, 16.0f,24.0f,
+    // group 2 @0x5829e0
+    2.2f,2.8f, 2.4f,3.0f, 2.0f,3.0f, 2.3f,2.9f, 2.4f,3.0f, 2.0f,2.7f, 2.3f,2.9f,
+    2.5f,3.0f, 2.1f,2.7f, 2.5f,3.0f, 2.0f,2.6f, 2.4f,3.0f, 2.4f,3.0f, 16.0f,24.0f,
+    // group 3 @0x582a50
+    2.2f,2.8f, 2.4f,3.0f, 2.0f,3.0f, 2.3f,2.9f, 2.4f,3.0f, 2.0f,2.7f, 2.3f,2.9f,
+    2.5f,3.0f, 2.1f,2.7f, 2.5f,3.0f, 2.0f,2.6f, 2.4f,3.0f, 2.4f,3.0f, 16.0f,24.0f,
+    // group 4 @0x582ac0
+    2.3f,2.8f, 2.3f,2.8f, 2.0f,3.0f, 2.3f,2.8f, 2.4f,3.0f, 2.2f,2.9f, 2.3f,2.9f,
+    2.5f,3.0f, 2.0f,2.6f, 2.4f,2.8f, 2.2f,2.8f, 2.4f,3.0f, 2.2f,3.0f, 16.0f,24.0f,
+    // group 5 @0x582b30
+    2.3f,2.8f, 2.3f,2.8f, 2.0f,3.0f, 2.3f,2.8f, 2.4f,3.0f, 2.2f,2.9f, 2.3f,2.9f,
+    2.5f,3.0f, 2.3f,2.8f, 2.4f,2.8f, 2.2f,2.8f, 2.3f,2.8f, 2.4f,3.0f, 16.0f,24.0f,
+    // group 6 @0x582ba0
+    2.3f,2.8f, 2.3f,2.8f, 2.0f,3.0f, 2.3f,2.8f, 2.4f,3.0f, 2.2f,2.9f, 2.2f,2.7f,
+    2.5f,3.0f, 2.5f,3.0f, 2.4f,2.7f, 2.3f,2.9f, 2.2f,2.8f, 2.0f,3.0f, 16.0f,24.0f,
+    // group 7 @0x582c10
+    2.4f,3.0f, 2.5f,3.0f, 2.0f,3.0f, 2.1f,2.9f, 2.5f,3.0f, 2.0f,2.5f, 2.5f,3.0f,
+    2.5f,3.0f, 2.5f,3.0f, 2.2f,3.0f, 2.0f,2.6f, 2.4f,3.0f, 2.2f,3.0f, 16.0f,24.0f };
 inline float Stat900(int idxFloats) {
-    return (idxFloats >= 0 && idxFloats < 40) ? kStat582900[idxFloats] : 0.f;
+    return (idxFloats >= 0 && idxFloats < 224) ? kStat582900[idxFloats] : 0.f;
 }
 // flt_582904 is flt_582900 shifted up one float: flt_582904[i] == flt_582900[i+1].
 inline float Stat904(int idxFloats) {
@@ -230,8 +242,10 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
     Put8 (rec, 0x164, args.a6);     // +356
     Put8 (rec, 0x165, args.a7);     // +357
 
-    // 0x58dc69: ownerWord-driven player-mode (cx==3/16/19 => +484=1, +13=2).
-    if (args.ownerWord == 3 || args.ownerWord == 16 || args.ownerWord == 19) {
+    // 0x58dc42 `mov bh,[ebp+2]` / 0x58dc69 `cmp bh,3` (then 16/19 at 0x58e4bb):
+    // the player-mode stamp is keyed on the KIND byte just stored at +2, NOT the
+    // ownerWord (an earlier transcription used args.ownerWord — disasm-refuted).
+    if (args.kind == 3 || args.kind == 16 || args.kind == 19) {
         PutI32(rec, 0x1E4, 1);
         Put8 (rec, 0x0D, 2);
     }
@@ -279,18 +293,21 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
         Put8(rec, 0x09, args.a8);
     }
     // 0x58e870: kind<4 or kind==11 => profession-driven gender override.
+    // 0x58dd38: a7 -> VIBE_Building_IsTypeInGroup(a7) (0x5898cc);
+    // 0x58e893: else a6 -> VIBE_Building_ClassifyTypeFlag(a6) (0x589818).
+    // (An earlier transcription routed both through GroupFromCode — wrong leaves.)
     if (k < 4 || k == 11) {
         u8 grp;
         bool haveGrp = true;
         if (args.a7) {
-            grp = BuildingType_GroupFromCode(args.a7);     // IsTypeInGroup-ish probe
+            grp = Building_IsTypeInGroup(args.a7);
         } else if (args.a6) {
-            grp = BuildingType_GroupFromCode(args.a6);
+            grp = Building_ClassifyTypeFlag(args.a6);
         } else {
             haveGrp = false;
             grp = 0;
         }
-        if (haveGrp && grp != 2) Put8(rec, 0x09, grp);
+        if (haveGrp && grp != 2) Put8(rec, 0x09, grp);   // 0x58dd3f/0x58dd41
     }
 
     // 0x58dd44: default wappen 1342; debug fortune (dword_63C7B8) => +400/+404=10.
@@ -359,28 +376,32 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
     }
 
     // LABEL_161: stat seed loop — 14 triples (0x58ea8a..0x58eb2e).
-    // record float triple at +0x88/+0x90/+0x80 (step +0xC).
+    // Row select 0x58ea91: `movsx eax,bl; imul eax,0x70` — bl == v108 (the
+    // GroupFromCode result), 112 bytes == 28 floats per group.
+    // Writes per iteration t: +0x88+12t (stat), +0x90+12t (900+r2), and — after
+    // `add esi,0Ch` at 0x58eb1f — [esi+0x80] == +0x8C+12t for the *0.001 spill
+    // (an earlier transcription wrote it to +0x80+12t; disasm-refuted).
     for (int t = 0; t < 14; ++t) {
-        const int fi = 2 * t;                       // float index (every-other)
+        const int fi = 28 * v108 + 2 * t;           // 0x58ea94 edx = edi + 0x70*grp
         const float base  = Stat900(fi);
         const float delta = Stat904(fi) - base;
         const int r1 = crt::RandNext();             // DRAW (stat value)
         const float stat = static_cast<float>(
             static_cast<double>(r1) * kRandScale * delta + base);
         const int r2 = static_cast<int>(static_cast<u16>(crt::RandNext() % 10)); // DRAW
-        const int off = 0x80 + 0xC * t;
-        PutF(rec, off + 0x08, stat);                                 // +0x88
-        PutF(rec, off + 0x10, static_cast<float>(static_cast<double>(r2) + kD6268CC)); // +0x90
-        PutF(rec, off + 0x00, static_cast<float>(stat * kD6268AC));  // +0x80
+        PutF(rec, 0x88 + 0xC * t, stat);                                 // 0x58ead0
+        PutF(rec, 0x90 + 0xC * t, static_cast<float>(static_cast<double>(r2) + kD6268CC)); // 0x58eb0d
+        PutF(rec, 0x8C + 0xC * t, static_cast<float>(stat * kD6268AC));  // 0x58eb25
     }
 
-    // 0x58eb34: fitness scalar -> +0x124 / +0x128.
+    // 0x58eb34: fitness scalar -> +0x124 / +0x128. 0x58eb59 is `fst` (not fstp):
+    // the +0x128 product uses the UNNARROWED x87 value, not the spilled float.
     {
         const int r = crt::RandNext();              // DRAW
-        const float v115 = static_cast<float>(
-            (static_cast<double>(r) * kRandScale + kD6268B4) * kD6268BC);
-        PutF(rec, 0x124, v115);
-        PutF(rec, 0x128, static_cast<float>(static_cast<double>(v115) * kD6268AC));
+        const double v115d =
+            (static_cast<double>(r) * kRandScale + kD6268B4) * kD6268BC;
+        PutF(rec, 0x124, static_cast<float>(v115d));
+        PutF(rec, 0x128, static_cast<float>(v115d * kD6268AC));
     }
 
     // 0x58eb74: relation-grid seeding loop — 768 iters, 2 draws each (1536).
@@ -420,8 +441,12 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
             Put8(rec, 0x80 + j, v121); // v118 pre-incs to v14+1 => +1+127 == +0x80
         }
     } else {
+        // 0x58ef39: `mov eax,[ebp+162h]; sar eax,18h` — the DYNASTY table row is
+        // the sign-extended byte at +0x165 (a7), NOT +0x164 (disasm-refuted; this
+        // branch runs only when a7 && !a6, so an a6 row would always be 0).
+        const int groupB = static_cast<i8>(rec[0x165]);
         for (int j = 0; j < 5; ++j) {
-            const u8 v135 = TalentADD(group, j);
+            const u8 v135 = TalentADD(groupB, j);
             u8 val;
             if (v135) {
                 const int span = (static_cast<double>(v135) < kF6268D4) ? 6 : 11;
@@ -483,7 +508,11 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
         // [1342,1350) not already used by any live person — the family wappen
         // dedup scan over dword_12CE964. (Player kind 6 keeps the 1342 default.)
         if (k == 7 || k == 5) {
+            // 0x58ed3f..0x58ed68: if every value 1342..1349 is taken the loop
+            // exits via `++v128 >= 1350 -> LABEL_188` WITHOUT storing (+0x54
+            // keeps the 1342 default) — only an unused value is written (0x58f0aa).
             int w = 1342;
+            bool found = false;
             for (; w < 1350; ++w) {
                 bool used = false;
                 for (int s = 0; s < kPersonCapacity; ++s) {
@@ -491,9 +520,10 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
                         used = true; break;
                     }
                 }
-                if (!used) break;
+                if (!used) { found = true; break; }
             }
-            PutI32(rec, 0x54, w);
+            if (found)
+                PutI32(rec, 0x54, w);
         }
         ++s_familyCount;       // ++dword_647720 (0x58ed6a)
         g_familyCount = s_familyCount; // keep the table module's mirror in lockstep
@@ -548,12 +578,39 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
             g_hooks.firstName(reinterpret_cast<char*>(rec + 0x30), 0, nameIdx);
     }
 
-    // 0x58e377: Newton refinement of +0x1C from +0x0A (no RNG draws).
+    // 0x58e377..0x58e41f: Newton-style refinement of +0x1C (no RNG draws).
+    //   v174 = (u16)word[+0x0A];              (fild — the ownerWord)
+    //   if ((double)v174 > +0x20 float) {
+    //     iters = ConvertX(v174 - +0x20);     (trunc)
+    //     x = +0x1C; repeat iters (if > 0, 0x58e3e4..0x58e3f3, all on x87):
+    //         x = x - (+0x14) + (+0x14)/x;
+    //     +0x1C = (bits(x) <= 0x3F800000 signed) ? 1.0f : x;   (0x58e405..0x58e41f)
+    //   }
+    // An earlier transcription stubbed this block out entirely (disasm-refuted).
     {
-        const float target = static_cast<float>(static_cast<u16>(GetI32(rec, 0x14) & 0xFFFF));
-        // (only when target > +0x20) — purely arithmetic; the field +0x1C result
-        // is appearance-only and depends on +0x14/+0x20 already written above.
-        (void)target;
+        const double target =
+            static_cast<double>(static_cast<u16>(GetI32(rec, 0x0A) & 0xFFFF));
+        const float f20 = GetF(rec, 0x20);
+        if (target > static_cast<double>(f20)) {                 // 0x58e392
+            const double diff = target - static_cast<double>(f20); // 0x58e3a2
+            const float v152 = GetF(rec, 0x14);                  // 0x58e39f
+            const int iters = static_cast<int>(util::ConvertX(diff)); // 0x58e3b1
+            float v147 = GetF(rec, 0x1C);                        // 0x58e3b8
+            if (iters > 0) {                                     // 0x58e3cd
+                // The iterate stays on the x87 stack across iterations (fstp
+                // only after the loop, 0x58e3f7) — model as double, narrow once.
+                double x = static_cast<double>(v147);
+                for (int i = 0; i < iters; ++i)
+                    x = x - static_cast<double>(v152) +
+                        static_cast<double>(v152) / x;           // 0x58e3ed
+                v147 = static_cast<float>(x);                    // 0x58e3f7
+            }
+            i32 bits;
+            std::memcpy(&bits, &v147, 4);
+            if (bits <= 0x3F800000)                              // 0x58e40b (signed)
+                bits = 0x3F800000;                               // 1.0f
+            PutI32(rec, 0x1C, bits);                             // 0x58e41f
+        }
     }
 
     // 0x58e429: head-bone resolve (scene-graph leaf) — named hook.
@@ -562,8 +619,10 @@ u16 DefaultPersonCreate(const PersonSpawnArgs& args) {
     std::memset(rec + 218, 0, 16);
     // 0x58e43d: ResetAiTarget — clears the AI target slot (no RNG); modeled inert.
 
-    // 0x58f12c: kind in {3,4,2,19} => one RandNext for the +130 stat boost.
-    if (k == 3 || k == 4 || k == 2 || k == 19) {
+    // 0x58e442: reads the RECORD kind byte (+2) — which the kind-16 avatar remap
+    // rewrote to 3 — not the spawn-arg kind. {3,4,2,19} => one RandNext boost.
+    const u8 kNow = rec[0x02];
+    if (kNow == 3 || kNow == 4 || kNow == 2 || kNow == 19) {
         const int r = crt::RandNext();            // DRAW
         const int slot = static_cast<int>(static_cast<u16>(r % 3));
         rec[0x82 + slot] = static_cast<u8>(rec[0x82 + slot] + 42);

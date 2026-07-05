@@ -577,13 +577,15 @@ MenuButtonRect MenuButtonScreenRect(int designY, int fbW, int fbH, int designW) 
     // native px; _BUTTON_RED record height +82 = 33).
     const int ox = (fbW - kDesignW) / 2;   // horizontal centering offset
     const int oy = (fbH - kDesignH) / 2;   // vertical centering offset
-    // GROUND TRUTH (frida, live gilde.exe @800x600): every menu button widget is
-    // x=258, y=160+designY, w=300, h=33 — a FIXED 300px width (the full menu-window
-    // width), NOT sized to the label. Read directly from dword_69FFB4[id]+0x14.
-    (void)designW;
-    const int dx = kBtnScreenX0 + ox;      // 258 at 800x600, center-translated
-    const int dy = kWinY + designY + oy;   // 160 + designY
-    return { dx, dy, kBtnFullW, kBtnDesignH };  // 300 x 33
+    // The sprite is AddSpriteToWindow(kMainMenuButtonX=32, designY, _BUTTON_RED)
+    // inside the MENU\MAIN_MENU window at (232,160): screen x = 232+32 = 264.
+    // VIBE_Window_NormalizeSpriteWidths @0x416658 sets the button WIDTH (widget
+    // +20 = max(widestLabel+8, 128)) but does NOT move its x (+14) — so the
+    // rect x is the AddSprite position, and the width is the caller's normalized
+    // designW. (Native px; only center-translated for the screen resolution.)
+    const int dx = kWinX + gui::kMainMenuButtonX + ox;   // 232 + 32 = 264
+    const int dy = kWinY + designY + oy;                  // 160 + designY
+    return { dx, dy, designW, kBtnDesignH };
 }
 
 NativeMenuResult RunNativeMainMenu(shim::IGraphicsDevice& device, shim::IPlatform& plat,

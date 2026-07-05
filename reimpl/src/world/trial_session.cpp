@@ -6,12 +6,26 @@
 // state-machine structure: the phase order, the per-phase transitions and the
 // per-phase rules-core call + cutscene/voice/GUI invocation points (deferred
 // leaves, fired through TrialSessionLeaves so the call sequence is testable).
+//
+// Phase semantics verified against the binary (hardening pass):
+//   * PROZESS_3 branches on the DEFENDANT's panel value == 1 (the plea):
+//     `mov ecx, dword_11AB094[edx]` @0x4a1adb, `cmp ecx,1` @0x4a1b24. The
+//     favorability fine-adjust (flt_61CCF4/61CCF8) runs INSIDE the plea==guilty
+//     branch (fmul @0x4a1b3e), not at sentencing.
+//   * Torture is entered from the plea!=guilty branch when the torturer person
+//     (ctx+72) resolves AND the evidence count > 2 (`if (v327 && v314 > 2)
+//     v279[0] = 1`).
+//   * When torture proceeds, the wealth-score-B fine (v292/3, three
+//     QueueRequest16) is committed immediately, BEFORE the instrument scene.
+//   * The jury tally (v313 = sum of the three panel rows; >= 2 -> acquit)
+//     happens at PROZESS_6_ABSTIMMUNG, and the PROZESS_7 sentence fine uses
+//     wealth-score-A (v291/3) — NOT the evidence score.
 
 namespace guild::world {
 
 // ---------------------------------------------------------------------------
 // gilde.exe @0x49D658 — torture-instrument .esc scene table (16-byte stride,
-// 7 entries). Recovered via get_string.
+// 7 entries). Byte-verified via get_bytes (hardening pass).
 // ---------------------------------------------------------------------------
 const char* const kTrialTortureEsc[kTrialTortureInstrumentCount] = {
     "dschraube.esc",   // +0x00  Daumenschraube (thumbscrew)
@@ -80,39 +94,59 @@ TrialPhase TrialSessionStep(TrialSession& s, const TrialSessionLeaves& leaves) {
         s.phase = TrialPhase::kAccusation;
         break;
 
-    // --- kAccusation (0x4a1853): present evidence; the rules core sums the
-    //     evidence score (penalty * wanted-weight) over the collected crimes.
+    // --- kAccusation (PROZESS_2 VORWURF): present evidence; the rules core sums
+    //     the evidence score (penalty * wanted-weight) over the collected crimes
+    //     (the v318 accumulation loop; v280 = v318 @0x4a15f6 seeds the running
+    //     score).
     case TrialPhase::kAccusation:
         s.score = TrialComputeEvidenceScore(st.evidence, st.evidenceCount,
                                             st.maxWantedLevel,
                                             s.lawLookup, s.lawCtx);
         s.runningScore = s.score.score;
         FireVoice(leaves, kSbfAccusation);
-        s.phase = TrialPhase::kJuryVerdict;
+        s.phase = TrialPhase::kPlea;
         break;
 
-    // --- kJuryVerdict (0x4a1d3b / 0x4a1de4): tally juror votes -> the
-    //     SCHULDIG / NICHT_SCHULDIG branch (voice bank picked by verdict).
-    case TrialPhase::kJuryVerdict:
-        s.verdict = TrialTallyVerdict(st.juryVotes, st.juryCount, &s.voteTotal);
-        FireVoice(leaves, s.verdict == TrialVerdict::kConvicted ? kSbfGuilty3
-                                                                : kSbfNotGuilty3);
-        // Torture is only reached on the convicted path that elects to torture.
-        if (s.verdict == TrialVerdict::kConvicted && st.torture)
-            s.phase = TrialPhase::kTorture;
-        else
+    // --- kPlea (PROZESS_3): the DEFENDANT's plea, read from his panel row
+    //     (dword_11AB094[215*row] @0x4a1adb; `cmp ecx,1` @0x4a1b27).
+    //     Guilty plea  -> PROZESS_3_SCHULDIG + the favorability fine-adjust
+    //                     (v280 = v318 - fav*(v318*0.2f)*0.01f @0x4a1b3e..6e).
+    //     Not guilty   -> PROZESS_3_NICHT_SCHULDIG; torture is entered only
+    //                     when the torturer (ctx+72) resolves and the evidence
+    //                     count exceeds 2 (`if (v327 && v314 > 2) v279[0]=1`).
+    case TrialPhase::kPlea:
+        if (st.defendantPleadsGuilty) {
+            FireVoice(leaves, kSbfGuilty3);
+            s.runningScore = TrialApplyGuiltyFine(s.runningScore,
+                                                  st.judgeFavorability);
             s.phase = TrialPhase::kVoteAnnounce;
+        } else {
+            FireVoice(leaves, kSbfNotGuilty3);
+            if (st.torturerPresent && st.evidenceCount > 2)
+                s.phase = TrialPhase::kTorture;
+            else
+                s.phase = TrialPhase::kVoteAnnounce;
+        }
         break;
 
-    // --- kTorture (0x4a21ff / 0x4a2392 / 0x4a2e2b): play the torture intro, the
-    //     chosen instrument .esc, then the result; scale the running score by
-    //     the confess/deny multiplier. The choice GUI is a deferred leaf.
+    // --- kTorture (v279[0]==1 block): the torture-cost fine (wealth-score-B / 3
+    //     to each of the three court seats, the QueueRequest16 triple right
+    //     after the table setup) is committed BEFORE the instrument scene; then
+    //     the torture intro, the chosen instrument .esc, and the result; the
+    //     running score is scaled by the confess/deny multiplier
+    //     (v164 = v280 * flt_61CCFC / flt_61CD00, applied under `if (v297)`).
     case TrialPhase::kTorture: {
-        FireForm(leaves, "BuildTortureChoiceForm");      // 0x4a3dc8 (deferred)
+        s.tortureFine = TrialCommitFine(st.defendantObj, st.judgeObj,
+                                        st.assessorAObj, st.assessorBObj,
+                                        st.wealthScoreB, st.currency);
+        FireForm(leaves, "BuildTortureChoiceForm");      // torture-choice panel
         FireVoice(leaves, kSbfFolter1);
+        // Instrument index: the original reads (panel & 0xF) then clamps
+        // `<= 0 -> 0`, `>= 6 -> 6` (the v330 clamp).
         int inst = st.tortureInstrument;
-        if (inst < 0) inst = 0;
-        if (inst >= kTrialTortureInstrumentCount)
+        if (inst <= 0)
+            inst = 0;
+        else if (inst >= kTrialTortureInstrumentCount - 1)
             inst = kTrialTortureInstrumentCount - 1;
         FireTorture(leaves, kTrialTortureEsc[inst]);     // PROZESS_5_FOLTER2_%s
         FireVoice(leaves, kSbfFolter2Fmt);
@@ -123,27 +157,28 @@ TrialPhase TrialSessionStep(TrialSession& s, const TrialSessionLeaves& leaves) {
         break;
     }
 
-    // --- kVoteAnnounce (0x4a2ec4 / 0x4a3346): announce + play the vote-result
-    //     voice (the ABSTIMMUNG_ERGEBNISSE bank). No rules-core mutation.
+    // --- kVoteAnnounce (PROZESS_6 ANKUENDIGUNG + ABSTIMMUNG): announce, then
+    //     tally the jury votes — v313 sums the judge's and (present) assessors'
+    //     panel rows; `if (v313 >= 2)` -> NICHT_SCHULDIG (the acquit branch of
+    //     PROZESS_7).
     case TrialPhase::kVoteAnnounce:
-        FireForm(leaves, "BuildElectionForm");           // 0x4a0610 (deferred)
+        FireForm(leaves, "BuildElectionForm");           // vote panel (deferred)
         FireVoice(leaves, kSbfAnnounce);
         FireVoice(leaves, kSbfVoteResults);
+        s.verdict = TrialTallyVerdict(st.juryVotes, st.juryCount, &s.voteTotal);
         s.phase = TrialPhase::kSentence;
         break;
 
-    // --- kSentence (0x4a34cd / _STRAFEN / _NICHT_SCHULDIG / PROZESS_8):
-    //     convicted -> favorability-weighted guilty fine + three-way commit;
-    //     acquitted -> the NICHT_SCHULDIG voice, no fine. Always close (PROZESS_8).
+    // --- kSentence (PROZESS_7): convicted -> PROZESS_7_SCHULDIG + the sentence
+    //     fine (wealth-score-A / 3 to each seat: `v246 = v291 / 3` + three
+    //     QueueRequest16) + PROZESS_7_STRAFEN; acquitted -> NICHT_SCHULDIG, no
+    //     fine. Always close with PROZESS_8.
     case TrialPhase::kSentence:
         if (s.verdict == TrialVerdict::kConvicted) {
             FireVoice(leaves, kSbfGuilty7);
-            s.runningScore = TrialApplyGuiltyFine(s.runningScore,
-                                                  st.judgeFavorability);
             s.perSeatFine = TrialCommitFine(st.defendantObj, st.judgeObj,
                                             st.assessorAObj, st.assessorBObj,
-                                            static_cast<i32>(s.runningScore),
-                                            st.currency);
+                                            st.wealthScoreA, st.currency);
             FireVoice(leaves, kSbfPenalty7);
         } else {
             FireVoice(leaves, kSbfNotGuilty7);

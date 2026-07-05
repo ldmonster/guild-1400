@@ -189,9 +189,25 @@ TEST(AgfAnimUnit, MorphWeights) {
     MorphWeights z = ComputeMorphWeights(clip, 0, 1, 0, false);
     CHECK(feq(z.wTo, 0.0f));
     CHECK(feq(z.wFrom, 1.0f));
-    // phase beyond seg clamps to 1.
+    // Phase beyond seg does NOT clamp: gilde.exe 0x5c9394 has no [0,1] clamp
+    // (wTo = phase/dur straight; old pin of 1.0 was an invented clamp).
     MorphWeights f = ComputeMorphWeights(clip, 0, 1, seg * 4, false);
-    CHECK(feq(f.wTo, 1.0f));
+    CHECK(feq(f.wTo, 4.0f));
+    CHECK(feq(f.wFrom, 1.0f - 4.0f));
+    // Ease shaping (flags bit 0x4): interior segments are NOT shaped (branch
+    // 0x5c9528 -> 0x5c94d9 goes straight to the weight store). With 3 frames,
+    // from=1, to=1 (fc-1 > toFrame fails? fc-1=2 > 1 -> then fromFrame>0 -> no
+    // shaping): wTo stays phase/dur.
+    MorphWeights mid = ComputeMorphWeights(clip, 1, 1, seg / 2, /*ease*/true);
+    int seg1 = clip.anim.frames[1].duration;
+    CHECK(feq(mid.wTo, (float)((double)(seg / 2) * (float)(1.0 / (double)seg1))));
+    // Leading segment (fromFrame <= 0, fc-1 > toFrame): wTo = 1 - cos(v*pi/2).
+    MorphWeights lead = ComputeMorphWeights(clip, 0, 1, seg / 2, /*ease*/true);
+    {
+        float inv = (float)(1.0 / (double)seg);
+        float v = (float)((double)(seg / 2) * inv);
+        CHECK(feq(lead.wTo, (float)(1.0 - std::cos((double)v * 1.5707963705062866))));
+    }
 }
 
 // =============================================================================

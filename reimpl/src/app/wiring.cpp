@@ -945,10 +945,12 @@ void RealSubsystems::soundWaveInitSineTables() {
     // REAL: VIBE_SoundWave_InitSineTables (d3sndw_Init) @0x424d40 — build the three
     // N-float waveform lookup tables (table0 = sin(k*2pi/N)). This is the portable
     // d3sndw waveform-layer init the original ran during sound bring-up; it has no
-    // OS dependency, so run the real reconstructed builder. N=256 matches the
-    // engine's default table length (word_62D430); the resulting table feeds the
-    // tone/wave synthesis the sound layer uses.
-    audio::SineTables tables = audio::InitSineTables(256);
+    // OS dependency, so run the real reconstructed builder. N=0x30 (48) is the
+    // EXACT argument the boot passes at the only live call site
+    // (VIBE_App_InitEngineAndScriptCommands, gilde.exe 0x52879f:
+    // VIBE_SoundWave_InitSineTables(0x30u)); word_62D430 is then 48.
+    // [FIXED from 256 — no binary call site passes 256.]
+    audio::SineTables tables = audio::InitSineTables(0x30);
     sineTableCount_ = tables.valid() ? static_cast<int>(tables.count) : 0;
     rec("soundWaveInitSineTables", Kind::Real);
 }
@@ -1048,10 +1050,16 @@ void RealSubsystems::scriptRegisterCommands() {
 // ===========================================================================
 // intro movie
 // ===========================================================================
-// VIBE_Movie_PlayIntroSequence @0x5347d4 — play "<movie>\Intro.mpg" through the
-// pl_mpeg decoder via the reconstructed video backing. The decode pump delivers
-// each RGB frame to a sink (here a counter; the real host blits it through the
-// IGraphicsDevice). No decoder (portable build) -> silent skip (the stub path).
+// VIBE_Movie_PlayIntroSequence @0x5347d4 — the intro is a THREE-clip sequence:
+//   sprintf("%sjowood.mpg", aProjectMovie) -> mov_prepare -> mov_play
+//   sprintf("%s4head.mpg",  aProjectMovie) -> mov_prepare -> mov_play
+//   sprintf("%sintro.mpg",  aProjectMovie) -> mov_prepare -> mov_play
+// (each with the surrounding Sleep(400)/Sleep(100) pacing; the clip ORDER and
+// names are the engine logic preserved here). The proprietary decoder is
+// replaced (rule 6, user-approved) by pl_mpeg via the reconstructed video
+// backing; the decode pump delivers each RGB frame to a sink (here a counter;
+// the real host blits it through the IGraphicsDevice). No decoder (portable
+// build) -> silent skip (the stub path).
 void RealSubsystems::moviePlayIntroSequence() {
     if (!videoDecoder_) { rec("moviePlayIntroSequence", Kind::Stub); return; }
 
@@ -1061,7 +1069,6 @@ void RealSubsystems::moviePlayIntroSequence() {
     // common casings (the in-engine VFS path is "\\project\\movie\\").
     backing.movieDir = gameDir_.empty() ? std::string("movie/")
                                         : (gameDir_ + "/movie/");
-    backing.clipName = "Intro.mpg";
     movieFramesDecoded_ = 0;
     backing.frameSink = [this](const shim::VideoFrame&) { ++movieFramesDecoded_; };
     if (movieFrameCap_ > 0) {
@@ -1069,17 +1076,25 @@ void RealSubsystems::moviePlayIntroSequence() {
         backing.shouldAbort = [this, cap]() { return movieFramesDecoded_ >= cap; };
     }
 
-    play::MovieDllHooks dll = play::MakeVideoMovieHooks(backing);
-    const int handle = dll.prepare ? dll.prepare(nullptr, 0) : 0;  // open Intro.mpg
-    if (handle == 0) {
-        // Casing fallback: lower-case name (case-sensitive filesystems).
-        backing.clipName = "intro.mpg";
-        play::MovieDllHooks dll2 = play::MakeVideoMovieHooks(backing);
-        const int h2 = dll2.prepare ? dll2.prepare(nullptr, 0) : 0;
-        if (h2) dll2.play(h2);
-        if (dll2.dispose) dll2.dispose();
-    } else {
-        dll.play(handle);            // decode-and-present pump
+    // The exact clip sequence of 0x5347d4 (lower-case on disk); per clip, fall
+    // back to a capitalised name for case-sensitive filesystems.
+    static const char* const kIntroClips[3] = {"jowood.mpg", "4head.mpg",
+                                               "intro.mpg"};
+    static const char* const kIntroClipsCap[3] = {"Jowood.mpg", "4head.mpg",
+                                                  "Intro.mpg"};
+    for (int i = 0; i < 3; ++i) {
+        backing.clipName = kIntroClips[i];
+        play::MovieDllHooks dll = play::MakeVideoMovieHooks(backing);
+        int handle = dll.prepare ? dll.prepare(nullptr, 0) : 0;
+        if (handle == 0) {
+            backing.clipName = kIntroClipsCap[i];
+            play::MovieDllHooks dll2 = play::MakeVideoMovieHooks(backing);
+            handle = dll2.prepare ? dll2.prepare(nullptr, 0) : 0;
+            if (handle) dll2.play(handle);   // decode-and-present pump
+            if (dll2.dispose) dll2.dispose();
+            continue;
+        }
+        dll.play(handle);                    // decode-and-present pump
         if (dll.dispose) dll.dispose();
     }
     rec("moviePlayIntroSequence", movieFramesDecoded_ > 0 ? Kind::Real : Kind::Stub);

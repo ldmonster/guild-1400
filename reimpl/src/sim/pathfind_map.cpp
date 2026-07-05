@@ -334,7 +334,11 @@ int MapComputeBuildingChainDepth(RoadNetwork& net, int index) {
     }
     int result = 0;  // v3 — depth via the first parent link
     int alt = 0;     // v11 — depth via the second parent link
-    if (n.parentFromId != 0) {  // 0x592caa: first link present
+    if (n.parentFromId == 0) {
+        return 0;  // 0x592caa -> 0x592d6e: no first link => depth 0 IMMEDIATELY
+                   // (the binary does NOT fall through to the second link)
+    }
+    {
         int found = RoadFindByNodeId(net, n.parentFromId, index);  // 0x592ceb
         if (found >= 0) {
             result = MapComputeBuildingChainDepth(net, found) + 1;  // 0x592d79
@@ -452,13 +456,17 @@ int MapRasterEdgeStepCount(float lenSq) {
 
 int MapRasterizeBauplatzEdge(const float* quad, int fillTerrain, int fillCell) {
     // quad: [0,1] edge0 start, [2,3] edge0 end, [4,5] edge1 end, [6,7] edge1 start.
-    float ex0 = quad[2] - quad[0];  // v25
-    float ey0 = quad[3] - quad[1];  // v23
-    float lenSqOuter = ex0 * ex0 + ey0 * ey0;  // v17
+    float ex0 = quad[2] - quad[0];  // v25 (fstp var_3C: narrowed)
+    float ey0 = quad[3] - quad[1];  // v23 (fstp var_40: narrowed)
+    // 0x577703..0x57771b: squares+sum stay on the x87 stack; ONE fstp narrows
+    // the result — model the intermediates as double (tree convention).
+    float lenSqOuter = static_cast<float>(
+        static_cast<double>(ex0) * ex0 + static_cast<double>(ey0) * ey0);  // v17
 
     float ex1 = quad[4] - quad[6];  // v19
     float ey1 = quad[5] - quad[7];  // v21
-    float lenSqInner = ex1 * ex1 + ey1 * ey1;  // v16
+    float lenSqInner = static_cast<float>(
+        static_cast<double>(ex1) * ex1 + static_cast<double>(ey1) * ey1);  // v16 (0x577747)
 
     float maxLenSq = lenSqOuter > lenSqInner ? lenSqOuter : lenSqInner;  // v4
     int outerSteps = MapRasterEdgeStepCount(maxLenSq);  // v6/v18
@@ -478,8 +486,16 @@ int MapRasterizeBauplatzEdge(const float* quad, int fillTerrain, int fillCell) {
     float dbx = static_cast<float>(ex1 * invOuter), dby = static_cast<float>(ey1 * invOuter);
     int result = 0;  // v32-counted inner steps of the last outer iteration
     for (int o = 0; o < outerSteps; ++o) {
-        float cx = bx - ax, cy = by - ay;       // v35/v33
-        int innerSteps = MapRasterEdgeStepCount(cx * cx + cy * cy);  // v10/v32
+        float cx = bx - ax, cy = by - ay;       // v35/v33 (fstp: narrowed)
+        // 0x5777da..0x5777f8: unlike the outer edge, the squared length is NOT
+        // spilled to a float — fsqrt consumes the x87 sum directly. Model the
+        // whole chain in double (no float narrowing before sqrt).
+        int innerSteps = 2 * PathfindMapTruncToInt(
+            std::sqrt(static_cast<double>(cx) * cx + static_cast<double>(cy) * cy) +
+            kRasterEdgeBias);                    // v10 (0x57780d)
+        if (innerSteps < 1) {
+            innerSteps = 1;  // 0x577812
+        }
         float px = ax, py = ay;                  // v37/v38
         double invInner = 1.0 / static_cast<double>(innerSteps);  // v11
         float dpx = static_cast<float>(cx * invInner), dpy = static_cast<float>(cy * invInner);  // v36/v34
@@ -576,7 +592,9 @@ int MapSpawnCityPointMarker(const char* name, float param) {
     char dummy[262];
     MapBuildDummyName(name, dummy);
 
-    void* obj = hk.findObjectByHandle(0, 0, dummy, 0, nullptr);  // 0x52e338
+    // 0x52e327: `mov edx, 140h` before the (edx-preserving, 0x5cba01/0x5cba1e)
+    // sprintf thunk — FindByHandle receives kind 320, same as the tower markers.
+    void* obj = hk.findObjectByHandle(0, 320, dummy, 0, nullptr);  // 0x52e338
     if (!obj) {
         return 0;  // 0x52e33f miss
     }

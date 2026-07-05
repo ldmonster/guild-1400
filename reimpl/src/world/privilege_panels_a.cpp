@@ -78,14 +78,15 @@ char PrivilegePanelGenerateHatred(const PrivPerson* actor, const PrivEvent* ev,
             if (btn == kPrivBtnOk) {                             /*ChildObjectId confirm*/
                 if (h->checkSkill(actor, 4, h->ctx)
                     && h->checkResource(cost, actor->byte994, h->ctx)) {
-                    // relation deltas — RNG draw ORDER is exact (two draws):
+                    // relation deltas — RNG draw ORDER is exact (two draws), then
+                    // exactly TWO matrix lookups (0x56347a p1->p2, 0x56348e p2->p1;
+                    // each result feeds one delta — the disasm keeps the first in
+                    // ecx+0x7F, the second in eax+0x7F):
                     int r0 = Rng(h, 0x1E);                       /*0x563451*/
                     int v50 = Rng(h, 0x1E) + 3;                  /*0x56346b*/
-                    h->relationEntry(p1->id, p2->id, h->ctx);    /*0x56347a (discarded)*/
-                    v50 -= h->relationEntry(p2->id, p1->id, h->ctx) + 127; /*0x5634a6*/
-                    int v14 = r0 + 3 - (h->relationEntry(p1->id, p2->id, h->ctx) + 127);
-                    // NB: the binary recomputes the p1->p2 lookup for the first
-                    // delta (v37+3 - (lookup+127)); reproduced via v14 here.
+                    int v14 = r0 + 3 -
+                              (h->relationEntry(p1->id, p2->id, h->ctx) + 127); /*0x56347a*/
+                    v50 -= h->relationEntry(p2->id, p1->id, h->ctx) + 127;      /*0x56348e*/
                     Emit(h, PrivCommand::kCoord27, p1->handle, p2->handle, v14); /*0x5634b3*/
                     Emit(h, PrivCommand::kCoord27, p2->handle, p1->handle, v50); /*0x5634ca*/
                     Emit(h, PrivCommand::kEnqueueCmd15, -1, actor->handle, cost, actor->byte994); /*0x5634e6*/
@@ -313,7 +314,9 @@ char PrivilegePanelInterrogation(const PrivPerson* actor, const PrivEvent* ev,
                 if (h->checkSkill(actor, 2, h->ctx)) {
                     Emit(h, PrivCommand::kBuildOp90, actor->handle, -2); /*0x56388e*/
                     Emit(h, PrivCommand::kBuildOp90, tgt->handle, -3);  /*0x5638ac*/
-                    Emit(h, PrivCommand::kArgs25, actor->handle, 456, 0, 4); /*0x5638c2*/
+                    // 0x56389a: mov ecx,8000h survives both BuildOp90 wrappers
+                    // (EnqueuePacket pushes/pops ecx) -> Args25 a3 == 0x8000.
+                    Emit(h, PrivCommand::kArgs25, actor->handle, 456, 0x8000, 4); /*0x5638bd*/
                     if (h->trace) h->trace->lastMessageId = 6617;       /*0x563935*/
                     if (IsOfficeHolderKind(tgt->kind) && h->sendEntityMessage) { /*0x5639b7*/
                         h->sendEntityMessage(tgt->handle, 1418, h->ctx);
@@ -335,7 +338,8 @@ char PrivilegePanelInterrogation(const PrivPerson* actor, const PrivEvent* ev,
     if (!tgt) return 96;                                                /*0x5636f3*/
     Emit(h, PrivCommand::kBuildOp90, actor->handle, -2);               /*0x563682*/
     Emit(h, PrivCommand::kBuildOp90, tgt->handle, -3);                 /*0x563694*/
-    Emit(h, PrivCommand::kArgs25, actor->handle, 456, 0, 4);           /*0x5636a5*/
+    // 0x56367d: mov ecx,8000h survives to the Args25 a3 slot.
+    Emit(h, PrivCommand::kArgs25, actor->handle, 456, 0x8000, 4);      /*0x5636a5*/
     if (IsOfficeHolderKind(tgt->kind) && h->sendEntityMessage) {       /*0x563703*/
         h->sendEntityMessage(tgt->handle, 1418, h->ctx);
         if (h->trace) h->trace->lastEntityMsgId = 6618;
@@ -368,8 +372,11 @@ char PrivilegePanelExpelWorker(const PrivPerson* actor, const PrivEvent* ev,
         }
         const PrivPerson* tgt = h->findRecord ? h->findRecord(ev->targetId, h->ctx) : nullptr;
         if (!tgt) return 96;                                            /*0x563a4d*/
+        // 0x563a97: BuildOp90's second arg (edx) is a leftover register from the
+        // preceding QueryBegin call — indeterminate in the binary; modeled as 0.
         Emit(h, PrivCommand::kBuildOp90, actor->handle, 0);            /*0x563a97*/
-        Emit(h, PrivCommand::kArgs25, subject->handle, 456, 0, 4);     /*0x563aae*/
+        // 0x563a92: mov ecx,80h survives to the Args25 a3 slot (flag byte value).
+        Emit(h, PrivCommand::kArgs25, subject->handle, 456, 0x80, 4);  /*0x563aae*/
         if (IsOfficeHolderKind(tgt->kind) && h->sendEntityMessage) {   /*0x563b35*/
             h->sendEntityMessage(tgt->handle, 1418, h->ctx);
             if (h->trace) h->trace->lastEntityMsgId = 6623;
@@ -403,7 +410,8 @@ char PrivilegePanelExpelWorker(const PrivPerson* actor, const PrivEvent* ev,
         if (btn == kPrivBtnOk) {
             if (h->checkSkill(actor, 5, h->ctx)) {
                 Emit(h, PrivCommand::kBuildOp90, actor->handle, -5);    /*0x563d31*/
-                Emit(h, PrivCommand::kArgs25, subject->handle, 456, 0, 4); /*0x563d4e*/
+                // 0x563d24: mov ecx,80h -> Args25 a3 == 0x80.
+                Emit(h, PrivCommand::kArgs25, subject->handle, 456, 0x80, 4); /*0x563d49*/
                 if (h->trace) h->trace->lastMessageId = 6622;           /*0x563dd3*/
                 // random replacement scan: RandomModulo(0x300) start (recorded as a
                 // draw); the array scan is a coupled live-array walk (modeled via the
@@ -566,8 +574,10 @@ char PrivilegePanelMedicus(const PrivPerson* actor, PrivilegePanelHooks* h) {
     i32 wealth = h->computeTotalWealth(actor, h->ctx);                  /*0x56056b*/
     int cost = PrivCostFromWealth(wealth, kPrivMedicusWealthFactor);    /*0x560579*/
     if (h->trace) h->trace->cost = cost;
-    Emit(h, PrivCommand::kBuildOp90, actor->handle, 0);                /*0x56059d*/
-    Emit(h, PrivCommand::kArgs25, actor->handle, 456, 0, 4);           /*0x5605af*/
+    // 0x560584: mov edx,-2 before the BuildOp90 call — the passive path also
+    // charges the -2 skill cost; 0x560589: mov ecx,40h -> Args25 a3 == 0x40.
+    Emit(h, PrivCommand::kBuildOp90, actor->handle, -2);               /*0x56059d*/
+    Emit(h, PrivCommand::kArgs25, actor->handle, 456, 0x40, 4);        /*0x5605af*/
     if (Rng(h, 2)) {                                                    /*0x5605b9 success*/
         Emit(h, PrivCommand::kEnqueueCmd15, -1, actor->handle, cost, actor->byte994); /*0x5605e7*/
         // VIBE_Building_AdjustStockAndNotify + AiNeeds_PickRandomFlagFromEight       /*0x5605f4*/
@@ -621,10 +631,11 @@ char PrivilegePanelDivorce(const PrivPerson* actor, PrivilegePanelHooks* h) {
     i32 wealth = h->computeTotalWealth(actor, h->ctx);                  /*0x5608f6 (discarded)*/
     (void)wealth;
     i64 net = h->sumCurrencyHeld(actor, h->ctx);                       /*0x5608ff*/
-    // afford gate: (double)lo / (double)hi < 12%  -> reject. The original packs a
-    // 64-bit (currency/wealth) ratio. Modeled as currency vs 12% of wealth.
+    // afford gate 0x56091f: `(double)(int)v4 / (double)SHIDWORD(v4) < dbl_624B74`
+    // — the binary DIVIDES currency (lo dword) by wealth (hi dword) and compares
+    // the quotient against 0.12. Reproduced as the same division.
     i32 totalWealth = h->computeTotalWealth(actor, h->ctx);
-    if ((double)net < kPrivDivorceAffordRatio * (double)totalWealth)   /*0x56091f*/
+    if ((double)(i32)net / (double)totalWealth < kPrivDivorceAffordRatio) /*0x56091f*/
         return 34;                                                      /*0x5608e6*/
     int fee = PrivCostFromWealth(totalWealth, kPrivDivorceWealthFactorA); /*0x560929 8%*/
     if (h->trace) h->trace->cost = fee;

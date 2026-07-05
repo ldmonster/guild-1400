@@ -356,7 +356,9 @@ TEST(NpcAction7, SelectRoomPicksRoom) {
     ResetWorld();
     auto h = MakeHooks(); SetNpcAction7Hooks(&h);
     *(g_actor + 130) = 0;                               // gate 0 -> never blocks
-    *reinterpret_cast<i32*>(g_actor + 94) = 77;         // room key
+    // disasm 0x575cb3: room key is the dword at Person+0x178 (was +94, a
+    // dword-index misread of the decompile).
+    *reinterpret_cast<i32*>(g_actor + 0x178) = 77;      // room key
     *reinterpret_cast<i32*>(g_actor + 4) = 4242;        // entity id
 
     g_rooms.resize(2);

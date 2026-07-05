@@ -128,7 +128,7 @@ TEST(scriptvm, scriptvm_parse_declaration_scalar) {
     // `gold ;`  -> name token (cls 0 "gold"), then ';' symbol sub 10.
     TokScript s; s.toks = { TName("gold"), TSym(10) };
     g_script = &s;
-    i32 r = ParseDeclaration(ctx.c());
+    i32 r = ParseDeclaration(ctx.c(), kVarInt);
     CHECK_EQ(r, 1);
     CHECK_EQ((int)Dw(ctx.c(), kIdx_VarCount), 1);
     CHECK(LookupVariable(ctx.c(), "gold") != nullptr);
@@ -141,7 +141,7 @@ TEST(scriptvm, scriptvm_parse_declaration_assign) {
     // `x = 5`  -> name, '=' (sub 2), int literal 5.
     TokScript s; s.toks = { TName("x"), TSym(2), TInt(5) };
     g_script = &s;
-    i32 r = ParseDeclaration(ctx.c());
+    i32 r = ParseDeclaration(ctx.c(), kVarInt);
     CHECK_EQ(r, 1);
     u8* rec = LookupVariable(ctx.c(), "x");
     CHECK(rec != nullptr);
@@ -155,7 +155,7 @@ TEST(scriptvm, scriptvm_parse_declaration_array) {
     // `arr [ 4 ] ;`  -> name, '[' (sub 27), int 4, ']' (sub 28), ';' (sub 10).
     TokScript s; s.toks = { TName("arr"), TSym(27), TInt(4), TSym(28), TSym(10) };
     g_script = &s;
-    i32 r = ParseDeclaration(ctx.c());
+    i32 r = ParseDeclaration(ctx.c(), kVarInt);
     CHECK_EQ(r, 1);
     u8* rec = LookupVariable(ctx.c(), "arr");
     CHECK(rec != nullptr);
@@ -170,8 +170,24 @@ TEST(scriptvm, scriptvm_parse_declaration_array_missing_bracket) {
     // missing ']' (give a wrong sub) then missing ';'
     TokScript s; s.toks = { TName("bad"), TSym(27), TInt(2), TSym(99), TSym(99) };
     g_script = &s;
-    ParseDeclaration(ctx.c());
+    ParseDeclaration(ctx.c(), kVarInt);
     CHECK(g_reportCount >= 1);    // "Missing ']'!" and/or "Expecting ';'"
+    g_script = nullptr; SetScriptVmHooks(nullptr); SetCurrentContext(nullptr);
+}
+
+// The caller-supplied type code (token.value>>24 in edx @0x443692) is honoured:
+// a `float f;` decl stores the float type nibble, not int. Regression for the
+// hardening fix that forwarded `type` to DefineVariable in every path.
+TEST(scriptvm, scriptvm_parse_declaration_type_honoured) {
+    ScriptVmHooks h; InstallHooks(h); ResetCounters();
+    Ctx ctx; SetCurrentContext(ctx.c());
+    TokScript s; s.toks = { TName("f"), TSym(10) };   // `f ;`
+    g_script = &s;
+    i32 r = ParseDeclaration(ctx.c(), kVarFloat);
+    CHECK_EQ(r, 1);
+    u8* rec = LookupVariable(ctx.c(), "f");
+    CHECK(rec != nullptr);
+    CHECK_EQ((int)(RecByte(rec, kVar_Nibble) & 0x0F), (int)kVarFloat);
     g_script = nullptr; SetScriptVmHooks(nullptr); SetCurrentContext(nullptr);
 }
 

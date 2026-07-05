@@ -143,10 +143,12 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
     out.points.assign((size_t)(frameCount > 0 ? frameCount : 0), {});
 
     // ---- Frame loop -------------------------------------------------------
+    i32 lastVertexCount = 0;       // v102 survives the loop; the post-load AABB /
+                                   // quantize passes use ITS final value (see tail).
     for (i32 k = 0; k < frameCount; ++k) {
         AnimFrame& fr = out.frames[(size_t)k];
-        i32 vertexCount = 0;       // v103 (this frame's point count)
-        i32 accumulated = 0;       // v125 (vertices read across sub-chunks)
+        i32 vertexCount = 0;       // v102 (this sub-chunk's point count)
+        i32 accumulated = 0;       // v124 (vertices read across sub-chunks)
 
         for (i32 it = 0; it < subIters; ++it) {
             if (tok == 24) {        // frame index/time
@@ -154,6 +156,8 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
                 fr.timeOrIndex = idx;
                 tok = r.Token();
             }
+            vertexCount = 0;        // gilde.exe 0x5e450c: v102 = 0 at the top of
+                                    // EVERY sub-iteration (before the token-25 read)
             if (hasVertex && tok == 25) {  // vertex count
                 vertexCount = r.Dword();
                 if (hdr.vertexCount == 0) {
@@ -212,6 +216,7 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
                 if (t2 == 40) tok = r.Token();
             }
         }
+        lastVertexCount = vertexCount;   // v102's value surviving this frame
 
         // token 49: frame transform — two vec3 into frame +32..+52.
         if (tok == 49) {
@@ -267,14 +272,19 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
     out.frames[0].rx = out.frames[0].ry = out.frames[0].rz = 0.0f;
 
     // Per-frame point passes: optional delta-from-root, AABB, duration *= 3, quantize.
-    // Hardening (W11): nPts comes straight from the file; clamp it non-negative and
-    // do the "have we got nPts*3 floats?" guard in size_t so a malformed/oversized
-    // count cannot overflow the int `nPts * 3` multiply (UB) before the comparison.
-    // A valid animation has a small nPts, so every in-bounds load is unchanged; an
-    // oversized count simply fails the size guard and the point passes are skipped.
+    // gilde.exe 0x5e450c tail: the flag361 subtract loop counts hdr.vertexCount
+    // (hdr+320), but the AABB + quantize loops count the SURVIVING token-25 value
+    // v102 (overridden by v100 when >= 0: `if (v100 >= 0) v102 = v100`), which can
+    // differ from hdr.vertexCount (hdr keeps the FIRST frame's count).
+    // Hardening (W11): counts come straight from the file; clamp non-negative and
+    // do the "have we got n*3 floats?" guard in size_t so a malformed/oversized
+    // count cannot overflow the int multiply (UB) before the comparison.
     int nPts = hdr.vertexCount;
     if (nPts < 0) nPts = 0;
     const size_t needPts = static_cast<size_t>(nPts) * 3;
+    int nQuant = (vtxOverride >= 0) ? vtxOverride : lastVertexCount;  // final v102
+    if (nQuant < 0) nQuant = 0;
+    const size_t needQuant = static_cast<size_t>(nQuant) * 3;
     for (i32 k = 0; k < frameCount; ++k) {
         AnimFrame& fr = out.frames[(size_t)k];
         std::vector<float>& pts = out.points[(size_t)k];  // always sized to frameCount
@@ -286,11 +296,11 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
             }
         }
 
-        // AABB over the frame's points.
+        // AABB over the frame's points (count = final v102, see above).
         float minX = kBigPos, minY = kBigPos, minZ = kBigPos;
         float maxX = kBigNeg, maxY = kBigNeg, maxZ = kBigNeg;
-        if (nPts > 0 && pts.size() >= needPts) {
-            for (int j = 0; j < nPts; ++j) {
+        if (nQuant > 0 && pts.size() >= needQuant) {
+            for (int j = 0; j < nQuant; ++j) {
                 float x = pts[(size_t)j * 3 + 0];
                 float y = pts[(size_t)j * 3 + 1];
                 float z = pts[(size_t)j * 3 + 2];
@@ -307,7 +317,10 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
         }
         fr.bbMinX = minX; fr.bbMinY = minY; fr.bbMinZ = minZ;
         float ex = maxX - minX, ey = maxY - minY, ez = maxZ - minZ;
-        fr.bbExtX = ex * kInv255;
+        // x87 (0x5e450c tail): the X extent multiplies the UNROUNDED 80-bit
+        // difference (v69 = max-min kept on the FPU stack) by 1/255, while Y and Z
+        // multiply the float-rounded differences (v89/v90 stored to memory first).
+        fr.bbExtX = (float)(((double)maxX - minX) * kInv255);
         fr.bbExtY = ey * kInv255;
         fr.bbExtZ = ez * kInv255;
 
@@ -318,8 +331,8 @@ bool LoadBinaryAnimation(const u8* data, size_t size, const char* name, u8 loadF
         // (We compute into the frame's _attach/_tail region only conceptually; the
         // produced bytes are not surfaced — see header. The truncation matches
         // VIBE_Coord_ConvertX -> (int) chop.) Kept for fidelity of the AABB inputs.
-        if (nPts > 0 && pts.size() >= needPts) {
-            for (int j = 0; j < nPts; ++j) {
+        if (nQuant > 0 && pts.size() >= needQuant) {
+            for (int j = 0; j < nQuant; ++j) {
                 if (ex != 0.0f) (void)(int)guild::util::ConvertX((pts[(size_t)j*3+0]-minX) * k255 / ex);
                 if (ey != 0.0f) (void)(int)guild::util::ConvertX((pts[(size_t)j*3+1]-minY) * k255 / ey);
                 if (ez != 0.0f) (void)(int)guild::util::ConvertX((pts[(size_t)j*3+2]-minZ) * k255 / ez);

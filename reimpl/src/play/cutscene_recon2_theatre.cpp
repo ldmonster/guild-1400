@@ -155,8 +155,10 @@ bool Theatre_BuildCutsceneRecord(TheatreEvent ev, i32 localMaster, i32 masterDwo
         out.kind = kTheatreCodeBirth;
         out.count = 2;                       // LOBYTE(v42) = 2
         out.targetId = -1;
-        out.master2 = masterDword;           // v43 = v44 = v18
-        out.master3 = masterDword;
+        // 0x536e34/0x536e38/0x536e3c: v36 = v43 = v44 = v18 — only master (v36/
+        // v43) and master2 (v44) are written; v45 (master3) stays 0 from the
+        // SetGrayColorThunk(0, 276) block clear @0x536df5.
+        out.master2 = masterDword;           // v44 = v18
         return true;
     case TheatreEvent::Tenancy: {        // 0x536e70 path (v68), code 10
         out.kind = kTheatreCodeTenancy;

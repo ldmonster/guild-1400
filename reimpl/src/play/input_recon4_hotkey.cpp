@@ -179,11 +179,13 @@ int Hotkey_AssignFromSelection(i32 slot, u32 /*a2*/) {
 //     if ( !obj ) obj = FindStorableObject(building);
 //   }
 //   slot.buildingId = *(building+1);                     // 4-byte read @+1
-//   slot.objectId   = obj ? *(obj+1) : -1;               // 4-byte read @+1
+//   slot.objectId   = obj ? *(obj+2) : -1;               // 4-byte read @+2
 //   return 12*slot;                                      // eax
 //
-// Note StoreDefaultEntry reads the object id from *(obj+1), whereas
-// AssignFromSelection/Validate... read *(obj+2) — preserved exactly.
+// The decompile shows `*(WorkProductObject + 1)` with WorkProductObject typed
+// `__int16 *` — pointer arithmetic, i.e. BYTE offset +2 (disasm 0x4ff97a:
+// `mov edx, [ecx+2]`), the SAME object-id field AssignFromSelection /
+// ActivateBuilding read at *(obj+2).
 // ---------------------------------------------------------------------------
 namespace {
 i32 read4at(u8* p, int off) {
@@ -204,7 +206,7 @@ int Hotkey_StoreDefaultEntry(i32 slot, u8* building) {
     }
     HotkeySlot& s = g_hotkeySlots[slot];
     s.buildingId = read4at(building, 1);
-    s.objectId   = obj ? read4at(obj, 1) : -1;
+    s.objectId   = obj ? read4at(obj, 2) : -1;  // [ecx+2] @0x4ff97a
     return 12 * slot;
 }
 

@@ -32,7 +32,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -368,10 +367,11 @@ void SessionHud::Render(void* fb16, int w, int h, int pitchBytes,
             const int day = in.clock ? in.clock->day : 0;
             if (!seasons_[day % 4].empty()) {
                 char date[64];
-                std::snprintf(date, sizeof(date), "%s A.D.%d",
+                const int dn = std::snprintf(date, sizeof(date), "%s A.D.%d",
                               seasons_[day % 4].c_str(), 1400 + day / 4);
-                DrawGold565(s, bannerFont_, 480 * w / 800, 17 * h / 600,
-                            date, /*centerX=*/true);
+                if (DrawGold565(s, bannerFont_, 480 * w / 800, 17 * h / 600,
+                                date, /*centerX=*/true) > 0 && dn > 0)
+                    last_.captionGlyphs += dn;   // caption chars (date), real face
             }
             // Sidebar money slot: the ENGINE money string (trailing 0x11
             // currency glyph — the font's gold-coin ligature), small face.
@@ -382,8 +382,9 @@ void SessionHud::Render(void* fb16, int w, int h, int pitchBytes,
                 if (mm < std::numeric_limits<i32>::min()) mm = std::numeric_limits<i32>::min();
                 const std::string ms =
                     world::MoneyFormatWithSeparators((i32)mm, in.moneyRate);
-                DrawGold565(s, sf, 745 * w / 800, 480 * h / 600,
-                            ms.c_str(), /*centerX=*/true);
+                if (DrawGold565(s, sf, 745 * w / 800, 480 * h / 600,
+                                ms.c_str(), /*centerX=*/true) > 0)
+                    last_.captionGlyphs += (int)ms.size();  // caption chars (money)
             }
             // Sidebar red buttons (Опции / Транспорт): _BUTTON_RED 3-slice at
             // the sidebar slots, SMALL gold label centred (the original's

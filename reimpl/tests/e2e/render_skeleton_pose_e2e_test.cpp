@@ -147,8 +147,10 @@ TEST(RenderPoseE2E, TrackAdvanceThenPalette) {
     CHECK_EQ(n, 1);
     CHECK_EQ(cap.n, 1);
     CHECK(std::string(cap.name) == "root");
-    // accT = 1.0 * ((3,4,5) - (1,1,1)) = (2,3,4); identity euler -> (0,0,0).
-    CHECK(feq(cap.pos[0], 2.0f)); CHECK(feq(cap.pos[1], 3.0f)); CHECK(feq(cap.pos[2], 4.0f));
+    // gilde.exe 0x5cc0d0 new-record path: accT = refT + w*(lerp - refT) (the
+    // binary re-adds refT after the weighted delta) = (1,1,1) + ((3,4,5)-(1,1,1))
+    // = (3,4,5). Old pin (2,3,4) predates the refT re-add.
+    CHECK(feq(cap.pos[0], 3.0f)); CHECK(feq(cap.pos[1], 4.0f)); CHECK(feq(cap.pos[2], 5.0f));
     CHECK(feq(cap.euler[0], 0.0f)); CHECK(feq(cap.euler[1], 0.0f)); CHECK(feq(cap.euler[2], 0.0f));
 }
 

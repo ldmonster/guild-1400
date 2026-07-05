@@ -185,49 +185,56 @@ TEST(SessionCamera, RightDragMovesEyeViaRotateBranch) {
     CHECK(cam.eyeX() != x0);                  // the eye MOVED on drag
     // delta = mouseDelta * scrollSpeed * 6/99: 40 * 50 * 6 / 99 = 121.21...
     CHECK(std::fabs((cam.eyeX() - x0) - 40.0f * 50.0f * 6.0f / 99.0f) < 1e-2f);
-    // Release DETACHES the camera (UpdateMovement drag-release @0x4b4ae3 sets
-    // dword_62D4E4 = 1): with the cursor inside the box a wheel zoom is DEAD —
-    // the REAL original behavior.
+    // Release does NOT detach the camera: the drag-release tail @0x4b4ae3
+    // restores the boxes and calls VIBE_Coord_ConvertY, but never writes
+    // dword_62D4E4 (its only xref inside 0x4b41a8 is the head read @0x4b41b4;
+    // the writers are the flight/cutscene paths, e.g. CmdCameraFlight @0x43f540,
+    // Cutscene_Teardown @0x4aa5c9). The wheel therefore works on the very next
+    // frame. (Harden re-pin: old pre-fix behavior blocked the wheel at 0.33.)
     ms.right = false;
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);   // release frame
-    cam.Frame(ms, false, false, false, false, 1.0f, 16.0f);   // wheel: blocked
-    CHECK(std::fabs(cam.zoom() - 0.33f) < 1e-6f);
-    CHECK_EQ(cam.in2.disableMove, 1);
-    // The REAL re-attach: VIBE_Camera_EdgeScroll @0x4b2c34 — the cursor on a
-    // boundary row (my == bottom = dword_62D0C8 - 1 = 479) steps the edge
-    // state to center and the center commit clears dword_62D4E4/E8 @0x4b2d95.
+    cam.Frame(ms, false, false, false, false, 1.0f, 16.0f);   // wheel: LIVE
+    CHECK(std::fabs(cam.zoom() - 0.43f) < 1e-6f);
+    CHECK_EQ(cam.in2.disableMove, 0);
+    // VIBE_Camera_EdgeScroll @0x4b2c34 — the cursor on a boundary row
+    // (my == bottom = dword_62D0C8 - 1 = 479) steps the edge state to center;
+    // the center commit clears dword_62D4E4/E8 @0x4b2d95 (already 0 here) and
+    // latches dword_631DE0.
     ms.y = 479;
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);
     CHECK_EQ(cam.in2.disableMove, 0);
     CHECK_EQ(cam.st2.edgeSnapLatch, 1);       // dword_631DE0 latched
-    // back inside the box the latch re-arms and the wheel works again.
+    // back inside the box the latch re-arms and the wheel keeps working.
     ms.y = 240;
     cam.Frame(ms, false, false, false, false, 1.0f, 16.0f);
-    CHECK(std::fabs(cam.zoom() - 0.43f) < 1e-6f);
+    CHECK(std::fabs(cam.zoom() - 0.53f) < 1e-6f);
     CHECK_EQ(cam.st2.edgeSnapLatch, 0);
 }
 
-// While detached (after a drag release) the pan core is gated off too — the
-// VIBE_Camera_UpdatePan entry gate @0x4b3685/0x4b3692 returns 0 when
-// dword_62D4E8 || dword_62D4E4. Arrows move nothing until the EdgeScroll
-// re-attach fires.
-TEST(SessionCamera, DetachGatesPanUntilEdgeScrollReattach) {
+// The pan core's entry gate @0x4b3685/0x4b3692 (returns 0 when dword_62D4E8 ||
+// dword_62D4E4) is NOT armed by a plain drag release — 0x4b41a8 never writes
+// dword_62D4E4 (only flight/cutscene paths do). Arrows keep panning right
+// after the release. (Harden re-pin: the old "detach until EdgeScroll
+// re-attach" pinned an invented 62D4E4=1 store in the pre-fix reimpl.)
+TEST(SessionCamera, DragReleaseLeavesPanAlive) {
     SessionCamera cam = makeCam();
     MouseState ms = centerMouse();
     ms.right = true;
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);   // latch drag
     ms.right = false;
-    cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);   // release -> detach
+    cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);   // release
+    CHECK_EQ(cam.in2.disableMove, 0);         // no detach (no 62D4E4 write)
     const float x0 = cam.eyeX();
     for (int i = 0; i < 5; ++i)
         cam.Frame(ms, false, /*Right*/ true, false, false, 0.0f, 16.0f);
-    CHECK(cam.eyeX() == x0);                  // pan dead while detached
-    ms.y = 479;                               // the re-attach row
+    CHECK(cam.eyeX() > x0);                   // pan alive immediately
+    ms.y = 479;                               // an edge-scroll boundary frame
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);
     ms.y = 240;
+    const float x1 = cam.eyeX();
     for (int i = 0; i < 5; ++i)
         cam.Frame(ms, false, /*Right*/ true, false, false, 0.0f, 16.0f);
-    CHECK(cam.eyeX() > x0);                   // pan alive after re-attach
+    CHECK(cam.eyeX() > x1);                   // and stays alive afterwards
 }
 
 // ---------------------------------------------------------------------------
@@ -274,10 +281,12 @@ TEST(SessionCamera, RotateInputMutatesExposedRotation) {
     const float yaw0 = cam.pose().rotY;   // 0
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);
     const float yaw1 = cam.pose().rotY;
-    // frame 1: the pan-init snapshot is trunc((1 - zoom) * 666.667) = 446 at
-    // the 0.33 boot zoom; yaw = 0 - (320 - 446) * 0.0035 = 0.441.
-    CHECK(std::fabs(yaw1 - (-(320.0f - 446.0f) * 0.0035f)) < 1e-4f);
-    CHECK(yaw1 != yaw0);
+    // frame 1: dword_11BC33C latches the viewShift ITSELF (0x4b42ee stores eax,
+    // sar'd @0x4b42d9 and preserved across VIBE_Coord_ConvertX) -> dx = 0, so
+    // the pan-init frame produces NO yaw jump. (Harden re-pin old->new: the
+    // pre-fix reimpl latched trunc((1-zoom)*666.667)=446 and jumped to 0.441.)
+    CHECK(std::fabs(yaw1 - 0.0f) < 1e-6f);
+    CHECK(yaw1 == yaw0);
     ms.x += 40;                           // drag right
     cam.Frame(ms, false, false, false, false, 0.0f, 16.0f);
     const float yaw2 = cam.pose().rotY;

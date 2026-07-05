@@ -155,17 +155,26 @@ TEST(RenderGeom, VectorLerpGolden) {
 }
 
 TEST(RenderGeom, BoneTranslationBlendGolden) {
-    BoneKeyframe keys[3] = {{0,0,0},{6,9,-3},{100,100,100}};
+    // keys[i] = {dur, tx, ty, tz}; per gilde.exe 0x5cbc10 the trailing proration at
+    // from==to is (targetPhase - curPhase) / keys[to].dur (branch @0x5cbe08).
+    BoneKeyframe keys[3] = {{2, 0,0,0}, {2, 6,9,-3}, {2, 100,100,100}};
     float out[3];
-    // from==to==0, phase num/seg=0/2, 1/2, 2/2 => 0%, 50%, 100% of seg0 delta.
+    // from==to==0, curPhase=0, targetPhase=0,1,2 => 0%, 50%, 100% of seg0 delta.
     struct { int num; float r[3]; } g[3] = {
         {0, {0,0,0}}, {1, {3,4.5f,-1.5f}}, {2, {6,9,-3}}};
     for (auto& c : g) {
-        AccumulateBoneTranslation(keys, 0, 0, c.num, 2, out);
+        AccumulateBoneTranslation(keys, 0, 0, 0, c.num, out);
         CHECK(feq(out[0], c.r[0]));
         CHECK(feq(out[1], c.r[1]));
         CHECK(feq(out[2], c.r[2]));
     }
+    // from < to: lead = 1 - cur/keys[from].dur, whole middle segments, trailing
+    // targetPhase/keys[to].dur. cur=1 of dur 2 at frame0, target=1 of dur 2 at
+    // frame1 => 0.5*(k1-k0) + 0.5*(k2-k1) = {50, 50, 50} (with k above).
+    AccumulateBoneTranslation(keys, 0, 1, 1, 1, out);
+    CHECK(feq(out[0], 0.5f*6 + 0.5f*94));
+    CHECK(feq(out[1], 0.5f*9 + 0.5f*91));
+    CHECK(feq(out[2], 0.5f*-3 + 0.5f*103));
 }
 
 // ---- Octree cull: a set of nodes, verify which pass -------------------------

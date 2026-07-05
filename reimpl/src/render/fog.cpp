@@ -2,7 +2,8 @@
 #include "render/particle.h" // TruncToward (== VIBE_Coord_ConvertX, x87 chop)
 #include "render/colorformat.h" // PackColor/UnpackColor (RGB565 (un)pack)
 
-#include <cmath> // sqrtf
+#include <cmath>   // sqrtf
+#include <cstring> // memcpy (bit-exact float guard)
 
 namespace guild::render {
 
@@ -118,7 +119,13 @@ u16 BlendFog565(u16 src565, u32 fogColor, int factor) {
 bool ApplyAmbientBlend(FogState& s, const FogBand* bands, int bandA, int bandB,
                        float t, float distScale,
                        bool fogEnabledGlobal, bool featureBit) {
-    if ((unsigned)bandA >= 6u || (unsigned)bandB >= 6u || t < 0.0f || t > 1.0f)
+    // 0x5b8b04 guard: a1>=6 || a2>=6 || a3<0.0 || SLODWORD(a3) > 0x3F800000.
+    // The upper bound is a SIGNED BIT compare against 1.0f's bits (it also
+    // rejects NaN, unlike a plain `t > 1.0f`).
+    i32 tBits;
+    std::memcpy(&tBits, &t, sizeof(tBits));
+    if ((unsigned)bandA >= 6u || (unsigned)bandB >= 6u || t < 0.0f
+        || tBits > 0x3F800000)
         return false;
 
     const FogBand& A = bands[bandA];
@@ -135,9 +142,15 @@ bool ApplyAmbientBlend(FogState& s, const FogBand* bands, int bandA, int bandB,
     // Pack 0x00RRGGBB (v20: BYTE2=R, BYTE1=G, LOBYTE=B).
     i32 packed = (i32)(((u32)(u8)cr << 16) | ((u32)(u8)cg << 8) | (u32)(u8)cb);
 
-    // Near/far lerp then * flt_64A018.  v18 = (B.near-A.near)*t + A.near.
-    float fogNear = ((B.nearVal - A.nearVal) * t + A.nearVal) * distScale; // v12
-    float fogFar  = ((B.farVal  - A.farVal)  * t + A.farVal)  * distScale; // v17
+    // Near/far lerp then * flt_64A018. The lerp stays on the x87 stack (80-bit)
+    // and is fstp'd to the float v18/v16 BEFORE the scale multiply; the scaled
+    // product is fstp'd again (v19/v17).
+    float v18 = (float)(((double)B.nearVal - (double)A.nearVal) * (double)t
+                        + (double)A.nearVal);
+    float fogNear = (float)((double)v18 * (double)distScale);            // v19
+    float v16 = (float)(((double)B.farVal - (double)A.farVal) * (double)t
+                        + (double)A.farVal);
+    float fogFar  = (float)((double)distScale * (double)v16);            // v17
 
     ConfigureFog(s, fogNear, fogFar, packed, fogEnabledGlobal, featureBit);
     // dword_649F08 = a1 (active fog band) — tracked by the caller in the original.

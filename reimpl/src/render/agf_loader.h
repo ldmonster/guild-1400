@@ -81,11 +81,18 @@ u8 AgfReadToken(const u8** p, const u8* end);
 bool LoadAgfModel(const u8* data, size_t size, BgfModel& out);
 
 // gilde.exe 0x5D1B54 — VIBE_Mesh_ComputeBoundingExtents. Fills the model's
-// bounding info from its vertex positions: returns the max vertex radius and the
-// per-axis min/max (the engine stored these on the mesh record at +104.. / the
-// radius drives the cull bounds). Pure helper over the parsed positions.
+// bounding info from its vertex positions. The binary computes max|vertex| into
+// mesh+472 and copies it to +468 (radius2), then — when the vertex count is
+// positive — the per-axis AABB (accumulators seeded ±1e10), writes the 8 AABB
+// corner vertices into the slack slots past the live vertices, OVERWRITES +472
+// with the AABB diagonal length, and averages the 8 corners (× flt_628FC0 =
+// 0.125) into the centroid at +104/+108/+112. (The full slack-slot form over the
+// engine Mesh record lives in render/mesh_postprocess.cpp; this helper surfaces
+// the same scalar outputs for the BgfModel view.) Pure over the parsed positions.
 struct BgfBounds {
-    float radius = 0.0f;          // max sqrt(x^2+y^2+z^2) over all vertices
+    float radius = 0.0f;          // +472 final: AABB diagonal (max|v| if count==0)
+    float radius2 = 0.0f;         // +468: max sqrt(x^2+y^2+z^2) over all vertices
+    float centroid[3] = {0, 0, 0}; // +104/+108/+112: mean of the 8 AABB corners
     float min[3] = {0, 0, 0};
     float max[3] = {0, 0, 0};
 };

@@ -391,10 +391,14 @@ void BuildEngineFrustum(float fbW, float fbH, float viewScale,
                         float nearZ, float farZ, render::Frustum& out) {
     const float epsPos = BitsToFloat(0x360637BDu);
     const float epsNeg = BitsToFloat(0xB60637BDu);
-    const float ang  = std::atan2(fbW * 0.5f, viewScale);
-    const float s = std::sin(ang), c = std::cos(ang);
-    const float ang2 = std::atan2(fbH * 0.5f, viewScale);   // -(-scale) == scale
-    const float s2 = std::sin(ang2), c2 = std::cos(ang2);
+    // The atan2 results are kept at x87 width (fst qword var_88/var_90 @0x5accf2/
+    // 0x5acd28) and fed to fsin/fcos before the single float store per plane
+    // component — model the intermediates with double (only the plane components
+    // round to float). The atan2 INPUTS are floats (flt_13FC518 = W*0.5f etc).
+    const double ang  = std::atan2((double)(fbW * 0.5f), (double)viewScale);
+    const float s = (float)std::sin(ang), c = (float)std::cos(ang);
+    const double ang2 = std::atan2((double)(fbH * 0.5f), (double)viewScale);  // -(-scale) == scale
+    const float s2 = (float)std::sin(ang2), c2 = (float)std::cos(ang2);
 
     out.plane[0][0] = c;   out.plane[0][1] = 0.0f; out.plane[0][2] = s;  out.plane[0][3] = epsNeg;
     out.plane[1][0] = -c;  out.plane[1][1] = 0.0f; out.plane[1][2] = s;  out.plane[1][3] = epsPos;

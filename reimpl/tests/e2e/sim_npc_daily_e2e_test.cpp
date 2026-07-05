@@ -111,15 +111,17 @@ TEST(NpcDailyE2E, FullDaySweep) {
     CHECK_EQ(g_w.chrmove, chrmoveMorning);
     CHECK_EQ(static_cast<int>(He_ApptTime(&rec).hour), 20); // work-end spring
 
-    // --- Evening within window (hour 21 <= 22): social pass -> one tavern/home
-    // dispatch (player-owned, currency>3200). ---
+    // --- Evening within window (hour 21 <= 22): social pass A dispatches EVERY
+    // eligible player-owned person (disasm 0x4e85b6: the pass-A loop runs the
+    // full 768 slots with no v4 cap — the `cmp edi,1 / jge` cap at 0x4e85c7
+    // gates pass B only; the old "breaks after the first" pin was wrong). All
+    // 3 workers are owner-kind 6 here, so 3 social dispatches. ---
     g_w.named53 = 0; g_w.goTavern = 0; g_w.goHome = 0;
     SetNpcClock(GameTime{ 0, 21, 0, 0 });
     He_SavedTime(&rec).day = 0;
     NpcDaily_DailyRoutineStep(&rec);
-    // one social dispatch this round (pass A breaks after the first).
-    CHECK_EQ(g_w.named53, 1);
-    CHECK_EQ(g_w.goTavern + g_w.goHome, 1);
+    CHECK_EQ(g_w.named53, 3);
+    CHECK_EQ(g_w.goTavern + g_w.goHome, 3);
 
     // --- Late evening (hour 23 > workEnd+2=22): the go-home sweep sends the
     // remaining workers home. ---

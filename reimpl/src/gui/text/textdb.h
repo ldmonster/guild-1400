@@ -54,6 +54,12 @@ public:
     // BuildTextArray fills dword_8C36B0 / byte_8D36B0 / byte_767EB0 in order.
     int Add(const std::string& text, const std::string& name, u8 tag = kTagNone);
 
+    // Place an entry at an ABSOLUTE index (the engine's dword_8C36B0[baseIndex+i]
+    // slotting), growing the table with empty entries as needed. Order-independent
+    // — unlike Add(), it does not assume members load in increasing baseIndex order.
+    void SetAt(int index, const std::string& text, const std::string& name,
+               u8 tag = kTagNone);
+
     int Count() const { return static_cast<int>(entries_.size()); }  // dword_62EB24
 
     // dword_8C36B0[id] — the i-th string. Returns nullptr when out of range

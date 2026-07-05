@@ -57,19 +57,31 @@ void FoldTrack(BonePaletteRecord& rec, const BoneTrack& tr, bool first) {
         guild::util::VectorLerp(a, b, (float)t, lerpT);
     }
 
-    // accT += weight * (lerpT - refT). On the new-record path the original writes
-    // (overwrites) accT; on the existing-record path it adds. refT lives at +84.
-    float d0 = lerpT[0] - rec.refT[0];
-    float d1 = lerpT[1] - rec.refT[1];
-    float d2 = lerpT[2] - rec.refT[2];
+    // gilde.exe 0x5cc0d0 accumulation (HARDEN fix, both paths were wrong):
+    //   NEW record (0x5cc4xx): delta = lerp - refT(+84);
+    //                          accT = weight*delta; then accT += refT
+    //                          -> accT = refT + weight*(lerp - refT).
+    //   EXISTING record (0x5cc25x): delta = lerp - CURRENT accT(+68);
+    //                          accT += weight*delta   (relaxation toward lerp).
     if (first) {
+        float d0 = lerpT[0] - rec.refT[0];
+        float d1 = lerpT[1] - rec.refT[1];
+        float d2 = lerpT[2] - rec.refT[2];
         rec.accT[0] = tr.weight * d0;
         rec.accT[1] = tr.weight * d1;
         rec.accT[2] = tr.weight * d2;
+        rec.accT[0] = rec.accT[0] + rec.refT[0];   // v52 = accT + refT
+        rec.accT[1] = rec.accT[1] + rec.refT[1];
+        rec.accT[2] = rec.accT[2] + rec.refT[2];
     } else {
-        rec.accT[0] += tr.weight * d0;
-        rec.accT[1] += tr.weight * d1;
-        rec.accT[2] += tr.weight * d2;
+        // delta stored to float (v86 fstp), then weight*delta + accT is one
+        // 80-bit chain with a single store — modeled with double.
+        float d0 = lerpT[0] - rec.accT[0];
+        float d1 = lerpT[1] - rec.accT[1];
+        float d2 = lerpT[2] - rec.accT[2];
+        rec.accT[0] = (float)((double)tr.weight * d0 + rec.accT[0]);
+        rec.accT[1] = (float)((double)tr.weight * d1 + rec.accT[1]);
+        rec.accT[2] = (float)((double)tr.weight * d2 + rec.accT[2]);
     }
 
     // Rotation rows: build from/to 4x4 from the per-frame Euler triple, blend each

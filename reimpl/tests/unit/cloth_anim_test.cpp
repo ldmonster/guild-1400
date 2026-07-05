@@ -1,5 +1,5 @@
 // Golden tests for the FLAG / BANNER ("Wimpel") animation cluster:
-//   0x4b5d98 AttachFlag, 0x4b5e90 ShowFlag, 0x4b5ef8 RefreshFlagAnimation,
+//   0x4b5d98 AttachFlag, 0x4b5e9c ShowFlag, 0x4b5ef8 RefreshFlagAnimation,
 //   0x4b62c0 CollectFlagNodes, plus the heraldry texture-index math and the
 //   180° flag-yaw matrix.  See render/cloth_anim.h for the cloth-wave finding
 //   (flags are SKELETAL .baf animations, NOT a vertex-wave grid).
@@ -27,6 +27,7 @@ struct FlagTrace {
     std::string lastAnimFile;
     float lastMat[9] = {0};
     float lastPos[3] = {0};
+    float lastParentPos[3] = {0};
     void* nextHandle = reinterpret_cast<void*>(0x1234);
 };
 
@@ -39,9 +40,10 @@ void* h_attach(void* ctx, void* /*personObj*/, const float pos[3]) {
 void h_point(void* /*ctx*/, void* /*node*/, float out[3]) {
     out[0] = 10.f; out[1] = 20.f; out[2] = 30.f;
 }
-void h_parent(void* ctx, void* /*obj*/, const float mat[9]) {
+void h_parent(void* ctx, void* /*obj*/, const float pos[3], const float mat[9]) {
     auto* t = static_cast<FlagTrace*>(ctx);
     ++t->parentXforms;
+    std::memcpy(t->lastParentPos, pos, sizeof t->lastParentPos);
     std::memcpy(t->lastMat, mat, sizeof t->lastMat);
 }
 void h_tex(void* ctx, void* /*obj*/, int texIndex, void* /*player*/) {
@@ -156,7 +158,7 @@ TEST(cloth_anim, attach_flag_ignores_other_nodes) {
     CHECK_EQ(t.attaches, 1);
 }
 
-// --- ShowFlag: re-applies heraldry on "sp_WIMPEL" only (0x4b5e90) ------------
+// --- ShowFlag: re-applies heraldry on "sp_WIMPEL" only (0x4b5e9c) ------------
 TEST(cloth_anim, show_flag_reapplies_texture) {
     FlagTrace t{};
     FlagAnimHooks H = makeHooks(t);

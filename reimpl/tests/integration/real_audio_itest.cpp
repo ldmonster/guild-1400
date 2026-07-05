@@ -42,20 +42,22 @@ std::size_t AppendWav(std::vector<u8>& b, int ch, int rate, const std::vector<i1
 // Single-entry PCM .sbf for the itest.
 std::vector<u8> BuildSbf(const char* entryName, int ch, int rate,
                          const std::vector<i16>& s) {
-    constexpr std::size_t kEntryBase = 0x148, kEntrySize = 0x40;
+    // Layout per gilde.exe 0x446b2c/0x446830: entries at 0x144; per entry
+    // +0 u32 data offset, +4 name(50), +0x36 fmt byte.
+    constexpr std::size_t kEntryBase = 0x144, kEntrySize = 0x40;
     std::vector<u8> b(kEntryBase + kEntrySize, 0);
     PutStr(b, 0, "ItBank");
     PutLe32(b, 0x134, 1);
     std::size_t e = kEntryBase;
-    PutStr(b, e, entryName);
-    PutLe32(b, e + 0x32, 1);
+    PutStr(b, e + 4, entryName);
+    b[e + 0x36] = 1;
     u32 off = u32(b.size());
     std::size_t blk = b.size();
     b.resize(b.size() + 12, 0);
     std::size_t wavBase = AppendWav(b, ch, rate, s);
     b[blk] = 1;
     PutLe32(b, blk + 4, u32(b.size() - wavBase));
-    PutLe32(b, e + 0x3C, off);
+    PutLe32(b, e + 0x00, off);
     return b;
 }
 

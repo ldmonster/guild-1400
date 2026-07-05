@@ -114,16 +114,22 @@ int IniFile::getInt(const std::string& section, const std::string& key, int def)
 }
 
 // Resolution table recovered from gilde.exe @0x63D70C (u32 array, interleaved).
-// The original computes:  dword_63D728 = tab[2*idx];  dword_63D72C = tab[2*idx+1];
+// VIBE_Config_ReadGfxAndSoundSettings @0x56bbbe:
+//   dword_63D728 = dword_63D70C[2*idx];  dword_63D72C = dword_63D710[2*idx];
 // so each logical entry is the pair (tab[2*idx], tab[2*idx+1]).
+//
+// The table is EXACTLY 3 entries — 24 bytes @0x63D70C..0x63D723. The dwords that
+// follow are SEPARATE named globals, NOT table rows: byte_63D724 (cur_res), then
+// the two OUTPUT dwords dword_63D728 / dword_63D72C. An earlier reconstruction
+// misread those adjacent variables as rows 3..5 (phantom (0,0),(800,600),(0,0)),
+// verified against the raw bytes [320 258 400 300 480 360 | ...]. The engine's
+// read is UNBOUNDED (`tab[2*(u8)cur_res]`, no range check), so idx>=3 reads into
+// those output vars / adjacent memory — undefined; we clamp invalid indices to 0.
 namespace {
 const int kResTable[] = {
     800, 600,   // idx 0
     1024, 768,  // idx 1
     1152, 864,  // idx 2
-    0, 0,       // idx 3
-    800, 600,   // idx 4
-    0, 0,       // idx 5
 };
 const int kResEntries = static_cast<int>(sizeof(kResTable) / sizeof(kResTable[0]) / 2);
 } // namespace

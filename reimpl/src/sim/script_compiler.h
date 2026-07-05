@@ -56,21 +56,22 @@ struct CompiledScript {
 CompiledScript CompileScript(const std::string& source,
                              const std::vector<std::string>& commandNames);
 
-// A 12-byte loop frame on the block-scope stack (+2472 frame array). Recovered
-// from ParseWhileLoop / ParseForLoop / ExecuteStatement.
+// A 12-byte loop frame slot on the per-call block-scope array (the 8 frames at
+// +48 of the 36-dword call record reached via ctx+2472). Recovered 1:1 from
+// ParseWhileLoop (0x44259c) / ParseForLoop (0x4427b4) / ExecuteStatement
+// (0x444bd0) / EvaluateExpression (0x443ff0 LABEL_23):
+//   slot i lives at record + 12*i + 48; a push writes slot[count] then ++count;
+//   every '}' pops the top slot (count--); a ';' pops a pending single-statement
+//   (noBrace) slot when count > 1. Popped slots are NOT cleared — the `else`
+//   dispatcher (0x442ac8) reads slot[count+1].condition, one ABOVE the popped
+//   slot (an original off-by-one, preserved; see DispatchBranch).
 struct LoopFrame {
-    int restartCursor = 0;   // +0  (=+48 in frame array) re-entry source cursor
-    int condition     = 0;   // +4  (=+52) last evaluated condition
-    u8  type          = 0;   // +8  (=+56) 1 = while, 2 = for/once
-    u8  hasBrace      = 0;   // +9  (=+57) body is a { } block (vs single stmt)
-    // Brace-nesting depth INSIDE the loop body (== braceDepth_ just after the
-    // loop's own '{' was consumed). The loop's closing '}' is the one that drops
-    // braceDepth_ back to this value; deeper '}' (e.g. a nested if-block) belong
-    // to inner blocks and must NOT re-test the loop. (The original tracks this via
-    // the per-frame block-scope counter `*(frame+8)` / dword_62E8E0 in
-    // ExecuteStatement; without it, an inner if's '}' would prematurely pop the
-    // enclosing while — the exit() teardown loop of Schornstein_dunkel.esc.)
-    int bodyDepth     = 0;
+    int restartCursor = 0;   // +0 (=+48) source cursor of the loop keyword
+    int condition     = 0;   // +4 (=+52) last evaluated condition (while-true
+                             //     frames keep 0 here: 0x44259c memsets the slot
+                             //     AFTER the condition write, if-frames after)
+    u8  type          = 0;   // +8 (=+56) 1 = while, 2 = if ("for" is a misname)
+    u8  noBrace       = 0;   // +9 (=+57) 1 = single-statement body (no '{ }')
 };
 
 // The source-text-driven executor: drives ScriptLexer over a CompiledScript and
@@ -101,19 +102,23 @@ private:
     // One statement (VIBE_Script_ExecuteStatement). Returns false to stop.
     bool ExecStatement();
 
-    // gilde.exe 0x44259c / 0x4427b4 — while / for loop frame setup.
-    void EnterLoop(u8 type);
-    // gilde.exe 0x442ac8 — if-branch dispatch (skip false guard).
+    // gilde.exe 0x44259c (type 1, while) / 0x4427b4 (type 2, if) — evaluate the
+    // '(' condition ')', push a loop frame, and on a false condition skip the
+    // body (leaving the cursor ON the closing '}' / ';' for the if form so the
+    // statement loop pops the frame). restartCursor = source offset of the
+    // keyword itself (the binary stores cursor - strlen(keyword)).
+    void EnterLoop(u8 type, int restartCursor);
+    // gilde.exe 0x442ac8 — VIBE_Script_DispatchTokenBranch (the `else` keyword).
     void DispatchBranch();
+    // gilde.exe 0x444bd0 LABEL_6 / 0x443ff0 LABEL_23 — a ';' pops a pending
+    // single-statement (noBrace) frame when count > 1; a popped while frame
+    // rewinds the cursor to its restart for the re-test.
+    void PopFrameAtSemicolon();
 
     // Skip a `{ ... }` block (SkipBraceBlock 0x4416c4) or to ';' (SkipToSemicolon
     // 0x441660) from the current cursor.
     void SkipBraceBlock();
     void SkipToSemicolon();
-
-    // Advance past the next '{' and increment braceDepth_ (the "enter block"
-    // transition). Returns true if a '{' was consumed.
-    bool StepIntoBlock();
 
     i32  ReadVar(int idx, int elemIndex) const;
     void WriteVar(int idx, int elemIndex, i32 value);
@@ -126,8 +131,12 @@ private:
     std::vector<std::string> commands_;   // declared before lexer_ (init order)
     ScriptLexer lexer_;
     ScriptHost  host_;
-    std::vector<LoopFrame> loopStack_;   // +2472 frame array
-    int  braceDepth_ = 0;                // dword_62E8E0 — current { } nesting depth
+    // The block-scope frame slots of the current call record (8 usable, cap
+    // enforced as in the binary; slot [9] is readable by the else off-by-one).
+    // Zero-initialised — the deterministic stand-in for the original's
+    // uninitialised heap slots (the else read of a never-written slot).
+    LoopFrame frames_[16];
+    int  frameCount_ = 0;                // call record +8
     bool runnable_ = true;               // +164 bit0
     bool finished_ = false;
     u8   stmtMode_ = 0;                   // +2564

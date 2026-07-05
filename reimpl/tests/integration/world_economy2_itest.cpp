@@ -40,8 +40,9 @@ float RealRating(const void* b, int stat) {
     return sim::Building_EvalProductionRating(
         static_cast<const sim::BuildingRec*>(b), stat);
 }
-// REAL Math_RandomFloatScaled / Coord_ConvertX siblings.
-float RealRollScaled() { return static_cast<float>(util::RandomFloatScaled()); }
+// REAL Math_RandomFloatScaled / Coord_ConvertX siblings. RandomFloatScaled
+// (0x58b910) returns double; the hook surface now carries the full double.
+double RealRollScaled() { return util::RandomFloatScaled(); }
 i32   RealConvertX(double v) { return static_cast<i32>(util::ConvertX(v)); }
 
 } // namespace
@@ -98,8 +99,11 @@ TEST(WorldEconomy2Itest, AppointmentPriceUsesRealRatingAndRng) {
     float price = ComputeAppointmentPrice(rating, /*objectKind*/ 1);
     WorldEconomy2ResetHooks();
 
-    float r1 = static_cast<float>(predictedRoll) + 1.0f;
-    float expected = r1 * (rating * kMenuPriceScaleHi) + kMenuPriceBaseHi;
+    // Mirror the x87 double chain with the single trailing float store (0x481f1c).
+    double r1 = predictedRoll + 1.0;
+    float expected = static_cast<float>(
+        r1 * (static_cast<double>(rating) * static_cast<double>(kMenuPriceScaleHi))
+        + static_cast<double>(kMenuPriceBaseHi));
     CHECK(std::fabs(price - expected) < 1e-4f);
 }
 
@@ -108,23 +112,31 @@ TEST(WorldEconomy2Itest, AppointmentPriceUsesRealRatingAndRng) {
 // dependent. We capture the fan-out and assert the split.
 TEST(WorldEconomy2Itest, DependentFanOutThroughQueueCoord) {
     static int g_calls = 0; static i32 g_lastValue = 0;
-    g_calls = 0; g_lastValue = 0;
+    static i32 g_lastA = 0;    static i32 g_lastB = 0;
+    g_calls = 0; g_lastValue = 0; g_lastA = 0; g_lastB = 0;
 
     WorldEconomy2Hooks h{};
     h.truncate = RealConvertX;
-    h.queueCoord27 = [](i32, i32, i32 value) { g_calls++; g_lastValue = value; };
+    h.queueCoord27 = [](i32 a, i32 b, i32 value) {
+        g_calls++; g_lastA = a; g_lastB = b; g_lastValue = value;
+    };
     WorldEconomy2SetHooks(h);
 
     i32 personEntity[5] = {77, 12, 77, 77, 99};
+    i32 personObjIds[5] = {901, 902, 903, 904, 905};
     bool present[5]     = {true, true, true, true, true};
     i32 perHead = -1;
-    int deps = CountOfficeDependents(/*target*/ 77, personEntity, nullptr, present,
-                                     /*holderOfficeId*/ 50, 5,
-                                     /*totalAmount*/ 600, &perHead);
+    // holderOfficeId 1: index 1 does not match entity 77, so nothing is excluded.
+    int deps = CountOfficeDependents(/*target*/ 77, personEntity, personObjIds,
+                                     present, /*holderOfficeId*/ 1, 5,
+                                     /*totalAmount*/ 600,
+                                     /*paymentAmount*/ 150, &perHead);
     WorldEconomy2ResetHooks();
 
     CHECK_EQ(deps, 3);          // indices 0,2,3
     CHECK_EQ(g_calls, 3);       // one queueCoord27 per dependent
-    CHECK_EQ(g_lastValue, -600);// commands carry -totalAmount
-    CHECK_EQ(perHead, 200);     // 600/3
+    CHECK_EQ(g_lastValue, -150);// commands carry -payment (v27), 0x48233a/0x48233c
+    CHECK_EQ(g_lastA, 902);     // objId[holderOfficeId] (dword_12CE914[134*v11])
+    CHECK_EQ(g_lastB, 904);     // objId[i] of the last dependent (index 3)
+    CHECK_EQ(perHead, 232);     // trunc(600/3) + 32 (add ebp,20h @0x482390)
 }

@@ -103,6 +103,12 @@ const MemGroup* MemoryTracker::FindGroup(const char* name) const {
 void* MemoryTracker::AllocDebug(u32 userSize, const char* info) {
     if (!m_table)
         return nullptr;       // tracker not initialised (dword_62D9F4 == 0)
+    // gilde.exe 0x438f1c — the whole body is guarded by `if (result)` where
+    // `result` is the size arg; a zero-size request returns 0 WITHOUT interning
+    // a group, bumping callCount, or allocating. (Reachable only via a 0-byte
+    // request; kept for exact 1:1 edge behavior.)
+    if (userSize == 0)
+        return nullptr;
 
     // Intern / locate the accounting group for `info`.
     MemGroup* group = InternGroup(info);

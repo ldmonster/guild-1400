@@ -129,7 +129,9 @@ int GuildLevel3ContactStatusId(unsigned defKind);
 // fee = (totalWealth * 0.01 > 160.0) ? totalWealth * 0.01 : 160.0, truncated to int.
 //   gilde.exe: flt_62235C = 0.01 (the 1% rate), flt_622360 = 160.0 (the floor).
 //   The original recomputes wealth in the > branch; we take the already-computed
-//   wealth (it is the same value).
+//   wealth (it is the same value). NOTE the > branch fstp's the product into a
+//   4-byte float (var_10 @0x520a8e) before the ConvertX truncation, so the fee is
+//   single-precision rounded first (1'000'000 -> 10000, not 9999).
 constexpr float  kGuildJoinFeeRate  = 0.0099999997764825821f; // flt_62235C (float 0.01)
 constexpr double kGuildJoinFeeFloor = 160.0;                   // flt_622360
 int GuildLevel2JoinFee(int totalWealth);

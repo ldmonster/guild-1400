@@ -74,17 +74,23 @@ TEST(AnimObject, LoadStreamToStockDedup) {
     StockGuard g;
     static int loadCalls = 0; loadCalls = 0;
     AnimObjHooks h;
-    h.loadBinaryAnimation = [](const char* path, guild::u8) -> AnimStream* {
+    static std::string lastPath; lastPath.clear();
+    h.loadBinaryAnimation = [](const char* path, const char* key,
+                               guild::u8) -> AnimStream* {
         ++loadCalls;
-        auto* s = new AnimStream(); s->name = path; s->meshType = 7; return s;
+        lastPath = path;
+        // 0x5e450c StrNCopyPads the KEY (a2/edx) into the record name.
+        auto* s = new AnimStream(); s->name = key; s->meshType = 7; return s;
     };
     SetAnimObjHooks(&h);
-    AnimStream* a = LoadStreamToStock("walk.baf", 0);
+    AnimStream* a = LoadStreamToStock("walk.baf", 0, "walk_key");
     CHECK(a != nullptr);
-    CHECK_EQ(a->name, std::string("animations/walk.baf"));  // "animations/" prefix
+    CHECK_EQ(a->name, std::string("walk_key"));            // record name == key
+    CHECK_EQ(lastPath, std::string("animations/walk.baf")); // "animations/" path
     CHECK_EQ(loadCalls, 1);
-    // second load of same name => dedup, no new load.
-    AnimStream* b = LoadStreamToStock("WALK.baf", 0);  // case-insensitive dedup
+    // second load with the same KEY => dedup, no new load (0x5d38b9 looks the
+    // stock up by the a3 key, case-insensitively).
+    AnimStream* b = LoadStreamToStock("other.baf", 0, "WALK_KEY");
     CHECK(b == a);
     CHECK_EQ(loadCalls, 1);
     SetAnimObjHooks(nullptr);

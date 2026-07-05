@@ -238,8 +238,8 @@ char PrivilegePanelEnactLaw(const PrivPerson* actor, const PrivEvent* ev,
     if (!actor || !ev) return 96;
     // subject-kind gate (3 -> actor; 4 -> linked, null -> 96; else 96)
     bool bad = false;
-    PickSubject(actor, ev, &bad);
-    if (bad) return 96;                              /*0x561be1*/
+    const PrivPerson* subject = PickSubject(actor, ev, &bad); /*v48 @0x561c12/0x561bdd*/
+    if (bad || !subject) return 96;                  /*0x561be1*/
     // law-class mask (1 -> 0x80000, 2 -> 0x100000, else 96)
     if (EnactLawClassMask(ev->dragField) == 0)       /*v5 / 0x561bec*/
         return 96;
@@ -257,11 +257,15 @@ char PrivilegePanelEnactLaw(const PrivPerson* actor, const PrivEvent* ev,
             actor->office404, found, amount,
             found ? GesetzRecordMinAmount(rec) : 0,
             found ? GesetzRecordMaxAmount(rec) : 0,
-            found ? GesetzRecordMinAmount(rec) : 0); // v46 forbidden == min slot
+            // 0x561c53 `v7 == v46`: v46 sits at ebp-0x40 = record byte +0x18 —
+            // the forbidden comparand is the law-record int @ +24 (NOT the min).
+            found ? ReadRecI32(rec, 24) : 0);
         if (pre != 0) return static_cast<char>(pre);
         i32 clamped = GesetzClampAmount(rec, amount);
         EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -2);
-        EmitB(h, PrivBCommand::kArgs25, actor->handle, 456, EnactLawClassMask(ev->dragField), 4);
+        // 0x561c90: Args25(*(v8+4)=SUBJECT handle, 456, v47=class mask, 4, 0).
+        EmitB(h, PrivBCommand::kArgs25, subject->handle, 456,
+              EnactLawClassMask(ev->dragField), 4);
         if (h && h->trace) h->trace->lastAmount = clamped;
         return 0;                                    /*v52 == 0 on the direct path*/
     }
@@ -282,8 +286,11 @@ char PrivilegePanelEnactLaw(const PrivPerson* actor, const PrivEvent* ev,
                 v52 = static_cast<char>(kEnactLawEnacted); // 128
                 i32 amount = ev->partnerId;
                 i32 clamped = GesetzClampAmount(rec, amount);
-                EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -2);
-                EmitB(h, PrivBCommand::kArgs25, actor->handle, 456, 0, 4);
+                EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -2); /*v51=-2 @0x561cb7*/
+                // 0x561fa0: Args25(*(v48+4)=SUBJECT handle, v50=456, v38=ecx
+                // = v47 class mask (0x561f82 reload), 4, 0).
+                EmitB(h, PrivBCommand::kArgs25, subject->handle, 456,
+                      EnactLawClassMask(ev->dragField), 4);
                 if (h && h->trace) h->trace->lastAmount = clamped;
                 SetDoneB(h, 1);
             }
@@ -321,7 +328,10 @@ char PrivilegeRemoveFromOffice(const PrivPerson* actor, const PrivEvent* ev,
                                             categoryMatches);
         if (r == kRemoveOfficeDone) {
             EmitB(h, PrivBCommand::kActionStart);
-            EmitB(h, PrivBCommand::kArgs25, subject->handle, 456, 0, 4);
+            // (the original also calls VIBE_Office_AddEntryForCharacter(target,
+            //  subject) here @0x562193 — live office-table mutation, hook boundary)
+            // 0x562180: mov ecx,200000h -> Args25 a3 == 0x200000.
+            EmitB(h, PrivBCommand::kArgs25, subject->handle, 456, 0x200000, 4);
             EmitB(h, PrivBCommand::kCoord27, actor->handle,
                   target ? target->handle : 0, -40);
             EmitB(h, PrivBCommand::kActionEnd);
@@ -342,7 +352,9 @@ char PrivilegeRemoveFromOffice(const PrivPerson* actor, const PrivEvent* ev,
                                       /*packetConflict*/ false);
     if (r == kRemoveOfficeCleanRemoved) {
         EmitB(h, PrivBCommand::kActionStart);
-        EmitB(h, PrivBCommand::kArgs25, subject->handle, 456, 0, 4);
+        // (original: VIBE_Office_AddEntryForCharacter @0x562214 — hook boundary)
+        // Args25 a3 == 0x200000 (same ecx constant as the non-office arm).
+        EmitB(h, PrivBCommand::kArgs25, subject->handle, 456, 0x200000, 4);
         EmitB(h, PrivBCommand::kCoord27, actor->handle,
               picked ? picked->handle : 0, -20);
         EmitB(h, PrivBCommand::kActionEnd);
@@ -362,10 +374,12 @@ char PrivilegePanelCounterEspionage(const PrivPerson* actor,
             if (btn == kPrivLoopIdle) continue;
             if (btn == kPrivBtnOk) {
                 if (CheckSkill(h, actor, 4)) {
+                    // 0x56296d..: BuildOp90(actor,-4) is emitted BEFORE the
+                    // handler-filter agent scan (cap 5 in this arm).
+                    EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -4);
                     int n = (h && h->counterEspScan)
                         ? h->counterEspScan(actor->handle, true, h->ctx) : 0;
                     if (h && h->trace) h->trace->agentsReset = n;
-                    EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -4);
                     SetDoneB(h, 1);
                 }
             } else if (btn == kPrivBtnCancelId) {
@@ -375,11 +389,14 @@ char PrivilegePanelCounterEspionage(const PrivPerson* actor,
         return static_cast<char>(kCounterEspDialogResult); // 2
     }
     // --- non-office direct arm (0x562913) ---
+    // Original order: rank gate FIRST (rank<4 -> 32 before anything runs), then
+    // BuildOp90(actor,-4) @0x5629a4, then the uncapped agent scan.
+    if (actor->office404 < 4)
+        return static_cast<char>(kCounterEspRankGate);
+    EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -4);
     int n = (h && h->counterEspScan)
         ? h->counterEspScan(actor->handle, false, h->ctx) : 0;
     if (h && h->trace) h->trace->agentsReset = n;
-    if (actor->office404 >= 4)
-        EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -4);
     return static_cast<char>(CounterEspNonOfficeResult(actor->office404, n > 0));
 }
 
@@ -408,7 +425,9 @@ char PrivilegePanelEmbezzlement(const PrivPerson* actor, const PrivEvent* ev,
                 if (CheckSkill(h, actor, 4)) {
                     EmitB(h, PrivBCommand::kRequest16, actor->handle, -1, amount);
                     EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -4);
-                    EmitB(h, PrivBCommand::kArgs25, subject->handle, 0, 0, 4);
+                    // 0x562523: Args25(subject handle, 456 (lea/sub @0x56239e),
+                    // ecx=0x400000 (@0x56250a), 4, 0).
+                    EmitB(h, PrivBCommand::kArgs25, subject->handle, 456, 0x400000, 4);
                     SetDoneB(h, 1);
                 }
             } else if (btn == kPrivBtnCancelId) {
@@ -422,7 +441,9 @@ char PrivilegePanelEmbezzlement(const PrivPerson* actor, const PrivEvent* ev,
     if (gate != 0) return static_cast<char>(gate);
     EmitB(h, PrivBCommand::kRequest16, actor->handle, -1, amount);
     EmitB(h, PrivBCommand::kBuildOp90, actor->handle, -4);
-    EmitB(h, PrivBCommand::kArgs25, subject->handle, 0, 0, 4);
+    // 0x562407: Args25(subject handle, 456 (var_20 @0x5623b5), ecx=0x400000
+    // (@0x5623e9), 4, 0).
+    EmitB(h, PrivBCommand::kArgs25, subject->handle, 456, 0x400000, 4);
     return 0;                                         /*v27*/
 }
 
@@ -709,9 +730,10 @@ char PrivBuildEvidenceEntry(u16 actorId, i32 actorHandle, u8 actorOfficeBit12,
                     EvWrI32(rec, 0x6C,
                             w.personHandleById[134 * found]); /*var_AC*/
             }
-            // v28.lo = word_12CE910[ ((67*v11)*8) words ] == personId at 536*v11.
-            if (w.personIdById && 536 * found < 268 * w.personIdCount)
-                sink.filter[2] = w.personIdById[536 * found]; /*0x565a3e*/
+            // 0x565a3e: LOWORD(v28) = word_12CE910[268 * v11] — the SAME 268-word
+            // (536-byte) record stride as the judge branch; person v11's id word.
+            if (w.personIdById && found < w.personIdCount)
+                sink.filter[2] = w.personIdById[268 * found]; /*0x565a3e*/
         }
     }
 

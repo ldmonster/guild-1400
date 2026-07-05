@@ -74,18 +74,19 @@ int AnimMeshFrameProcessCalls() { return g_frameProcessCalls; }
 // 0x5D89BC — VIBE_Animation_Advanced.
 // ===========================================================================
 int AnimationAdvanced(AdvancedClip& clip, unsigned frameIndex) {
-    // if ( a5 > (int)*(u16*)(a3 + 42) ) return 0;  (signed compare in original)
+    // gilde.exe 0x5D89BC: `if (a5 > (int)*(u16*)(a3+42)) return 0;` then swap the
+    // frame's mode byte to 3, FrameData_Process, restore, `return 1`. The old
+    // -1/observed-mode returns were invented; the binary returns only 0/1.
     if ((int)frameIndex > (int)clip.frameCount)
-        return -1;
+        return 0;
     AdvancedFrame* f = clip.frames[frameIndex];
     if (!f)
-        return -1;
+        return 0;                 // memory-safety only (binary indexes raw)
     u8 saved = f->mode;       // v9 = *(v8 + 13)
     f->mode = 3;              // *(v8 + 13) = 3
     g_hooks.frameProcess(f);  // VIBE_FrameData_Process(...)
-    int observed = f->mode;   // (the mode the processor saw, before restore)
     f->mode = saved;          // *(v8 + 13) = v10 (restore)
-    return observed;
+    return 1;
 }
 
 // ===========================================================================
@@ -156,12 +157,19 @@ char MeshBuildLodFileName(const char* base, const char* base2, char* out,
     int v6 = lodMode & 0x7F;
     if (lod == 0) {
         if (v6 == 2) {
-            // Probe "%s_%i" indices 2..1 (v7-1 == 1..0) for an existing .bgf.
+            // gilde.exe 0x5D15FC probe loop: sprintf "%s_1", test; on failure
+            // --v7 and sprintf "%s_0", test; on failure --v7 == 0 -> PLAIN copy
+            // and test the plain name (NO re-sprintf: the binary's `goto LABEL_5`
+            // is only taken while v7 > 0); a final failure returns 0.
             char probe[272];
-            for (int v7 = 2; ; ) {
-                std::snprintf(out, 272, kLodFmt, base, v7 - 1);
-                if (base2 && out2)
-                    std::snprintf(out2, 272, kLodFmt, base2, v7 - 1);
+            int v7 = 2;
+            bool plain = false;
+            for (;;) {
+                if (!plain) {
+                    std::snprintf(out, 272, kLodFmt, base, v7 - 1);
+                    if (base2 && out2)
+                        std::snprintf(out2, 272, kLodFmt, base2, v7 - 1);
+                }
                 if (MeshBuildTexturePath(probe, out, ".bgf"))
                     return 1;            // resolved -> done
                 if (--v7 < 0)
@@ -172,6 +180,7 @@ char MeshBuildLodFileName(const char* base, const char* base2, char* out,
                 InlinedStrCpy(out, base);
                 if (base2 && out2)
                     InlinedStrCpy(out2, base2);
+                plain = true;            // subsequent iterations test the plain name
             }
         }
         // v6 != 2: plain copy of the base name(s).
@@ -271,12 +280,20 @@ int MeshTestAabbOverlapRecursive(const Aabb& q, AabbNode* node, Aabb* outBox) {
                 if (b.mx[a] <= c[a]) b.mx[a] = c[a];
             }
         }
-        // The original tests this node's box against the query box q on every
-        // axis (q.mx > b.mn AND q.mn < b.mx); on overlap it grows the running
-        // outBox by b (per-axis min/max). On a miss the box is left untouched.
+        // gilde.exe 0x427820 tests FIVE axes only — the `q.mn[1] < b.mx[1]`
+        // (y-max) comparison is ABSENT in the binary:
+        //   *(q+104) > mnX && *(q+88) < mxX && *(q+108) > mnY &&
+        //   *(q+112) > mnZ && *(q+96) < mxZ          (no +92 < mxY check)
         bool overlap = q.mx[0] > b.mn[0] && q.mn[0] < b.mx[0] &&
-                       q.mx[1] > b.mn[1] && q.mn[1] < b.mx[1] &&
+                       q.mx[1] > b.mn[1] &&
                        q.mx[2] > b.mn[2] && q.mn[2] < b.mx[2];
+        // On overlap the binary walks the node's polygons (40-byte records at
+        // *(node+460)+4, count at +12), and for each polygon passing
+        // VIBE_Mesh_ComputeAabbExtents folds the Y component ([1]) of its three
+        // vertices into the query record's +16 (min) / +20 (max) height range.
+        // The per-polygon vertex walk is NOT surfaced by this AabbNode model
+        // (documented subset — see header); the outBox fold below models the
+        // height-range GROWTH with the node's own Y extent.
         if (overlap && outBox) {
             for (int a = 0; a < 3; ++a) {
                 if (outBox->mn[a] >= b.mn[a]) outBox->mn[a] = b.mn[a];
@@ -285,8 +302,10 @@ int MeshTestAabbOverlapRecursive(const Aabb& q, AabbNode* node, Aabb* outBox) {
         }
         result = 0;                      // a mesh node consumes the test -> 0
     }
+    // Children receive the SAME query/out record (the binary recurses with the
+    // unchanged eax query pointer; the fold target rides along).
     for (AabbNode* c = node->firstChild; c; c = c->nextSibling)
-        result &= MeshTestAabbOverlapRecursive(q, c, nullptr);
+        result &= MeshTestAabbOverlapRecursive(q, c, outBox);
     return result;
 }
 

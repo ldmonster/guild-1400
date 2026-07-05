@@ -35,7 +35,7 @@
 //
 // RECONSTRUCTED HERE 1:1 (the flag cluster around 0x4b5d98):
 //   0x4b5d98  VIBE_Character_AttachFlag          (al = fn(name@eax, person@edx))
-//   0x4b5e90  VIBE_Character_ShowFlag            (al = fn(name@eax, player@edi))
+//   0x4b5e9c  VIBE_Character_ShowFlag            (al = fn(name@eax, player@edi))
 //   0x4b5ef8  VIBE_Character_RefreshFlagAnimation(al = fn(obj@eax))
 //   0x4b62c0  VIBE_Character_CollectFlagNodes    (al = fn(node@eax, acc@edx))
 //
@@ -125,9 +125,13 @@ struct FlagAnimHooks {
     // new object handle (0 on failure).  `personObj` == person record +97.
     void* (*attachToUniverseNode)(void* ctx, void* personObj, const float pos[3]) = nullptr;
 
-    // 0x5b7e24 — VIBE_Object_ApplyParentTransform(obj, mat3+pos): apply the local
-    // 3x3 rotation (from MatrixFromEuler) so the flag faces away (180° yaw).
-    void (*applyParentTransform)(void* ctx, void* obj, const float mat[9]) = nullptr;
+    // 0x5b7e24 — VIBE_Object_ApplyParentTransform(obj@eax, pos@edx, mat@ebx):
+    // transforms `pos` through the parent (TransformPointToParent) with the 3x3
+    // from MatrixFromEuler, then SetPosition + SetWorldTranslation. The call site
+    // @0x4b5e17 passes the SAME bone-chain pos fed to AttachToUniverseNode
+    // (edx = &v10) and the matrix in ebx (still live from MatrixFromEuler).
+    void (*applyParentTransform)(void* ctx, void* obj, const float pos[3],
+                                 const float mat[9]) = nullptr;
 
     // 0x5b3f54 — VIBE_Object_SelectTextureSet(obj, obj+460 material, 1, texIndex,
     // player): select the heraldry coat-of-arms texture set on the flag object.
@@ -184,7 +188,7 @@ struct FlagObject {
 bool AttachFlag(FlagAnimHooks& H, const char* nodeName, void* node,
                 const FlagPerson& person, void* player, FlagObject& out);
 
-// gilde.exe 0x4b5e90 — VIBE_Character_ShowFlag(name, player).
+// gilde.exe 0x4b5e9c — VIBE_Character_ShowFlag(name, player).
 //   Per-node callback: if `nodeName` != "sp_WIMPEL" OR person.heraldry == 0xFFFF
 //   -> no-op, return true.  Else just re-apply the heraldry texture set on the
 //   existing flag object (no re-attach, no re-animate):

@@ -24,8 +24,10 @@ i32 Truncate(double v) {
     return g_hooks.truncate ? g_hooks.truncate(v) : DefaultTruncate(v);
 }
 
-float RandFloatScaled() {
-    return g_hooks.randFloatScaled ? g_hooks.randFloatScaled() : 0.0f;
+// VIBE_Math_RandomFloatScaled (0x58b910) returns DOUBLE — the kernels consume
+// the full-precision roll exactly as the x87 chains do.
+double RandFloatScaled() {
+    return g_hooks.randFloatScaled ? g_hooks.randFloatScaled() : 0.0;
 }
 
 float ProductionRating(const void* building, int stat) {
@@ -42,8 +44,11 @@ float ProductionRating(const void* building, int stat) {
 //   v27 = (int)ConvertX(...);    // truncate via Coord_ConvertX
 // ---------------------------------------------------------------------------
 i32 ComputeOfficePaymentAmount(const void* building) {
+    // 0x482299: fstp v25 (the rating IS stored to a 4-byte float); the rest of
+    // the chain (fmul 15.0f, faddp roll+1, fmulp, fadd 5.0, fmul 2.55) stays on
+    // the FPU at double precision until ConvertX truncates it.
     float rating = ProductionRating(building, 4);
-    double v = ((static_cast<double>(RandFloatScaled()) + 1.0)
+    double v = ((RandFloatScaled() + 1.0)
                 * (static_cast<double>(rating) * static_cast<double>(kPayRatingScale))
                 + kPayBase)
                * kPayFinalScale;
@@ -57,15 +62,19 @@ i32 ComputeOfficePaymentAmount(const void* building) {
 //   else
 //     v22 = 1.0 - ((RandomFloatScaled()+1.0) * (rating*0.3f) + 0.2);
 //   v35 = (float)v22;
-// The high branch is a single-precision chain; the low branch promotes to double
-// for the 0.2 (dbl_61AF28) subtract — we mirror both.
+// BOTH branches are x87 chains held on the FPU stack at double precision (the
+// roll v64 is a double, the float constants are promoted on load) with a single
+// fstp to the 4-byte float v35 at the end — model with double throughout and one
+// final float rounding (per the disasm at 0x481f1c..0x481f40).
 // ---------------------------------------------------------------------------
 float ComputeAppointmentPrice(float rating, int objectKind) {
-    float r1 = RandFloatScaled() + 1.0f;
+    double r1 = RandFloatScaled() + 1.0;
     if (objectKind == 1) {
-        return r1 * (rating * kMenuPriceScaleHi) + kMenuPriceBaseHi;
+        return static_cast<float>(
+            r1 * (static_cast<double>(rating) * static_cast<double>(kMenuPriceScaleHi))
+            + static_cast<double>(kMenuPriceBaseHi));
     }
-    double inner = static_cast<double>(r1)
+    double inner = r1
                    * (static_cast<double>(rating) * static_cast<double>(kMenuPriceScaleLo))
                    + kMenuPriceBaseLo;
     return static_cast<float>(1.0 - inner);
@@ -74,10 +83,12 @@ float ComputeAppointmentPrice(float rating, int objectKind) {
 // ---------------------------------------------------------------------------
 // RollActionDirection — BuildOfficeActionDialog (0x4825c9..0x4825e5):
 //   v64 = RandomFloatScaled();  v63 = (v64 <= 0.3f) ? -1 : 1;
+// 0x4825ce: fst v64 (double); fcomp flt_61AF50 — the DOUBLE roll is compared
+// against the promoted 0.3f; no float rounding of the roll before the compare.
 // ---------------------------------------------------------------------------
 int RollActionDirection() {
-    float roll = RandFloatScaled();
-    return roll <= kActionRollGate ? -1 : 1;
+    double roll = RandFloatScaled();
+    return roll <= static_cast<double>(kActionRollGate) ? -1 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,24 +111,31 @@ int ScanMaxCandidateRank(const u8* candidateRanks, int count) {
 }
 
 // ---------------------------------------------------------------------------
-// CountOfficeDependents — BuildElectionDialog (0x4822c6..0x482377):
+// CountOfficeDependents — BuildElectionDialog (0x4822c6..0x482390):
 //   v5 = 0;
 //   for (v4 = 0; v4 < 768; ++v4)               // person index
 //     if (present[v4] && targetEntity == personEntity[v4]) {
 //       v11 = holderOfficeId;                  // *(u16*)(holder+39)
-//       if (v11 != v4) { ++v5; queueCoord27(...); }
+//       if (v11 != v4) {
+//         ++v5;
+//         // 0x482322..0x482343: imul eax,218h; ebx = -var_18 (the PAYMENT v27);
+//         // eax = dword_12CE914[134*v11]; edx = dword_12CE914[134*v4]:
+//         QueueRequestCoord27(objId[v11], objId[v4], -payment);
+//       }
 //     }
-//   if (v5) severance = (double)totalAmount / (double)v5;
-// We forward each queued dependent through queueCoord27 (the original's
-// VIBE_Command_QueueRequestCoord27) so the integration test can observe the
-// cross-module fan-out. Returns v5; *outPerHead = (int)(totalAmount / v5).
+//   if (v5) {
+//     // 0x48236d..0x482390: fild [a2+8]; fild v5; fdivp; ConvertX; fistp;
+//     // mov ebp, trunc; add ebp, 20h   <- the queued per-head is trunc + 32
+//     perHead = trunc((double)totalAmount / (double)v5) + 32;
+//     ...second pass queues QueueRequest16(objId[v4], -1, perHead, currency)...
+//   }
+// The coord27 fan-out routes through the queueCoord27 hook; the pass-2 per-head
+// amount (INCLUDING the +32) is returned in *outPerHead for the caller to queue.
 // ---------------------------------------------------------------------------
 int CountOfficeDependents(i32 targetEntity, const i32* personEntity,
-                          const u16* officeIds, const bool* present,
+                          const i32* personObjIds, const bool* present,
                           u16 holderOfficeId, int count, i32 totalAmount,
-                          i32* outPerHead) {
-    (void)officeIds; // the original reads holderOfficeId from the holder record;
-                     // exposed as a parameter so callers needn't pass the table.
+                          i32 paymentAmount, i32* outPerHead) {
     int dependents = 0;
     for (int i = 0; i < count; ++i) {
         bool live = present ? present[i] : true;
@@ -125,8 +143,14 @@ int CountOfficeDependents(i32 targetEntity, const i32* personEntity,
             // v11 (holderOfficeId) != v4 (the person index) — self-exclusion.
             if (static_cast<int>(holderOfficeId) != i) {
                 ++dependents;
-                if (g_hooks.queueCoord27)
-                    g_hooks.queueCoord27(holderOfficeId, personEntity[i], -totalAmount);
+                if (g_hooks.queueCoord27) {
+                    // dword_12CE914[134*v11] / dword_12CE914[134*v4] — both args
+                    // are +4 object-ids, NOT the compared +364 entity values.
+                    i32 a = personObjIds ? personObjIds[holderOfficeId]
+                                         : static_cast<i32>(holderOfficeId);
+                    i32 b = personObjIds ? personObjIds[i] : personEntity[i];
+                    g_hooks.queueCoord27(a, b, -paymentAmount);
+                }
             }
         }
     }
@@ -134,6 +158,7 @@ int CountOfficeDependents(i32 targetEntity, const i32* personEntity,
         *outPerHead = dependents
                           ? Truncate(static_cast<double>(totalAmount)
                                      / static_cast<double>(dependents))
+                                + 32   // add ebp, 20h @0x482390
                           : 0;
     }
     return dependents;

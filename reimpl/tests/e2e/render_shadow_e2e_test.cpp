@@ -121,10 +121,11 @@ TEST(RenderShadowE2E, MipmapChain) {
 TEST(RenderShadowE2E, FalloffCurveShape) {
     static float table[kFalloffEntries];
     InitFalloffTable(table);
-    CHECK(std::fabs(table[0] - 1.0f) <= 1e-6f);    // no falloff at distance 0
-    CHECK(table[1023] < 0.05f);                     // near-zero at the far edge
-    // Halfway index -> asin(0.5)*2/pi subtracted from 1.
-    float midRef = (float)(1.0 - std::asin(0.5) * (2.0 / M_PI));
+    // acos form (harden fix @0x5f0b9c): rises ~0 (grazing) -> ~0.97 (facing).
+    CHECK(std::fabs(table[0] - 0.0f) <= 1e-6f);     // ~0 at grazing incidence
+    CHECK(table[1023] > 0.95f);                     // near-one at the facing edge
+    // Halfway index -> acos(0.5)*2/pi subtracted from 1.
+    float midRef = (float)(1.0 - std::acos(0.5) * (2.0 / M_PI));
     CHECK(std::fabs(table[512] - midRef) <= 1e-6f);
 }
 

@@ -360,9 +360,8 @@ struct CrossFadeRec {
     i32 stride  = 0;  // [4]
     i32 rowsLo  = 0;  // [3]
     i32 dstX    = 0;  // [2]
-    i32 alpha   = 0;  // [28]
+    i32 alpha   = 0;  // byte +28 (decompile's v3[7]): fade alpha AND teardown timer
     i32 height  = 0;  // [5]
-    i32 age     = 0;  // [7]
 };
 struct CrossFadeHooks {
     virtual ~CrossFadeHooks() = default;

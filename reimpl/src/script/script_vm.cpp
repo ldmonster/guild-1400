@@ -327,9 +327,15 @@ term:                                                     /*LABEL_10 0x442bf5*/
 }
 
 // ===========================================================================
-// 0x442d88 — VIBE_Script_ParseDeclaration(ctx)
+// 0x442d88 — VIBE_Script_ParseDeclaration(ctx@<eax>, type@<edx>)
+//
+// The caller (VIBE_Script_CompileBlock @0x443692: `mov edx,[esp+var_83]; sar
+// edx,18h`) passes the just-parsed type keyword's code — token.value>>24 — in
+// edx. That `a1`/edx value is forwarded verbatim as the DefineVariable `type`
+// argument in every declaration path, so the variable is sized/typed per the
+// keyword (int/byte/string/float), not always int.
 // ===========================================================================
-i32 ParseDeclaration(u8* ctx) {
+i32 ParseDeclaration(u8* ctx, u8 type) {
     TokenResult tok;
 
     NextToken(g_currentCtx, &tok);                        /*0x442da4*/
@@ -343,7 +349,7 @@ i32 ParseDeclaration(u8* ctx) {
 
     if (sub == 10) {                                      // scalar decl /*0x442e01*/
         if (!LookupVariable(ctx, name)) {                 /*0x442eea*/
-            u8* rec = DefineVariable(ctx, kVarInt, 1, 1); /*0x442f09*/
+            u8* rec = DefineVariable(ctx, type, 1, 1);    /*0x442f09*/
             CopyNameZ(reinterpret_cast<char*>(rec + kVar_Name), name); /*0x442f0d*/
         }
         return 1;
@@ -351,7 +357,7 @@ i32 ParseDeclaration(u8* ctx) {
     if (sub == 2) {                                       // '=' init /*0x442e0a*/
         u8* rec = nullptr;
         if (!LookupVariable(ctx, name)) {                 /*0x442f3d*/
-            rec = DefineVariable(ctx, kVarInt, 1, 1);     /*0x442f58*/
+            rec = DefineVariable(ctx, type, 1, 1);        /*0x442f58*/
             CopyNameZ(reinterpret_cast<char*>(rec + kVar_Name), name); /*0x442f5e*/
         }
         NextToken(g_currentCtx, &tok);                    /*0x442f84*/
@@ -366,7 +372,7 @@ i32 ParseDeclaration(u8* ctx) {
             if (tok.cls == 5) size = tok.value;           /*0x442e34*/
             else { size = 1; ReportError(ctx, CursorVal(ctx), "Illegal array size..."); } /*0x443073*/
             if (!LookupVariable(ctx, name)) {             /*0x442e44*/
-                u8* rec = DefineVariable(ctx, kVarInt, size, size); /*0x442e53*/
+                u8* rec = DefineVariable(ctx, type, size, size); /*0x442e53*/
                 CopyNameZ(reinterpret_cast<char*>(rec + kVar_Name), name); /*0x442e58*/
             }
             NextToken(g_currentCtx, &tok);                /*0x442e86*/
@@ -453,11 +459,17 @@ int EnterFunction(u8* ctx, u8* funcRecPtr) {
         Dw(AsPtr(Dw(ctx, kIdx_ActiveFrame)), 1 /*frame+4*/) = Dw(ctx, kIdx_Cursor); /*0x44333f*/
     }
 
-    // Push the new call frame at ctx dword index (42 + 36*depth).
+    // Push the new call frame at ctx dword index (42 + 36*depth). The image
+    // computes the frame-window base v16 = ctx + 36*depth (dwords) and writes
+    // funcRec at v16[42] and ctx[622] at v16[45] — i.e. at the active-frame
+    // base (v16+42) itself: funcRec -> frame[0], ctx[622] -> frame[3]. (Disasm
+    // 0x443364/0x443372/0x443381: [ecx+9A8h]=activeFrame; eax=v16=ctx+144*depth;
+    // [eax+0A8h(=168=42dw)]=funcRec == activeFrame[0]; [eax+0B4h(=180=45dw)]=
+    // ctx[622] == activeFrame[3].)
     u8* newActive = ctx + (std::size_t)(kIdx_CallFrames + kCallFrameStride * depth) * kPtr; /*0x443358/0x443364*/
     Dw(ctx, kIdx_ActiveFrame) = AsInt(newActive);
-    Dw(newActive, 45) = Dw(ctx, kIdx_LocalCursor);                 /*0x443372 newActive[45]*/
-    Dw(newActive, 42) = AsInt(fr);                                 /*0x443381 newActive[42]*/
+    Dw(newActive, 3) = Dw(ctx, kIdx_LocalCursor);                  /*0x443372 v16[45] == frame[3]*/
+    Dw(newActive, 0) = AsInt(fr);                                  /*0x443381 v16[42] == frame[0]*/
 
     // Bind each parameter as a local; copy the evaluated value into storage.
     char* nameBase = reinterpret_cast<char*>(fr + kFunc_ParamNames); // v39

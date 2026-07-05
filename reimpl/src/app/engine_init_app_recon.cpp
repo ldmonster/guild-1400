@@ -152,17 +152,21 @@ int VIBE_App_InitEngineAndScriptCommands(const EngineInitGlobals& g,
         (void)h.buildingComputeMarketPrice(c.prot, c.qty);
 
     // ---- audio bring-up (sfx gate dword_63C900) ----------------------------
+    // The music gate is a LIVE global the lib-init failure path clears before
+    // the music block below reads it (clears at 0x528784/0x52878a; the music
+    // block re-reads dword_63C8F8 at 0x528800).
+    bool musicEnabled = g.musicEnabled;
     if (g.sfxEnabled) {
         // VIBE_Audio_StartupMilesDriver();
         h.audioStartupMilesDriver();
         // if ( VIBE_Sound_LibInit(&unk_989680, 48, 2, 44100) ) {
-        //     dword_63C900 = 0; dword_63C8F8 = 0;   (disable on failure)
+        //     dword_63C900 = 0; dword_63C8F8 = 0;   (nonzero = failure)
         // }
         if (h.soundLibInit()) {
-            // sfx + music gates are cleared on lib-init failure. We mirror this
-            // onto a local copy because g is const input; tests observe via the
-            // recording hook. The clear is purely a guard for code below, but in
-            // this function nothing further reads the gate, so behavior matches.
+            // dword_63C900 = 0 has no further reader inside this function; the
+            // dword_63C8F8 = 0 clear DOES gate the music block below
+            // (`if (dword_63C8F8)` at 0x5287f6) — mirror it.
+            musicEnabled = false;
         }
         // VIBE_Sound3d_InitPool(64);
         h.sound3dInitPool(64);
@@ -178,8 +182,8 @@ int VIBE_App_InitEngineAndScriptCommands(const EngineInitGlobals& g,
         h.soundPreloadFromIncludeFile("\\include_sfx.ini");
     }
 
-    // ---- music bring-up (music gate dword_63C8F8) --------------------------
-    if (g.musicEnabled) {
+    // ---- music bring-up (music gate dword_63C8F8, possibly cleared above) ---
+    if (musicEnabled) {
         // VIBE_Sound_InitThread(2, ?, 44100);
         h.soundInitThread();
         // sprintf(v25, "%smsx\\", aProjectGame);

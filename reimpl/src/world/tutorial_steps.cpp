@@ -30,7 +30,7 @@ const TutorialNodeSpec kChapter1[] = {
   {  1, "Hs1c", 1, 7389, "CHAPTER_1_H_MAIN", 7391, "CHAPTER_1_H_REMIND",  0,    nullptr,        7392, "CHAPTER_1_H_DONE", kVoiceMain, 142,   TutorialCallback::kNone,    TutorialCallback::kNone,                TutorialCallback::kSharedMatch, 19,   8520, 10,  0,      2071, 0 },
   {  1, "Is1c", 1, 7393, "CHAPTER_1_I_MAIN", 7395, "CHAPTER_1_I_REMIND",  0,    nullptr,        7396, "CHAPTER_1_I_DONE", kVoiceMain, 142,   TutorialCallback::kNone,    TutorialCallback::kNone,                TutorialCallback::kSharedMatch, 20,   8520, 10,  0,      6167, 0 },
   {  1, "Js1c", 1, 7397, "CHAPTER_1_J_MAIN", 7399, "CHAPTER_1_J_REMIND",  0,    nullptr,        7400, "CHAPTER_1_J_DONE", kVoiceMain, 355,   TutorialCallback::kNone,    TutorialCallback::kEvent13SetState11,    TutorialCallback::kSharedMatch, 13,   8520, 10,  0,      6199, 0 },
-  {  7, "1rtu", 3, 7401, "CHAPTER_1_OUTRO",    0,    nullptr,             0,    nullptr,           0,    nullptr,          -1,         355,   TutorialCallback::kNone,    TutorialCallback::kNone,                TutorialCallback::kSharedMatch, 0,    0,    11,  0,      6199, 0 },
+  {  1, "1rtu", 3, 7401, "CHAPTER_1_OUTRO",    0,    nullptr,             0,    nullptr,           0,    nullptr,          -1,         355,   TutorialCallback::kNone,    TutorialCallback::kNone,                TutorialCallback::kSharedMatch, 0,    0,    11,  0,      6199, 0 },
 };
 
 // gilde.exe 0x598874 — InitChapter2Steps (intro + A,B,C,C1,D,E,F + outro).
@@ -43,7 +43,7 @@ const TutorialNodeSpec kChapter2[] = {
   {  2, "Es2c", 1, 7421, "CHAPTER_2_D_MAIN", 7423, "CHAPTER_2_D_REMIND",  0,    nullptr,        7424, "CHAPTER_2_D_DONE", kVoiceMain, 142,   TutorialCallback::kBeginQueryOpenBuilding, TutorialCallback::kEvent27Or28State13, TutorialCallback::kCheckTargetStateOpen,  1,  8520, 10, 0, 22583, 7680 },
   {  2, "Fs2c", 1, 7425, "CHAPTER_2_E_MAIN", 7427, "CHAPTER_2_E_REMIND",  0,    nullptr,        7428, "CHAPTER_2_E_DONE", kVoiceMain, 142,   TutorialCallback::kBeginQueryOpenBuildingAlt, TutorialCallback::kEvent25Or26Code19, TutorialCallback::kCheckTargetStateOpenOrTwo, 1, 8520, 10, 0, 22583, 7680 },
   {  2, "Gs2c", 1, 7429, "CHAPTER_2_F_MAIN", 7431, "CHAPTER_2_F_REMIND",  0,    nullptr,           0,    nullptr,         kVoiceMain, 142,   TutorialCallback::kNone,                  TutorialCallback::kEvent25Code116,    TutorialCallback::kCheckTargetStateOpenTwoOr18, 1, kVoiceMain, 10, 0, 22583, 7680 },
-  {  7, "2rtu", 3, 7432, "CHAPTER_2_OUTRO",    0,    nullptr,             0,    nullptr,           0,    nullptr,          -1,         355,   TutorialCallback::kNone,                  TutorialCallback::kNone,              TutorialCallback::kNone,                   0,  0,    11, 0, 22583, 7680 },
+  {  2, "2rtu", 3, 7432, "CHAPTER_2_OUTRO",    0,    nullptr,             0,    nullptr,           0,    nullptr,          -1,         355,   TutorialCallback::kNone,                  TutorialCallback::kNone,              TutorialCallback::kNone,                   0,  0,    11, 0, 22583, 7680 },
 };
 
 // gilde.exe 0x597e80 — InitMainIntro single node.

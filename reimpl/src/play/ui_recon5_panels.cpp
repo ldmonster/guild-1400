@@ -98,18 +98,24 @@ int InfoPanelTraitRows(bool traitsWordEnabled,
 // ---------------------------------------------------------------------------
 // gilde.exe 0x55a9f8 — VIBE_MapTable_RunCityTowerScene  (corner interpolation)
 //
-//   v22 = rechtsUnten.x[+76] - linksOben.x[+76];
-//   v20[0] = rechtsUnten.z[+84] - linksOben.z[+84];
+//   v22 = rechtsUnten.x[+76] - linksOben.x[+76];   (stored to a float local)
+//   v20[0] = rechtsUnten.z[+84] - linksOben.z[+84]; (stored to a float local)
 //   v16 = linksOben.x; v18 = linksOben.z;
-//   v7 = cornerU[i] * scaleU;  v8 = cornerV[i] * scaleV;
-//   v16 = v7 * v22 + v16;      v18 = v8 * v20[0] + v18;
+//   v7 = (double)cornerU * scaleU;  v8 = (double)cornerV * scaleV;   (double)
+//   v16 = v7 * v22 + v16;           v18 = v8 * v20[0] + v18;
+// v7/v8 are DOUBLE locals and the product+add chain stays on the x87 stack
+// until the single fstp into the float v16/v18 — so the corner*scale product
+// is formed in double and the whole `v7*dx + linksOben` folds with ONE final
+// float rounding (not float-rounded per step).
 Vec2 CityTowerPennantPos(const Vec2& linksOben, const Vec2& rechtsUnten,
                          f32 cornerU, f32 cornerV, f32 scaleU, f32 scaleV) {
-    const f32 dx = rechtsUnten.x - linksOben.x;
-    const f32 dz = rechtsUnten.z - linksOben.z;
+    const f32 dx = rechtsUnten.x - linksOben.x;   // v22 (float store)
+    const f32 dz = rechtsUnten.z - linksOben.z;   // v20[0] (float store)
+    const double v7 = static_cast<double>(cornerU) * static_cast<double>(scaleU);
+    const double v8 = static_cast<double>(cornerV) * static_cast<double>(scaleV);
     Vec2 r;
-    r.x = static_cast<f32>(static_cast<double>(cornerU * scaleU) * dx) + linksOben.x;
-    r.z = static_cast<f32>(static_cast<double>(cornerV * scaleV) * dz) + linksOben.z;
+    r.x = static_cast<f32>(v7 * static_cast<double>(dx) + static_cast<double>(linksOben.x));
+    r.z = static_cast<f32>(v8 * static_cast<double>(dz) + static_cast<double>(linksOben.z));
     return r;
 }
 

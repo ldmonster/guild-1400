@@ -467,8 +467,18 @@ TEST(GfxCrossFade, OverflowCopiesRows) {
 }
 
 TEST(GfxCrossFade, TeardownPast288) {
-    CrossFadeRec rec; rec.surface = 1; rec.alpha = 250; rec.height = 0; rec.age = 300;
+    // The teardown gate is the ALPHA field itself (@0x41e897 reads the same
+    // +28 dword written @0x41e830) — old pin used a phantom "age" field.
+    CrossFadeRec rec; rec.surface = 1; rec.alpha = 288; rec.height = 0;
     RecFade h;
     GfxCrossFadeStep(rec, h);
-    CHECK_EQ(h.tore, 1);                    // age > 288 -> teardown
+    CHECK_EQ(rec.alpha, 296);
+    CHECK_EQ(h.tore, 1);                    // alpha > 288 -> teardown
+}
+
+TEST(GfxCrossFade, NoTeardownAtOrBelow288) {
+    CrossFadeRec rec; rec.surface = 1; rec.alpha = 250; rec.height = 0;
+    RecFade h;
+    GfxCrossFadeStep(rec, h);               // alpha 258: rows path, no teardown
+    CHECK_EQ(h.tore, 0);
 }

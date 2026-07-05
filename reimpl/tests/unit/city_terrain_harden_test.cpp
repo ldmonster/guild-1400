@@ -189,11 +189,13 @@ TEST(CityTerrain, GetOrBuildTileGatesOnMixedBlock) {
 }
 
 // ---------------------------------------------------------------------------
-// SEASONAL FLOOR RESOLVE (FloorTextureResolver::SetSeason): the load order is
-// <name><season>_high -> <name><season> -> <name>_high -> <name>, with the
-// season words _fruehling / (base) / _herbst / _snow (spring..winter — the
-// shipped _DYNAMIC/Boden set; live-validated day 0 == season 0 == spring).
-// A season change invalidates the resolved slots.
+// FLOOR RESOLVE is by PLAIN NAME: VIBE_Texture_BuildBmpPath @0x5d97e8 builds
+// "*"+name+".BMP" verbatim — no season and no _high/detail suffix. Seasonal
+// ground is selected upstream through the TXS material sets (the F/S/H/W rows),
+// NOT by the floor texture resolver. So Resolve() returns the plain base name
+// for every season; SetSeason only invalidates the cached slots (a re-resolve
+// to the same base name). (An earlier season-suffix load order was a Rule-8
+// analogue — reverted; see floorgfx_recon.cpp LoadSlot.)
 // ---------------------------------------------------------------------------
 #include "render/floorgfx_recon.h"
 #include "render/texture_asset.h"
@@ -204,11 +206,11 @@ int SeedRec(render::TextureAssetCache& cache, const std::string& name) {
 }
 } // namespace
 
-TEST(CityTerrain, SeasonalFloorResolvePreference) {
+TEST(CityTerrain, SeasonalFloorResolveBaseName) {
     render::TextureAssetCache cache(32);
     SeedRec(cache, "WIESE");
-    SeedRec(cache, "WIESE_fruehling_high");
-    SeedRec(cache, "WIESE_snow_high");
+    SeedRec(cache, "WIESE_fruehling_high");       // present but NEVER preferred
+    SeedRec(cache, "WIESE_snow_high");            // (the loader takes plain name)
 
     char names[8][64];
     std::memset(names, 0, sizeof(names));
@@ -216,25 +218,12 @@ TEST(CityTerrain, SeasonalFloorResolvePreference) {
 
     render::FloorTextureResolver r;
     r.Bind(names, &cache);
-    r.SetSeason(0);                               // spring
-    const render::Texture* t = r.Resolve(0);
-    CHECK(t != nullptr);
-    CHECK(t->name == "WIESE_fruehling_high");
-
-    r.SetSeason(1);                               // summer: base (no _sommer
-    t = r.Resolve(0);                             // files ship; _high unseeded)
-    CHECK(t != nullptr);
-    CHECK(t->name == "WIESE");
-
-    r.SetSeason(2);                               // autumn: _herbst unseeded
-    t = r.Resolve(0);                             // -> falls through to base
-    CHECK(t != nullptr);
-    CHECK(t->name == "WIESE");
-
-    r.SetSeason(3);                               // winter
-    t = r.Resolve(0);
-    CHECK(t != nullptr);
-    CHECK(t->name == "WIESE_snow_high");
+    for (int s = 0; s < 4; ++s) {                 // every season -> plain base
+        r.SetSeason(s);
+        const render::Texture* t = r.Resolve(0);
+        CHECK(t != nullptr);
+        CHECK(t->name == "WIESE");
+    }
 
     // Same-season SetSeason is a no-op (the cached record persists).
     const render::Texture* again = r.Resolve(0);

@@ -55,17 +55,20 @@ TEST(NewGameDiffW15, StartGoldCheatConstant) {
 TEST(NewGameDiffW15, TalentTableGoldenBytes) {
     u8 t[5];
 
-    // variant 1 -> record1 bytes[1..5] = 69 BD 93 69 04
-    // talent copy loop @0x52da00 does `inc eax` FIRST (eax=1..5), reading record
-    // bytes 1..5 and skipping byte 0 — disasm-confirmed. byte_649910 record1 =
-    // 69 69 bd 93 69 04, so talents = {69,bd,93,69,04}.
+    // variant 1 -> record1 bytes[0..4] = 69 69 BD 93 69.
+    // The copy loop @0x52da00 runs eax=1..5, but the load's raw bytes are
+    // 8a 54 04 ff = `mov dl, [esp+eax-1]` (disp8 = -1) with the record at [esp],
+    // so it reads record bytes [0..4].  (An earlier pin claimed [1..5] from the
+    // decompile's pseudo-index; the instruction bytes prove [0..4] — old pins
+    // {69,BD,93,69,04}/{3F,93,69,3F,03} were wrong.)
+    // byte_649910 record1 = 69 69 bd 93 69 04 -> talents = {69,69,bd,93,69}.
     play::NewGameProfessionTalents(1, t);
-    const u8 v1[5] = {0x69, 0xBD, 0x93, 0x69, 0x04};
+    const u8 v1[5] = {0x69, 0x69, 0xBD, 0x93, 0x69};
     CHECK_EQ(std::memcmp(t, v1, 5), 0);
 
-    // variant 2 -> record2 bytes[1..5] = 3F 93 69 3F 03 (record2 = 3f 3f 93 69 3f 03)
+    // variant 2 -> record2 bytes[0..4] = 3F 3F 93 69 3F (record2 = 3f 3f 93 69 3f 03)
     play::NewGameProfessionTalents(2, t);
-    const u8 v2[5] = {0x3F, 0x93, 0x69, 0x3F, 0x03};
+    const u8 v2[5] = {0x3F, 0x3F, 0x93, 0x69, 0x3F};
     CHECK_EQ(std::memcmp(t, v2, 5), 0);
 
     // variant 0 (record 0) -> all zero

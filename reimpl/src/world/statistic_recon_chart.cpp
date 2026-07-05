@@ -79,8 +79,10 @@ int StatChartBuildOfficialComparison(
     }
 
     // ---- Pass 3: normalize, composite, bar height. ----------------------------
-    const double maxScale =
-        static_cast<double>(maxWealth) * static_cast<double>(kStatMaxWealthScale);  // v41
+    // 0x58c19b..0x58c1ba: fild maxWealth; fmul flt_6267CC; fstp DWORD — v41 is
+    // stored as a 4-byte float, and every bar-height multiply reloads that float.
+    const float maxScale = static_cast<float>(
+        static_cast<double>(maxWealth) * static_cast<double>(kStatMaxWealthScale));  // v41
     for (int i = 0; i < count; ++i) {
         OfficialCompareRecord& rec = out[i];
         // ratio = wealth / maxWealth (double divide; maxWealth >= 1 here).
@@ -96,7 +98,10 @@ int StatChartBuildOfficialComparison(
         rec.composite = static_cast<float>(composite);
 
         // barHeight = (int) ConvertX(composite * maxScale)
-        double h = static_cast<double>(rec.composite) * maxScale;
+        // 0x58c21f: `fst dword ptr [edx+1Ch]` (not fstp) — the UNROUNDED
+        // composite stays on the x87 stack and feeds the multiply at 0x58c222;
+        // only the record field is rounded to float.
+        double h = composite * static_cast<double>(maxScale);
         rec.barHeight = static_cast<int>(env.ConvertX(h));
     }
 

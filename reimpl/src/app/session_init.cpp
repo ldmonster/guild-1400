@@ -117,7 +117,7 @@ std::int32_t MoneyMultiplyByRate(std::int32_t amount, std::uint8_t currencyId) {
     return world::AmtMoneyMultiplyByRate(amount, currencyId);
 }
 
-// gilde.exe 0x533c5e — new-game starting purse base.
+// gilde.exe 0x533f35..0x5340e5 — new-game starting purse base.
 //   if (dword_63C7B4)  v29 = 75000;
 //   else               v29 = 1250 - 250 * dword_63C744;
 std::int32_t NewGameStartGoldBase(bool cheat, int difficulty) {

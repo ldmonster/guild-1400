@@ -46,30 +46,39 @@ const float* SampleBoneTranslation(const float* bone, const AnimTrack& track,
 
         float ax = 0.0f, ay = 0.0f, az = 0.0f;
         // Phase 1: leading partial segment (prorated by 1 - segPhase/dur(segFrom)).
+        // x87: the lead factor stays on the FPU stack at 80-bit (fild/fdivp +
+        // fld1/fsubrp, never stored; disasm 0x5cc9cd..0x5cca24); the x/y deltas are
+        // rounded to float first (fstp 0x5cca0a/0x5cca2c) but the z delta is
+        // multiplied unrounded (fst 0x5cca48 keeps it; fmulp 0x5cca4c).
         if (segFrom < toFrame) {
             double lead = 1.0 - (double)segPhase / (double)SegDur(frames, segFrom);
             ax = (float)((KF(frames, segFrom + 1, 32) - KF(frames, segFrom, 32)) * lead);
             ay = (float)((KF(frames, segFrom + 1, 36) - KF(frames, segFrom, 36)) * lead);
-            az = (float)((KF(frames, segFrom + 1, 40) - KF(frames, segFrom, 40)) * lead);
+            az = (float)(((double)KF(frames, segFrom + 1, 40) - KF(frames, segFrom, 40)) * lead);
         }
-        // Phase 2: whole inner segments (segFrom+1 .. toFrame-1).
+        // Phase 2: whole inner segments (segFrom+1 .. toFrame-1); all three deltas
+        // are stored to float before the accumulate (fstp 0x5ccaad/0x5ccad2/0x5ccafb).
         for (int k = segFrom + 1; k < toFrame; ++k) {
             ax += KF(frames, k + 1, 32) - KF(frames, k, 32);
             ay += KF(frames, k + 1, 36) - KF(frames, k, 36);
             az += KF(frames, k + 1, 40) - KF(frames, k, 40);
         }
-        // Phase 3: trailing partial segment at toFrame.
+        // Phase 3: trailing partial segment at toFrame. Unlike the lead, the trail
+        // IS rounded to float (fstp dword @0x5ccb4e) before the multiplies; the z
+        // delta again stays 80-bit through its multiply (fmulp @0x5ccbc5).
         double trailNum = (segFrom == toFrame) ? (double)(phaseEnd - segPhase)
                                                : (double)phaseEnd;
-        double trail = trailNum / (double)SegDur(frames, toFrame);
-        ax += (float)((KF(frames, toFrame + 1, 32) - KF(frames, toFrame, 32)) * trail);
-        ay += (float)((KF(frames, toFrame + 1, 36) - KF(frames, toFrame, 36)) * trail);
-        az += (float)((KF(frames, toFrame + 1, 40) - KF(frames, toFrame, 40)) * trail);
+        float trail = (float)(trailNum / (double)SegDur(frames, toFrame));
+        ax += (float)((KF(frames, toFrame + 1, 32) - KF(frames, toFrame, 32)) * (double)trail);
+        ay += (float)((KF(frames, toFrame + 1, 36) - KF(frames, toFrame, 36)) * (double)trail);
+        az += (float)(((double)KF(frames, toFrame + 1, 40) - KF(frames, toFrame, 40)) * trail);
 
         // Rotate by the bone's local 3x3 (idx 99..109), add base + local translation.
-        float rx = ax * bone[99]  + ay * bone[103] + az * bone[107];
-        float ry = ax * bone[100] + ay * bone[104] + az * bone[108];
-        float rz = ax * bone[101] + ay * bone[105] + az * bone[109];
+        // x87: each row is a six-term faddp chain at 80-bit with one fstp
+        // (0x5ccc17..0x5ccc60) — modeled with double accumulation.
+        float rx = (float)((double)ax * bone[99]  + (double)ay * bone[103] + (double)az * bone[107]);
+        float ry = (float)((double)ax * bone[100] + (double)ay * bone[104] + (double)az * bone[108]);
+        float rz = (float)((double)ax * bone[101] + (double)ay * bone[105] + (double)az * bone[109]);
         out[0] = bone[19] + rx;
         out[1] = bone[20] + ry;
         out[2] = bone[21] + rz;
@@ -87,13 +96,17 @@ const float* SampleBoneTranslation(const float* bone, const AnimTrack& track,
     float dx = KF(frames, f1, 32) - b0x;
     float dy = KF(frames, f1, 36) - b0y;
     float dz = KF(frames, f1, 40) - b0z;
+    // x87 (0x5cc920 else-branch): the x lerp multiplies the UNROUNDED 80-bit
+    // quotient (v15, st7); y and z multiply its float-rounded copy (v48 = v15).
     double t = (double)ph / (double)SegDur(frames, f0);
+    float tf = (float)t;
     float lx = (float)(t * dx + b0x);
-    float ly = (float)(t * dy + b0y);
-    float lz = (float)(t * dz + b0z);
-    float rx = lx * bone[99]  + ly * bone[103] + lz * bone[107];
-    float ry = lx * bone[100] + ly * bone[104] + lz * bone[108];
-    float rz = lx * bone[101] + ly * bone[105] + lz * bone[109];
+    float ly = (float)((double)tf * dy + b0y);
+    float lz = (float)((double)tf * dz + b0z);
+    // Six-term 80-bit faddp rows with a single store — modeled with double.
+    float rx = (float)((double)lx * bone[99]  + (double)ly * bone[103] + (double)lz * bone[107]);
+    float ry = (float)((double)lx * bone[100] + (double)ly * bone[104] + (double)lz * bone[108]);
+    float rz = (float)((double)lx * bone[101] + (double)ly * bone[105] + (double)lz * bone[109]);
     out[0] = bone[19] + rx;
     out[1] = bone[20] + ry;
     out[2] = bone[21] + rz;
@@ -112,9 +125,11 @@ u8 ComputeBoneDelta(void* obj, const AnimTrack& track, i32 toFrame, i32 fromFram
         float d1 = KF(frames, toFrame, 36) - KF(frames, fromFrame, 36);  // +36
         float d2 = KF(frames, toFrame, 40) - KF(frames, fromFrame, 40);  // +40
         // Rotate by obj's 3x3 columns at bytes +396.. (== bone idx 99..109 view).
-        float r0 = d0 * F32(obj, 396) + d1 * F32(obj, 412) + d2 * F32(obj, 428);
-        float r1 = d0 * F32(obj, 400) + d1 * F32(obj, 416) + d2 * F32(obj, 432);
-        float r2 = d0 * F32(obj, 404) + d1 * F32(obj, 420) + d2 * F32(obj, 436);
+        // x87: each row is an 80-bit product/add chain with one store (decompile
+        // v16/v11/v12 are doubles) — modeled with double accumulation.
+        float r0 = (float)((double)d0 * F32(obj, 396) + (double)d1 * F32(obj, 412) + (double)d2 * F32(obj, 428));
+        float r1 = (float)((double)d0 * F32(obj, 400) + (double)d1 * F32(obj, 416) + (double)d2 * F32(obj, 432));
+        float r2 = (float)((double)d0 * F32(obj, 404) + (double)d1 * F32(obj, 420) + (double)d2 * F32(obj, 436));
         float pos[3];
         pos[0] = r0 + F32(obj, 76);
         pos[1] = r1 + F32(obj, 80);
@@ -152,7 +167,10 @@ void UpdateTrackBlendWeight(AnimTrack& track, i32 wFromBits, i32 wToBits,
             else
                 t = (float)((double)(now - startTime) /
                             (double)(endTime - startTime));
-            track.blendCur = (track.blendTo - track.blendFrom) * t + track.blendFrom;
+            // x87: (to-from)*t+from is one 80-bit chain with a single fstp —
+            // modeled with double.
+            track.blendCur = (float)(((double)track.blendTo - track.blendFrom) * t
+                                     + track.blendFrom);
         }
     }
 }

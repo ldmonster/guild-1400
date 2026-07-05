@@ -115,11 +115,12 @@ int RecruitComputeRecruitmentCost(i32 recruiterId, i32 candidateId) {
     double cash = PersonGetCashAmount(markerOf(cand));
     double feeF = kCashNumerator / cash * (static_cast<double>(a)
                                            + static_cast<double>(b));
-    // The original stores this with `fistp`, which rounds to nearest-even under
-    // the default x87 rounding mode (NOT truncation, despite the decompiler's
-    // `(int)`). std::lrint honours the current FE rounding mode (round-to-nearest
-    // by default), matching the binary.
-    int fee = static_cast<int>(std::lrint(feeF));
+    // 0x55d84d: VIBE_Coord_ConvertX is called immediately before the fistp at
+    // 0x55d852 — ConvertX (0x5c6b08) sets the x87 control word to RC=11
+    // (truncate toward zero), so the store TRUNCATES. (An earlier reading
+    // assumed default round-to-nearest and used std::lrint — refuted by the
+    // ConvertX RC=11 semantics established for this tree.)
+    int fee = static_cast<int>(feeF);
 
     // Reputation bytes cand[+0x80..+0x84]: the loop runs from cand+0 incrementing
     // the pointer until it reaches cand+5, but reads [ptr+0x80] each iteration —
@@ -259,8 +260,9 @@ int PersonEvaluateCandidateEligibility(u16 referenceIdx, u16 candidateIdx,
                 return 0;
         }
 
-        // a3+5 bit1: require IsTargetUnderfull(cand); if not, fall through to
-        // the rest of the +5/+6 gates, else continue.
+        // a3+5 bit1 (0x559c07): `(fB&2)==0 || (result = IsTargetUnderfull(cand))
+        // != 0` gates the remaining checks; in the ELSE branch the original
+        // returns `result` — which is the ZERO IsTargetUnderfull just returned.
         bool b5b1 = (fB & 2) != 0;
         if (!b5b1 || TargetUnderfull(cand)) {
             // a3+5 bit2: reject if IsTargetUnderfull(cand).
@@ -290,14 +292,17 @@ int PersonEvaluateCandidateEligibility(u16 referenceIdx, u16 candidateIdx,
                     && (PersonGetDword(&g_persons[cand], kPfTurnBits) & 0x800000))
                 || ((fA & 0x20)
                     && (PersonGetDword(&g_persons[cand], kPfTurnBits) & 0x40000000))
-                || (static_cast<i32>(fA) < 0
+                // 0x559ac5: `*(char*)(a3+4) < 0` — the SIGN of the LOW BYTE of
+                // flagsA (fA bit 7 == 0x80), not bit 31 of the dword.
+                || ((fA & 0x80)
                     && !PersonGetDword(&g_persons[cand], kPfMiscFlag)))
                 return 0;
             // fall through to LABEL_62.
         } else {
-            // b5b1 set and NOT underfull => the original returns the (nonzero)
-            // IsTargetUnderfull result, i.e. eligible.
-            return 1;
+            // b5b1 set and NOT underfull => `return result` at 0x559739 with
+            // result == the 0 the IsTargetUnderfull call just produced —
+            // INELIGIBLE. (An earlier reading returned 1 — decompile-refuted.)
+            return 0;
         }
     }
 

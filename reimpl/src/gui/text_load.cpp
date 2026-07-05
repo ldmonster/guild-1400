@@ -79,19 +79,19 @@ TextResFile BuildTextArray(const u8* data, std::size_t len, TextDb& db) {
             return out;
     }
 
-    // Place entries at [baseIndex, baseIndex+entryCount). Fill any gap before
-    // baseIndex with empty placeholders so the TextDb index matches the original's
-    // dword_8C36B0[baseIndex+i] slotting.
-    while (db.Count() < static_cast<int>(baseIndex))
-        db.Add("", "", kTagNone);
-
+    // Place each entry at its ABSOLUTE slot dword_8C36B0[baseIndex+i] — exactly
+    // as the original does. This is order-independent: the .res members can be
+    // loaded in any order (archive-iteration order need not match baseIndex).
+    // The former append-with-gap-fill assumed increasing-baseIndex load order;
+    // when the archive returns members unsorted it landed strings at the wrong
+    // indices (every localized lookup resolved empty).
     for (u32 i = 0; i < entryCount; ++i) {
         u32 so = ReadU32(offTable + 4 * i);
         const char* str  = reinterpret_cast<const char*>(blob + so);
         std::string name = FieldName(names + static_cast<std::size_t>(i) * kResNameStride,
                                      kResNameStride);
         u8 tag = tags[i];
-        db.Add(std::string(str), name, tag);
+        db.SetAt(static_cast<int>(baseIndex + i), std::string(str), name, tag);
     }
 
     out.baseIndex  = baseIndex;

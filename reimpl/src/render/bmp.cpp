@@ -50,15 +50,14 @@ BmpInfo BmpReadHeaderInfo(const std::vector<u8>& file) {
 // File: 14B file header (BM, off=1078, size=w*h+1078) + 40B info (bpp=8,
 // comp=0, planes=1) + 1024B palette + bottom-up rows of `width` bytes each.
 //
-// Palette byte layout is transcribed faithfully from the original's odd index
-// arithmetic: for entry i it writes, into the 1024-byte block `pal`,
-//   pal[4i]   = R(i)         (a5[3i+2] if a palette is supplied, else i)
-//   pal[4i+1] = G(i)         (a5[3i+1], else i)
-//   pal[4i-2] = B(i)         (a5[3i+0], else i)   <-- shifted two bytes back
-//   pal[4i-1] = 0
-// i.e. each entry's B is stored two bytes earlier than its R/G. With the
-// default grayscale palette (R=G=B=i) this is a no-op artefact; with a real
-// palette it reproduces the shipped behaviour exactly.
+// Palette byte layout (HARDEN fix): the decompile's `v26` alias is `v27 - 2`
+// and `v17 += 4` executes BEFORE the v26 writes, so entry i is the STANDARD
+// 4-byte quad at pal[4i]:
+//   pal[4i]   = a5[3i+2] (else i)      v27[v17]
+//   pal[4i+1] = a5[3i+1] (else i)      v27[v17+1]
+//   pal[4i+2] = a5[3i+0] (else i)      v26[v17+4]   == v27[v17+2]
+//   pal[4i+3] = 0                      v26[v17+4+1] == v27[v17+3]
+// (The previous transcription put B two bytes BACK — a misread of the alias.)
 std::vector<u8> BmpSaveIndexed(int width, int height, const u8* pixels, const u8* palette) {
     std::vector<u8> out;
 
@@ -82,19 +81,17 @@ std::vector<u8> BmpSaveIndexed(int width, int height, const u8* pixels, const u8
     wr32(out, 0);             // clrUsed
     wr32(out, 0);             // clrImportant
 
-    // palette (1024 bytes) — build with the original's exact index arithmetic.
+    // palette (1024 bytes) — standard 4-byte entries (see banner: the v26 alias
+    // resolves to pal[4i+2]/pal[4i+3]).
     u8 pal[1024];
     std::memset(pal, 0, sizeof(pal));
     int v17 = 0;
     const u8* src = palette;
     for (int i = 0; i < 256; ++i) {
-        u8 R = palette ? src[2] : (u8)i;
-        u8 G = palette ? src[1] : (u8)i;
-        u8 B = palette ? src[0] : (u8)i;
-        pal[v17]     = R;
-        pal[v17 + 1] = G;
-        if (v17 - 2 >= 0) pal[v17 - 2] = B;   // a4[v17] == pal[v17-2]
-        if (v17 - 1 >= 0) pal[v17 - 1] = 0;
+        pal[v17]     = palette ? src[2] : (u8)i;   // v27[v17]
+        pal[v17 + 1] = palette ? src[1] : (u8)i;   // v27[v17+1]
+        pal[v17 + 2] = palette ? src[0] : (u8)i;   // v26[v17+4]
+        pal[v17 + 3] = 0;                          // v26[v17+5]
         v17 += 4;
         if (palette) src += 3;
     }
@@ -110,19 +107,19 @@ std::vector<u8> BmpSaveIndexed(int width, int height, const u8* pixels, const u8
 }
 
 // gilde.exe 0x5f18f4 — VIBE_Bmp_Save24Bit.
-// File: 14B file header + 40B info (the original sets dataOffset/header sizing
-// such that pixel data starts at 0x36=54) + bottom-up rows. Each pixel is
-// emitted as B,G,R from the source R,G,B triple (original swaps src[2]/src[0]).
-// Rows here are width*3 bytes with no padding (matches the original's temp-row
-// of exactly 3*width bytes).
+// File: 14B file header + a 44-BYTE info block (the 40-byte BITMAPINFOHEADER
+// plus 4 zero pad bytes — `VIBE_Vfs_WriteStream(v29, 44)`), so the pixel data
+// starts at 58 and dataOffset = 58 (v45 = 58; fileSize = 3*w*h + 58). Each
+// pixel is emitted as B,G,R from the source R,G,B triple (src[2]/src[0] swap).
+// Rows are width*3 bytes with no padding (the temp-row is exactly 3*width).
 std::vector<u8> BmpSave24Bit(int width, int height, const u8* pixels) {
     std::vector<u8> out;
 
     wr16(out, 19778);                                 // 'BM'
-    wr32(out, (u32)(3 * width * height + 58));         // fileSize (v39)
+    wr32(out, (u32)(3 * width * height + 58));         // fileSize (v42)
     wr16(out, 0);
     wr16(out, 0);
-    wr32(out, 54);                                     // dataOffset (standard 24-bit)
+    wr32(out, 58);                                     // dataOffset (v45 = 58)
 
     wr32(out, 40);            // size
     wr32(out, (u32)width);    // width
@@ -131,10 +128,11 @@ std::vector<u8> BmpSave24Bit(int width, int height, const u8* pixels) {
     wr16(out, 24);            // bpp
     wr32(out, 0);             // compression
     wr32(out, 0);             // imageSize
-    wr32(out, 1);             // xPelsPerMeter (v31=1)
-    wr32(out, 1);             // yPelsPerMeter (v32=1)
+    wr32(out, 1);             // xPelsPerMeter (v34=1)
+    wr32(out, 1);             // yPelsPerMeter (v35=1)
     wr32(out, 0);             // clrUsed
     wr32(out, 0);             // clrImportant
+    wr32(out, 0);             // 4 zero pad bytes (the 44-byte info write)
 
     std::vector<u8> rowbuf((size_t)3 * width);
     for (int row = height - 1; row >= 0; --row) {

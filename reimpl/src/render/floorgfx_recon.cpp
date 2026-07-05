@@ -37,9 +37,7 @@
 
 #include "render/texture.h"          // Texture record
 #include "render/texture_asset.h"    // TextureAssetCache (VFS+BMP by-name loader)
-#include "render/texture_loader.h"
-#include <cstdio>
-#include <cstdlib>   // TextureLoadByName / TextureLoaderSetCache
+#include "render/texture_loader.h"   // TextureLoadByName / TextureLoaderSetCache
 
 #include <cstring>
 
@@ -338,34 +336,14 @@ const Texture* FloorTextureResolver::LoadSlot(int slot) {
         return nullptr;
 
     // VIBE_Floor_LoadTexture @0x5bd010 -> VIBE_Texture_BuildBmpPath @0x5d97e8:
-    // "*" + name + ".BMP". SEASON + DETAIL preference (the shipped Boden set +
-    // the live original): try <name><season>_high (the 256x256 detail layer the
-    // in-city ground shows), then <name><season>, then <name>_high, then the
-    // plain base. Summer is the unsuffixed base (no _sommer files ship);
-    // spring/autumn/winter are _fruehling/_herbst/_snow.
-    static const char* kSeasonSuffix[4] = {"_fruehling", "", "_herbst",
-                                           "_snow"};
-    const char* season =
-        (season_ >= 0 && season_ < 4) ? kSeasonSuffix[season_] : "";
+    // "*" + name + ".BMP" (asc_62959C + name + aBmp), verbatim — no season and
+    // no _high/detail suffix. The engine's floor loader consumes the name it is
+    // handed; the SEASONAL ground is selected upstream through the TXS material
+    // sets (the F/S/H/W rows, RealTextureSource — viaTXS), NOT by appending a
+    // suffix here. We load the BASE mip layer (the single bound record).
     const std::string base = FloorTextureMipName(name, 0);
-    std::string tries[4];
-    int n = 0;
-    if (season[0]) {
-        tries[n++] = base + season + "_high";
-        tries[n++] = base + season;
-    }
-    tries[n++] = base + "_high";
-    tries[n++] = base;
-    int rec = -1;
-    int hit = -1;
-    for (int i = 0; i < n && rec < 0; ++i) {
-        const std::string path = "*" + tries[i] + ".BMP";
-        rec = cache_->LoadByName(path.c_str(), tries[i]);
-        if (rec >= 0) hit = i;
-    }
-    if (std::getenv("GUILD_DEBUG_FLOOR"))
-        std::printf("[floor] slot %d '%s' -> %s (rec %d)\n", slot, name,
-                    hit >= 0 ? tries[hit].c_str() : "(none)", rec);
+    const std::string path = "*" + base + ".BMP";
+    int rec = cache_->LoadByName(path.c_str(), base);
     if (rec < 0)
         return nullptr;
     slotRecord_[slot] = rec;

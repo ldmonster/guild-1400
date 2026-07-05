@@ -80,7 +80,9 @@ TEST(WorldCourtSession, TrialPhaseSequenceConvict) {
     st.maxWantedLevel = 2;      // weight 1.0
     st.evidence = ev; st.evidenceCount = 4;
     st.juryVotes = votes; st.juryCount = 3;
-    st.judgeFavorability = 60.0; st.torture = false;
+    st.judgeFavorability = 60.0;
+    st.defendantPleadsGuilty = true;  // panel==1 -> PROZESS_3_SCHULDIG branch
+    st.wealthScoreA = 114;            // v291 -> sentence fine 114/3 = 38
 
     TrialSession s;
     TrialSessionInit(s, st, &LawLookup, penalties);
@@ -95,19 +97,23 @@ TEST(WorldCourtSession, TrialPhaseSequenceConvict) {
     // Evidence-score core ran: (30+30+50+20)*1.0 = 130; 3 distinct law types.
     CHECK(approx(s.score.score, 130.0f));
     CHECK_EQ(s.score.uniqueCount, 3);
-    CHECK(s.phase == TrialPhase::kJuryVerdict);
-    CHECK(TrialSessionStep(s, leaves) == TrialPhase::kJuryVerdict);
-    CHECK_EQ(s.voteTotal, 1);
-    CHECK(s.verdict == TrialVerdict::kConvicted);
-    // Not torture -> straight to vote-announce.
+    CHECK(s.phase == TrialPhase::kPlea);
+    CHECK(TrialSessionStep(s, leaves) == TrialPhase::kPlea);
+    // Guilty plea: favorability adjust runs HERE (0x4a1b3e):
+    // 130 - 60*(130*0.2)*0.01 = 114.4.
+    CHECK(approx(s.runningScore, 114.4f));
+    // Guilty plea never enters torture -> straight to vote-announce.
     CHECK(s.phase == TrialPhase::kVoteAnnounce);
     CHECK(TrialSessionStep(s, leaves) == TrialPhase::kVoteAnnounce);
+    // The jury tally happens at PROZESS_6_ABSTIMMUNG (v313).
+    CHECK_EQ(s.voteTotal, 1);
+    CHECK(s.verdict == TrialVerdict::kConvicted);
     CHECK(s.phase == TrialPhase::kSentence);
     CHECK(TrialSessionStep(s, leaves) == TrialPhase::kSentence);
     CHECK(s.phase == TrialPhase::kDone);
 
-    // Sentence: guilty fine 130 - 60*(130*0.2)*0.01 = 114.4 -> commit floor(114/3).
-    CHECK(approx(s.runningScore, 114.4f));
+    // Sentence fine = wealth-score-A / 3 per seat (v291/3), NOT the evidence
+    // score: 114/3 = 38 to each of the three seats.
     CHECK_EQ(s.perSeatFine, 38);
     CHECK_EQ(fc.calls, 3);
     CHECK_EQ(fc.sum, 114);
@@ -157,33 +163,48 @@ TEST(WorldCourtSession, TrialAcquitNoFine) {
 
 TEST(WorldCourtSession, TrialTorturePhase) {
     int penalties[8] = {-1, 100, -1, -1, -1, -1, -1, -1};
-    CrimeRecord ev[1] = {MakeCrime(400, 1)};
-    int votes[1] = {0};   // convicted
+    // Torture requires evidenceCount > 2 (the `v314 > 2` gate at PROZESS_3).
+    CrimeRecord ev[3] = {MakeCrime(400, 1), MakeCrime(401, 1), MakeCrime(402, 1)};
+    int votes[1] = {0};   // tally 0 < 2 -> convicted at PROZESS_6
 
     TrialSetup st;
-    st.evidence = ev; st.evidenceCount = 1; st.maxWantedLevel = 2;  // weight 1.0
+    st.evidence = ev; st.evidenceCount = 3; st.maxWantedLevel = 2;  // weight 1.0
     st.juryVotes = votes; st.juryCount = 1;
-    st.torture = true; st.tortureConfessed = true; st.tortureInstrument = 2; // peitsche
+    st.defendantPleadsGuilty = false;   // NICHT_SCHULDIG plea -> torture gate
+    st.torturerPresent = true;          // ctx+72 resolves (v327 != 0)
+    st.tortureConfessed = true; st.tortureInstrument = 2; // peitsche
     st.judgeFavorability = 0.0;
+    st.wealthScoreB = 90;               // v292 -> torture-cost fine 90/3 = 30
+    st.wealthScoreA = 60;               // v291 -> sentence fine 60/3 = 20
 
     TrialSession s; TrialSessionInit(s, st, &LawLookup, penalties);
     FineCap fc; TrialSetFineHook(&FineHook, &fc);
     TrialRec rec; TrialSessionLeaves leaves = MakeTrialLeaves(&rec);
 
-    // intro, accusation, verdict -> torture (since convicted + torture).
+    // intro, accusation, plea (not guilty + torturer + evidence>2) -> torture.
     TrialSessionStep(s, leaves); // intro
-    TrialSessionStep(s, leaves); // accusation -> score 100
-    CHECK(approx(s.score.score, 100.0f));
-    TrialSessionStep(s, leaves); // verdict (convicted)
+    TrialSessionStep(s, leaves); // accusation -> score 300
+    CHECK(approx(s.score.score, 300.0f));
+    TrialSessionStep(s, leaves); // plea (not guilty)
     CHECK(s.phase == TrialPhase::kTorture);
     TrialSessionStep(s, leaves); // torture
-    // confessed -> score * 1.1 = 110.
-    CHECK(approx(s.runningScore, 110.0f));
+    // Torture-cost fine committed immediately: wealthScoreB/3 = 30 per seat.
+    CHECK_EQ(s.tortureFine, 30);
+    CHECK_EQ(fc.calls, 3);
+    CHECK_EQ(fc.sum, 90);
+    // confessed -> score * 1.1 = 330.
+    CHECK(approx(s.runningScore, 330.0f));
     CHECK(s.phase == TrialPhase::kVoteAnnounce);
     // The torture instrument esc was played.
     bool sawEsc = false;
     for (auto& e : rec.log) if (e == "esc:peitsche.esc") sawEsc = true;
     CHECK(sawEsc);
+    // Run to completion: convicted -> sentence fine wealthScoreA/3 = 20.
+    TrialVerdict v = TrialSessionRun(s, leaves);
+    CHECK(v == TrialVerdict::kConvicted);
+    CHECK_EQ(s.perSeatFine, 20);
+    CHECK_EQ(fc.calls, 6);
+    CHECK_EQ(fc.sum, 150);
     TrialSetFineHook(nullptr, nullptr);
 }
 

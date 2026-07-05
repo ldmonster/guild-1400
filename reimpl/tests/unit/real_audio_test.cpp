@@ -55,9 +55,12 @@ std::size_t AppendWav(std::vector<u8>& b, int ch, int rate,
 }
 
 // Build a 2-entry .sbf: entry0 = single PCM block, entry1 = variation (1 sub) PCM.
+// Layout per gilde.exe VIBE_Sound_LoadSampleBank @0x446b2c / LoadEntry @0x446830:
+// header 0x144 (count u32 @0x134); entries 0x40 each at 0x144; per entry
+// +0 u32 data-block offset (the File_Seek target), +4 name(50), +0x36 fmt byte.
 std::vector<u8> BuildTinySbf(const std::vector<i16>& s0, const std::vector<i16>& s1,
                              u32& off0, u32& off1) {
-    constexpr std::size_t kEntryBase = 0x148;
+    constexpr std::size_t kEntryBase = 0x144;
     constexpr std::size_t kEntrySize = 0x40;
     std::vector<u8> b(kEntryBase + 2 * kEntrySize, 0);
     PutStr(b, 0, "TinyBank");
@@ -65,8 +68,8 @@ std::vector<u8> BuildTinySbf(const std::vector<i16>& s0, const std::vector<i16>&
 
     // ---- entry0: single PCM ----
     std::size_t e0 = kEntryBase;
-    PutStr(b, e0, "ClickSound");
-    PutLe32(b, e0 + 0x32, 1); // format 1
+    PutStr(b, e0 + 4, "ClickSound");
+    b[e0 + 0x36] = 1; // format 1
     // data block: 12-byte header {u8 fmt; pad3; u32 size; u32 ptr} then RIFF.
     off0 = u32(b.size());
     std::size_t wavBase0 = 0; // computed after we know the size; lay header then wav
@@ -76,12 +79,12 @@ std::vector<u8> BuildTinySbf(const std::vector<i16>& s0, const std::vector<i16>&
     wavBase0 = AppendWav(b, /*ch*/ 1, /*rate*/ 22050, s0);
     b[blk0] = 1;                                   // block fmt
     PutLe32(b, blk0 + 4, u32(b.size() - wavBase0)); // payload size (the whole RIFF)
-    PutLe32(b, e0 + 0x3C, off0);
+    PutLe32(b, e0 + 0x00, off0);
 
     // ---- entry1: variation (subCount 1) PCM ----
     std::size_t e1 = kEntryBase + kEntrySize;
-    PutStr(b, e1, "ExplodeVar");
-    PutLe32(b, e1 + 0x32, 2); // format 2
+    PutStr(b, e1 + 4, "ExplodeVar");
+    b[e1 + 0x36] = 2; // format 2
     off1 = u32(b.size());
     std::size_t blk1 = b.size();
     b.resize(b.size() + 12, 0);     // variation header {subCount; ptr; total}
@@ -91,7 +94,7 @@ std::vector<u8> BuildTinySbf(const std::vector<i16>& s0, const std::vector<i16>&
     std::size_t wavBase1 = AppendWav(b, /*ch*/ 2, /*rate*/ 44100, s1);
     b[sub] = 1;                                    // sub fmt = wav
     PutLe32(b, sub + 4, u32(b.size() - wavBase1)); // sub payload size
-    PutLe32(b, e1 + 0x3C, off1);
+    PutLe32(b, e1 + 0x00, off1);
 
     return b;
 }

@@ -235,22 +235,38 @@ TEST(PersonPersonnel2, CheckDebtRatioCritical_golden) {
 }
 
 // ---------------------------------------------------------------------------
+// 0x594c94 iterates EVERY object matching the {op 0, value 30} filter via the
+// real QueryBegin/IterNext pair (0x594ca7 for-loop) — not just the first.
 TEST(PersonPersonnel2, SyncMasterShopObjects) {
     PP2_ResetPersons();
-    PP2_MakePerson(0, 6, 10);
-    PP2TestHooks h;
-    h.queryResult = &g_persons[0];
+    std::memset(g_objects, 0, sizeof(ObjectRec) * kObjectCapacity);
+    bool wasLoaded = g_personArrayLoaded;
+    g_personArrayLoaded = true;
+    g_objects[3].alive = 30;   // master A
+    g_objects[5].alive = 12;   // non-matching kind
+    g_objects[9].alive = 30;   // master B
+
+    struct SyncHooks : PP2TestHooks {
+        std::vector<Person*> synced;
+        void SyncShopChildren(Person* m) override { synced.push_back(m); }
+    } h;
     HookGuard g(&h);
     PersonSyncMasterShopObjects(42);
-    CHECK_EQ(h.lastQueryTag, 30);
-    CHECK_EQ(h.lastQuerySlot, 42);
-    CHECK_EQ(h.syncedMaster, &g_persons[0]);
+    CHECK_EQ((int)h.synced.size(), 2);
+    if (h.synced.size() == 2) {
+        CHECK_EQ(h.synced[0], reinterpret_cast<Person*>(&g_objects[3]));
+        CHECK_EQ(h.synced[1], reinterpret_cast<Person*>(&g_objects[9]));
+    }
 
     // No match -> no sync.
-    h.queryResult = nullptr;
-    h.syncedMaster = nullptr;
+    h.synced.clear();
+    g_objects[3].alive = 0;
+    g_objects[9].alive = 0;
     PersonSyncMasterShopObjects(7);
-    CHECK_EQ(h.syncedMaster, (Person*)nullptr);
+    CHECK_EQ((int)h.synced.size(), 0);
+
+    std::memset(g_objects, 0, sizeof(ObjectRec) * kObjectCapacity);
+    g_personArrayLoaded = wasLoaded;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,9 +306,11 @@ TEST(PersonPersonnel2, BeginQueryThenOpenBuilding) {
     CHECK_EQ(h.lastQueryTag, 10);
     CHECK_EQ(h.openedRec, &g_persons[0]);
 
-    // stateLow == 1, no match -> stays 1.
+    // stateLow == 1, no match -> 0: 0x596487 `LODWORD(a1) = QueryBegin(...)`
+    // replaces the low byte with the null result, so al returns 0 (the old
+    // "stays 1" pin matched a misreading of the register overlay).
     h.queryResult = nullptr;
-    CHECK_EQ((int)PersonBeginQueryThenOpenBuilding(1, 9), 1);
+    CHECK_EQ((int)PersonBeginQueryThenOpenBuilding(1, 9), 0);
 }
 
 // ---------------------------------------------------------------------------

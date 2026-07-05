@@ -7,7 +7,7 @@
 // loop drivers (RunFrameLoopWrapper / RunPauseLoop / RunEndRoundScreen) and assert
 // the spine ran the right masks; drive a combat-mode frame (mask kCombatScroll +
 // kGameObjects) and assert cameraCombatScroll reached the real ResolveCombatScroll
-// core; assert soundWaveInitSineTables built the real 256-entry sine table.
+// core; assert soundWaveInitSineTables built the real 48-entry sine table (0x30 @0x52879f).
 //
 // Part (b) — GUARDED real-asset: boot the spine on a real "Die Gilde — Europe
 // 1400" install (RunHeadlessRealAssets) and assert the newly-wired
@@ -71,9 +71,11 @@ TEST(AppFrameDriversE2E, DriversAndSixthWaveHooksRealPath) {
     CHECK(appObj.InitDisplayAndPaths(1));
     CHECK(appObj.InitEngineAndScriptCommands());
 
-    // soundWaveInitSineTables ran the REAL d3sndw builder (256-entry table).
+    // soundWaveInitSineTables ran the REAL d3sndw builder. The table length is
+    // 0x30 = 48 — the boot call VIBE_SoundWave_InitSineTables(0x30u) at gilde.exe
+    // 0x52879f. [Pin updated from 256 with that binary evidence.]
     CHECK(sub.firedReal("soundWaveInitSineTables"));
-    CHECK_EQ(sub.sineTableCount(), 256);
+    CHECK_EQ(sub.sineTableCount(), 48);
 
     // ---- outer-loop drivers (translated VIBE_GameLogic_* loops) ------------
     // The main session loop runs the 0x67FFF feature set every tick.
@@ -81,12 +83,16 @@ TEST(AppFrameDriversE2E, DriversAndSixthWaveHooksRealPath) {
     CHECK_EQ(fwFrames, 4);
     CHECK_EQ(appObj.lastFeatureMask(), 0x67FFFu);
 
-    // The pause loop pumps a 0 mask until the un-pause key (57) is reported.
+    // The pause loop derives its mask from the last published frame mask:
+    // (dword_11BC2D0 | 0x100000) & ~0x2000 (gilde.exe 0x56e7e7/0x56e7f2/0x56e805).
+    // The wrapper just published 0x67FFF, so paused frames run 0x165FFF.
+    // [Pin updated from 0u — the original mask is NOT zero; evidence @0x56e7e0.]
     int probe = 0;
     int pauseFrames = app::RunPauseLoop(
         appObj, [&]() { return ++probe >= 3 ? app::kUnpauseKeyScancode : 0; }, 20);
     CHECK_EQ(pauseFrames, 3);
-    CHECK_EQ(appObj.lastFeatureMask(), 0u);
+    CHECK_EQ(appObj.lastFeatureMask(),
+             (0x67FFFu | app::mask::kInputSuppress) & ~app::mask::kOptionsAndPanels);
 
     // The end-round screen runs the full mask + raises advance on a posted action.
     bool advance = false;
@@ -136,5 +142,5 @@ TEST(AppFrameDriversE2E, RealAssetBootRunsSineTableInitReal) {
     // The newly-wired soundWaveInitSineTables hook ran the REAL d3sndw builder over
     // the real boot — the 256-entry sine table was built in InitEngineAndScript-
     // Commands, on the real-asset path.
-    CHECK(r.base.sineTableCount == 256);
+    CHECK(r.base.sineTableCount == 48); // 0x30 @0x52879f
 }

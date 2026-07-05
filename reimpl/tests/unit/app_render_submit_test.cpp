@@ -48,7 +48,10 @@ struct Rec {
         h.animationBasic = [](int, int, int, int, int){};
         h.stateGetCurrent = [](int, int, int, int){};
         h.decompressionFinalize = [](int) -> int { return 9; };
-        h.stateBlob = [](int) -> int { return 555; };
+        // stateBlob left null: the builder then reads entities[blobIdx].kind —
+        // the binary's *(dword_62D204 + 84*blobIdx + 60) dword (0x4136a4), which
+        // is ALSO the per-kind dispatch selector (0x4136b3 cmp edx, 5).
+        h.stateBlob = nullptr;
         h.gridOffset = 0;
         h.clipX0 = 1; h.clipX1 = 2; h.clipY0 = 3; h.clipY1 = 4;
         return h;
@@ -169,4 +172,40 @@ TEST(AppRenderSubmit, Entities_OutOfRange) {
     Rec rec; auto h = rec.make();
     int r = GameLogicEntities(0, 0, /*entityIdx=*/99, 0, ents.data(), 3, h);
     CHECK_EQ(r, 0);
+}
+
+// ---- GameLogicEntities: kind-5 redirect path (gilde.exe 0x413580) ----------
+// Verifies against the binary:
+//  * the dispatch selector is the +60 dword of the BLOB record (the pre-redirect
+//    record, 0x4136a4 + 0x4136b3), so kind 5/8 pairs take the redirect branch;
+//  * Animation_Basic's 3rd arg is the state handle ecx (State_Update result,
+//    0x413614), and its 5th arg is the BYTE delta (u8)(v7 - idx)
+//    (0x41377d..0x41378f: sub al, ah; and eax, 0FFh);
+//  * State_GetCurrent receives arg3 = *(int*)(rec+0x50)>>16 (the i16 at +82) and
+//    arg4 = *(int*)(rec+0x4E)>>16 (the i16 at +80) of the POST-redirect record
+//    (0x413700/0x413703 + sar 16).
+TEST(AppRenderSubmit, Entities_RedirectByteDeltaAndGetCurrentArgs) {
+    std::vector<EntitySubmitRecord> ents(8);
+    ents[5].kind = 5;          // linked pair -> redirect
+    ents[5].suppress = 0;
+    ents[5].linkIndex = 1;     // partner record
+    ents[1].stateHandle = 0;   // unrealised -> State_Update(5) fires
+    ents[1].subStateLo = 111;  // i16 at +80 -> State_GetCurrent arg4
+    ents[1].subStateHi = 222;  // i16 at +82 -> State_GetCurrent arg3
+
+    Rec rec; auto h = rec.make();
+    static int s_animFrame, s_animArg, s_gcW, s_gcH;
+    s_animFrame = s_animArg = s_gcW = s_gcH = -999;
+    h.stateUpdate = [](int) -> int { return 77; };
+    h.animationBasic = [](int, int, int frame, int, int arg) {
+        s_animFrame = frame; s_animArg = arg;
+    };
+    h.stateGetCurrent = [](int, int, int w, int hh) { s_gcW = w; s_gcH = hh; };
+
+    int r = GameLogicEntities(3, 4, /*entityIdx=*/5, /*out=*/123, ents.data(), 7, h);
+    CHECK_EQ(r, 9);            // Decompression_Finalize result
+    CHECK_EQ(s_animFrame, 77); // ecx = State_Update result (0x413614)
+    CHECK_EQ(s_animArg, 4);    // (u8)(v7 - idx) = (u8)(5 - 1) = 4
+    CHECK_EQ(s_gcW, 222);      // arg3 = i16 at +82 of the partner record
+    CHECK_EQ(s_gcH, 111);      // arg4 = i16 at +80 of the partner record
 }

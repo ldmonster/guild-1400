@@ -15,15 +15,16 @@ namespace guild::sim {
 //       baseI  = (int)((minDamage + RandInt(range)) * unit.worth * 0.01);
 //       dmg    = (int)((1.0 - dist * falloff) * (double)baseI);
 //       unit.hp -= dmg;
-//       SpawnDamageNumber(unit, baseI, side==friendly ? 1 : 2);   // colour
+//       SpawnDamageNumber(unit, dmg, side==friendly ? 1 : 2);     // colour
 //       if (!ApplyUnitDeath(unit)) PlayHitVoice();                // presentation
 //   }
-// (0x4866b8 dropped is byte-identical bar radius/falloff/constant — all equal in
-//  value: worth-scale 0.01, falloff == 1/radius.)
+// (0x4866b8 dropped is byte-identical bar radius/falloff — worth-scale 0.01,
+//  falloff == 1/radius.)
 //
-// NOTE on the damage-number value: the original spawns the UN-attenuated base
-// (`baseI`, the v30/v32 store) as the floating number, but subtracts the
-// distance-attenuated `dmg` from HP. Both reproduced faithfully.
+// NOTE on the damage-number value: the v29 slot is stored TWICE — (int)v16
+// (baseI) at 0x487004 and then (int)v17 (the attenuated dmg) at 0x487032 —
+// before SpawnDamageNumber(v20, v29, v21) at 0x48705c, so the floating number
+// shows the distance-attenuated `dmg` (the same value subtracted from HP).
 // ---------------------------------------------------------------------------
 BombHit ResolveBlastOnTarget(Bomb& bomb, BlastTarget& target, float radius,
                              float falloff, i32 friendlySideId, CutsceneRng& rng) {

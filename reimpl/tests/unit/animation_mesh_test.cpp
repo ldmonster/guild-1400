@@ -54,13 +54,15 @@ TEST(AnimMeshAdvanced, ForcesModeThreeAndRestores) {
 
     g_seenMode = -1;
     int observed = AnimationAdvanced(clip, 2);
-    CHECK_EQ(observed, 3);          // the processor saw mode == 3
-    CHECK_EQ(g_seenMode, 3);
+    // gilde.exe 0x5D89BC returns 1 on success / 0 on out-of-range (the old
+    // -1/observed-mode pins were an invented contract).
+    CHECK_EQ(observed, 1);
+    CHECK_EQ(g_seenMode, 3);        // the processor saw mode == 3
     CHECK_EQ((int)f0.mode, 7);      // restored afterward
 
-    // out-of-range index -> -1, processor not invoked again.
+    // out-of-range index -> 0, processor not invoked again.
     int before = AnimMeshFrameProcessCalls();
-    CHECK_EQ(AnimationAdvanced(clip, 99), -1);
+    CHECK_EQ(AnimationAdvanced(clip, 99), 0);
     CHECK_EQ(AnimMeshFrameProcessCalls(), before);
     AnimMeshResetHooks();
 }

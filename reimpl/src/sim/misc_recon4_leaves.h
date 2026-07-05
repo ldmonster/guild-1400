@@ -130,8 +130,11 @@ struct Surface {
 };
 
 struct BlitHooks {
-    // Returns nonzero on GPU-blit success path taken (the original returns 0 then).
-    // If gpuBlit==nullptr OR returns false, the software qmemcpy fallback runs.
+    // Returns TRUE on COM-blit success (DD_OK). A false return models a nonzero
+    // HRESULT: the original then returns 0 immediately (0x4238d0) with NO
+    // bookkeeping. On success the flow continues (E_NOTIMPL check + LABEL_33
+    // bookkeeping, return 1). gpuBlit==nullptr behaves as success+E_NOTIMPL
+    // (software copy).
     bool (*gpuBlit)(void* ctx, Surface* dst, const int dstRect[4],
                     Surface* src, const int srcRect[4], bool alpha) = nullptr;
     // dword_7626C8 == 0x80004001 (E_NOTIMPL) triggers the software fallback after a

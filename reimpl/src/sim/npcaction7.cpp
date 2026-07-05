@@ -293,27 +293,33 @@ int NpcAction7_AssignWorkCmd(HeRecord* desc, int player) {
     int pick = static_cast<u16>(util::RandomModulo(static_cast<u16>(count)));
     u8* building = cands[pick];
 
-    // Choose a scan window: RandomModulo(2) selects half vs full; a further
-    // RandomModulo(2) selects which half / direction (0x575654..0x575694,
-    // 0x5757c2..). lo/hi are slot indices; step is +1 or -1.
+    // Choose a scan window (disasm 0x575654..0x575698 / 0x5757bd..0x5757ec):
+    //   rand(2) != 0 -> lo=0,   hi=384, step=+1; a further rand(2) flips to
+    //                   lo=384, hi=0,   step=-1.
+    //   rand(2) == 0 -> lo=384, hi=768, step=+1 (the "full" window starts at
+    //                   384, NOT 0); a further rand(2) flips to hi=0, step=-1.
+    // The loop guard is a single signed `cmp lo,hi / jge skip` + trailing
+    // `idx+=step / cmp idx,hi / jl` — so the DESCENDING variants (lo>=hi)
+    // never enter the loop at all: they scan nothing (binary behaviour).
     int lo, hi, step;
-    if (static_cast<u16>(util::RandomModulo(2))) {     // half window
-        hi = 384; lo = 0; step = 1;
+    if (static_cast<u16>(util::RandomModulo(2))) {     // 0..384 window
+        lo = 0; hi = 384; step = 1;
         if (static_cast<u16>(util::RandomModulo(2))) { lo = 384; hi = 0; step = -1; }
-    } else {                                            // full window
-        hi = 768; lo = 0; step = 1;
-        if (static_cast<u16>(util::RandomModulo(2))) { hi = 0; step = -1; lo = 768; }
+    } else {                                            // 384..768 window
+        lo = 384; hi = 768; step = 1;
+        if (static_cast<u16>(util::RandomModulo(2))) { hi = 0; step = -1; }
     }
 
-    // Scan for employable persons: marker(+2) not 6/7 and < 10, slot live
+    // Scan for employable persons: marker(+2) not 6/7 and (SIGNED char) < 10
+    // (disasm 0x5756bf: cmp bl,0Ah / jge — a signed compare), slot live
     // (index(+0) != 0xFFFF). Collect up to 16 (offset cap 0x40). (0x5756a1..)
     u8* base = hk.personTableBase ? hk.personTableBase() : nullptr;
     u8* people[16];
     int found = 0;
     if (base) {
-        for (int idx = lo; (step > 0) ? (idx < hi) : (idx > hi); idx += step) {
+        for (int idx = lo; idx < hi; idx += step) {   // jge guard + jl re-check
             u8* slot = base + static_cast<std::size_t>(idx) * kNpc7PersonStride;
-            u8 marker = Per_Marker(slot);
+            i8 marker = static_cast<i8>(Per_Marker(slot));
             if (marker != 6 && marker != 7 && marker < 10 && Per_Index(slot) != 0xFFFF) {
                 people[found] = slot;
                 ++found;
@@ -401,9 +407,11 @@ int NpcAction7_SelectRoomCmd(HeRecord* desc) {
     int gate = Per_RoomGate(actor);
     if (static_cast<u16>(util::RandomModulo(0x100)) < gate) return kNpc7Retry;
 
-    // Iterate the actor's rooms (object[+94]); collect up to 6 whose type-kind
+    // Iterate the actor's rooms — disasm 0x575cb3: mov ebx,[edx+178h]: the query
+    // key is the dword at Person+0x178 (376), NOT +94 (that was a dword-index
+    // misread of `*((_DWORD*)rec + 94)`). Collect up to 6 whose type-kind
     // (typeDescriptor[+0], 65-byte stride) != 9. (0x575cba.., cap v10 < 24.)
-    i32 roomKey = *reinterpret_cast<i32*>(actor + 94);
+    i32 roomKey = *reinterpret_cast<i32*>(actor + 0x178);
     u8* rooms[6];
     int count = 0;
     u8* room = hk.gameObjectQueryFind3 ? hk.gameObjectQueryFind3(roomKey, 1, 5) : nullptr;

@@ -107,18 +107,26 @@ bool InventoryIsProductionSlotMatch(i16 prot) {
 
 // ===========================================================================
 // VIBE_Inventory_CollectProductionSlots  0x5922d4
-//   v4 = QueryFind(building+20, 1,0, 477);  if (!v4) return 0;
-//   for (node = QueryFind(v4[5], 1,5); node; node = IterNext()) {
-//       cap = (v4.type==477) ? 5*node.level+10
-//                            : (node.level==3 ? 80 : 20*node.level);
+//   v4 = QueryFind(building+20, 1,0, 477);  if (!v4) return 0;   // ROOT node
+//   for (node = QueryFind(v4[5], 1,5); node; node = IterNext()) { // CHILDREN
+//       cap = (v4.type==477) ? 5*v4.level+10
+//                            : (v4.level==3 ? 80 : 20*v4.level);
 //       dst[count].cap = cap;  dst.capTotal += cap;  dst.levTotal += node.level;
 //       dst[count].type = node.type;
-//       dst.worth += MarketPrice(node.type) * node.level;
+//       dst.worth = (int)(MarketPrice(node.type)*(float)node.level + dst.worth);
 //       ++count;
 //   }
 //   return 1;
-// NB: the capacity branch keys on the ROOT work-product node's type (v4), not the
-// per-slot node's — faithfully reproduced below via `rootIsHighCap`.
+// NB (disasm-proven): BOTH capacity branches read the ROOT's level column
+// `[ebx+0Eh]` (0x59234d / 0x5923e1) — capacity is constant across the slots —
+// and the iterated slots are the root's CHILDREN (QueryFind(v4[5],1,5) at
+// 0x59231d); the root itself is not a slot. The worth column dst+176 is an INT
+// accumulated with a per-iteration ConvertX truncation (0x5923b1..0x5923b8)
+// after the level is narrowed to float (0x59239e fstp). An earlier adaptation
+// used per-slot levels for capacity, counted the root as a slot, and kept
+// worth in untruncated double — all decompile/disasm-refuted.
+// Adapter contract: nodes[0] == the root work-product node; nodes[1..] == the
+// child work slots.
 // ===========================================================================
 int InventoryCollectProductionSlots(const std::vector<ProdSlotNode>& nodes,
                                     ProdSlotCollect& out) {
@@ -126,30 +134,31 @@ int InventoryCollectProductionSlots(const std::vector<ProdSlotNode>& nodes,
     if (nodes.empty())
         return 0;                             // !v4 (no root work-product node)
 
-    // v4 == root work-product node; its type drives the 477 capacity branch.
-    const bool rootIsHighCap = (nodes.front().type == kItemHighCap);
+    const ProdSlotNode& root = nodes.front(); // v4 (ebx)
+    int cap;                                  // constant per collection
+    if (root.type == kItemHighCap)
+        cap = 5 * root.level + 10;            // 0x592353 ([ebx+0Eh])
+    else if (root.level == 3)
+        cap = 80;                             // 0x5923e9
+    else
+        cap = 20 * root.level;                // 0x5923f3 ([ebx+0Eh])
 
-    // The work slots are the remaining children IterNext yields. The original's
-    // first QueryFind(v4[5], 1, 5) seeds the loop with the first slot; we treat
-    // the whole list as the slot set (the root included, as the binary's loop
-    // re-reads v4's columns and the first slot is v4's first child).
-    for (const ProdSlotNode& node : nodes) {
-        int cap;
-        if (rootIsHighCap)
-            cap = 5 * node.level + 10;
-        else if (node.level == 3)
-            cap = 80;
-        else
-            cap = 20 * node.level;
-
+    int worthInt = 0;                         // dst+176 (int column)
+    for (std::size_t i = 1; i < nodes.size(); ++i) {
+        const ProdSlotNode& node = nodes[i];
         out.caps.push_back(cap);
-        out.types.push_back(node.type);
-        out.capTotal += cap;                  // dst[42] += cap
-        out.levTotal += node.level;           // dst[43] += node.level
-        // dst[176] += MarketPrice(node.type) * node.level  (worth column)
-        out.worth += g_hooks->MarketPrice(node.type) * static_cast<double>(node.level);
+        out.types.push_back(node.type);       // 0x59238e (word column +0x48)
+        out.capTotal += cap;                  // dst[42] += cap (0x59236c)
+        out.levTotal += node.level;           // dst[43] += node.level (0x592381)
+        // 0x592393: fild level; fstp (FLOAT); price*levelF + (int)accum;
+        // ConvertX; fistp accum — truncate-toward-zero per iteration.
+        const float levF = static_cast<float>(node.level);
+        worthInt = static_cast<int>(
+            g_hooks->MarketPrice(node.type) * static_cast<double>(levF) +
+            static_cast<double>(worthInt));
         ++out.count;                          // dst[1]++
     }
+    out.worth = static_cast<double>(worthInt);
     (void)SlotCapacity;  // table kept available for callers / cross-checks
     return 1;
 }

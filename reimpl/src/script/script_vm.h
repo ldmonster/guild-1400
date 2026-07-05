@@ -84,12 +84,11 @@ using guild::i32;
 //   [623..630] +2492.. child context ptrs (8 slots; DestroyContext recurses)
 //
 // Call frame (36 dwords / 144 bytes at +168 + 144*i):
-//   frame[0]  +0   func record ptr (body source)          (EnterFunction +42*4)
+//   frame[0]  +0   func record ptr (body source)   (EnterFunction 0x443381)
 //   frame[1]  +4   active source cursor for the frame
 //   frame[2]  +8   local index used (DeclareLocal scans +16.. for free)
+//   frame[3]  +12  scene slot = ctx[622] snapshot   (EnterFunction 0x443372)
 //   frame[4..11] +16.. up to 8 local-var record ptrs
-//   frame[44] +176 saved cursor (EnterFunction)
-//   frame[45] +180 scene slot      (= ctx[622] snapshot)
 //
 // Variable record (48 bytes):
 //   +0   nibble  type (low nibble); high nibble flags
@@ -277,13 +276,16 @@ int SkipBraceBlock(u8 mode);
 i32 ParseSymbolName(u8* ctx, u8* lexBuf);
 
 // ===========================================================================
-// 0x442d88 — VIBE_Script_ParseDeclaration(ctx)
+// 0x442d88 — VIBE_Script_ParseDeclaration(ctx@<eax>, type@<edx>)
 // Parse a declaration statement (the type keyword was already consumed by the
-// caller's NextToken). Reads the name, then dispatches on the next token's
-// type: scalar (10), '=' init (2), array '[' (27), function-sig (12). Returns 1
-// (always continues) or ParseSymbolName's result on the function path.
+// caller's NextToken). `type` is the keyword's code — token.value>>24 — that
+// the caller forwards in edx (CompileBlock @0x443692: sar edx,18h); it is the
+// DefineVariable type for every path (int/byte/string/float sizing). Reads the
+// name, then dispatches on the next token's sub-code: scalar (10), '=' init
+// (2), array '[' (27), function-sig (12). Returns 1 (always continues) or
+// ParseSymbolName's result on the function path.
 // ===========================================================================
-i32 ParseDeclaration(u8* ctx);
+i32 ParseDeclaration(u8* ctx, u8 type);
 
 // ===========================================================================
 // 0x4431dc — VIBE_Script_EnterFunction(ctx, funcRec)

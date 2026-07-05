@@ -4,7 +4,7 @@ Goal (user, binding, repeated): **"from entrypoint to last leaves, harden ALL fu
 use fleet of agents and don't count tokens."** Decompile every reconstructed function via IDA MCP
 and diff line-for-line against gilde.exe; fix every divergence (source AND golden) to the binary.
 
-Snapshot date: 2026-06-16. Working dir: `/home/cnupt/work/reverse/guild-1400/reimpl`.
+Snapshot date: 2026-07-04. Working dir: `/home/cnupt/work/reverse/guild-1400/reimpl`.
 Git root is the PARENT (`/home/cnupt/work/reverse/guild-1400`); we live in `reimpl/`.
 
 ---
@@ -31,18 +31,22 @@ then rebuild, then fix any residual golden skews 1:1.
 ## CURRENT BUILD/TEST STATE
 
 - `cmake --build build` : **clean** (guild lib + all targets compile).
-- Suite: **1541 / 1550 passing — 9 FAILING** (fix these FIRST next iteration). They appeared after
-  the partial wave-H2 (render_06's real 1:1 fixes changed shared render behavior; downstream
-  goldens need updating to the binary values — same pattern as the H1b fix fleet). Triage the
-  non-render ones too:
-  - `effect_script_test`, `effect_script_real_esc_e2e_test`, `sim_script_compiler_test`,
-    `sim_script_compiler_e2e_test`  (the .esc/script VM cluster)
-  - `material_seasonal_resolve_test`, `render_leaves9_test`, `render_scene_load_test`  (render — likely render_06 downstream)
-  - `meister_mgmt_recon_test`  (AI)
-  - `sim_command_apply6_test`  (command)
-  Fix method: run each with `ctest -R <name> --output-on-failure`, decompile the relevant
-  gilde.exe function, set the source/golden to the binary value (cite addr+evidence). The H1b
-  fix-fleet pattern (one agent per cluster, no-git) worked perfectly for the prior 15.
+- Suite: **1558 / 1558 passing** (verified 2026-07-05 after the final chunk + sweep).
+- **ALL 56 chunks hardened.** The full-tree 1:1 campaign is complete: every chunk has a
+  non-stale `progress/harden/<chunk>*.md` report and the suite is green after each
+  chunk's consolidation. See "CHUNK STATUS" below for the closing wave.
+
+## HOW TO RUN THE HARDEN LOOP (proven procedure, 2026-07-05)
+
+One chunk per agent, SOLO (no sub-agents), SYNCHRONOUS, one at a time. After each
+chunk's agent returns: full `cmake --build build -j` + `ctest --test-dir build -j8`,
+fix any cross-chunk golden skew 1:1 (decompile → re-pin with addr, or correct the edit),
+THEN launch the next chunk. This serial cadence (vs. the earlier ~12-wide fan-out) was
+adopted after fan-out waves kept dying on session/rate limits mid-edit and leaving
+unverified partial edits in the shared tree. Agent prompt: read /tmp/guild_harden/brief.md
+(no-git rules) + CLAUDE.md; cat /tmp/guild_harden/chunks/<chunk>.chunk; decompile+diff
+every provenance'd function; get_bytes-diff every provenance'd table; fix only proven
+divergences w/ address evidence; build ONLY own test targets; write progress/harden/<chunk>.md.
 
 ---
 
@@ -94,29 +98,55 @@ audio_00, net_00, render_06, sim_12 + the fix fleets.
 
 ---
 
-## CHUNK STATUS (57 chunks total; ~56 to harden)
+## CHUNK STATUS (56 chunks total) — updated 2026-07-04
 
-DONE & APPLIED (fixes in the tree now):
-- `render_06` — 22 fixes (SnowUpdateFlake full rewrite, TileIsUniform signed-byte, Convert24To16
-  channel order, x87-80bit rounding in skeleton/sky/billboard, 2 inverted pose-driver gates, …).
-- `sim_12` — verified VERIFIED-1:1, no edits needed (mostly wire_* glue).
-- H1b fix-fleet — 15 corrupted goldens fixed 1:1 (charaction/combat/command_apply/ai/render/newgame).
+DONE (report exists in `progress/harden/`, fixes applied, consolidated green):
+- sim_00..sim_07, sim_09, sim_12 (many as multi-part reports: `sim_NN_*.md`)
+- render_02..render_08 (multi-part reports for 03/04/05/06/07/08)
+- world_00, world_01, world_02 (multi-part reports)
+- gui_00..gui_05 (+ gui_04 parts, subscreens, menu labels, slider/surface render)
+- io_00, io_01, ai_00, ai_01, util_00, util_01, crt_00, audio_00, net_00, config_00
+- flow_menu1/2, flow_town1/2, flow_house1/2, wire_gui, fix fleets, wave1-recovery,
+  table-verify sweep (ongoing)
 
-ROLLED BACK by the git-stash recovery — fixes LOST, reports exist, MUST RE-RUN:
-- `sim_00, sim_02, sim_03, sim_05, render_02, render_03, world_00, world_01, world_02`
-  (their `progress/harden/<chunk>*.md` reports document the divergences they found — re-running is
-  guided, but the source edits are gone; the source is back at the recovered baseline.)
+CLOSING WAVE — DONE 2026-07-05 (serial, one chunk per agent, consolidated green each):
+- sim_08 (19 fixes), sim_10 (~20, incl. 5-profile path cost table + 224-float stat table),
+  sim_11 (script compiler/VM: while/if frame-slots, else off-by-one, arg-stride),
+  render_00 (bone/morph blend, 5 RLE blitters, morph-angle table, BMP writer),
+  render_01 (falloff LUT was asin not acos, camera matrix cols, cloth arg, water gradient),
+  world_03 (inverted trade sort, office scan 37→30), world_04 (road records +1 slot, Args25
+  encodings, evidence stride 268), world_05 (trial-session FSM, cargo float), world_06 (4th
+  ctype-table mis-transcription, inverted room-array write), app_00 (pause mask, fullscreen
+  gate, GameLogicEntities ×4, 3-clip intro), play_00 (inverted outro fade-spin, event-weight
+  entry, sbf framing), play_01 (talents [0..4] not [1..5] — reverted a wrong flow_menu2 fix),
+  play_02 (scene op fall-through, pick-ray cross products, .sbf neighbor-sample bug),
+  play_03 (2 x87 sky/brightness), play_04 (sign-ext declension, ring counts 64→256),
+  play_05 (bridges 1:1, comment-only), drm_00 (entire DRM verified 1:1, 0 fixes),
+  compress_00 (InflateFast UNGRAB, TrAlign, zlib level_flags), mem_00 (AllocDebug(0) guard),
+  script_00 (frame-push +42 dwords, ParseDeclaration dropped type arg).
+- Table-verify sweep 2 (io/ai/gui/util/audio/net): ~25 tables, 1 benign array-size fix;
+  audio/net have no const tables. These dirs were transcribed cleanly.
 
-NEVER RUN (pending):
-- sim_01, sim_04, sim_07, sim_08, sim_09, sim_10, sim_11
-- render_00, render_01, render_04, render_05, render_07, render_08
-- world_03, world_04, world_05, world_06
-- gui_00..gui_05, play_00..play_05
-- io_00, io_01, ai_00, ai_01, util_00, util_01, crt_00, audio_00, app_00, drm_00, net_00,
-  config_00, compress_00, mem_00, script_00
+REMAINING (documented targeted follow-ups, NOT chunk-scoped — see the list below the
+CHUNK STATUS section; these are structural re-reconstructions / cross-module arg fixes,
+each flagged with an address, deferred as their own tasks).
 
-(Verify exact chunk count per dir: sim=13, render=9, world=7, gui=6, play=6, io=2, ai=2, util=2,
-crt=1, audio=1, app=1, drm=1, net=1, config=1, compress=1, mem=1, script=1.)
+Targeted follow-ups (found out-of-chunk, need their own pass):
+- sim/building5 `FilterBlockedBauplatze` drops the wanted-name arg the binary passes
+  @0x50d370 (+4 more call sites) — plot collection is wider than the binary (play_00 report).
+- sim PathBuildMarkerPoints @0x4074c0 — caller-less structurally-divergent sketch,
+  needs full re-reconstruction (sim_10 report).
+- sim/building2 `LookupTypeRecordA` uses unsigned compare where binary 0x589778 is
+  signed (`jl`+`movsx`, codes ≥128 index negatively) (play_01 report).
+- sim/command_apply6 owner: check 0x579f70's EMA/snapshot guard
+  (`flt_641DAC != 0 && 6 < hour < 21`) (play_04 report).
+- mem/ allocator structural deviations (documented, behavior internally consistent
+  but not transcription-faithful): heap.cpp first-fit vs the original dv-rover +
+  address-ordered free list; small_heap.cpp single 28672B run-chunk vs 7×4080B
+  per-page chunks. Full 1:1 needs an allocator rewrite (mem_00 report).
+
+(Chunk partition regenerated 2026-07-04 into /tmp/guild_harden/chunks: sim=13, render=9,
+world=7, gui=6, play=6, io=2, ai=2, util=2, crt/audio/app/drm/net/config/compress/mem/script=1.)
 
 ---
 

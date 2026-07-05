@@ -198,18 +198,27 @@ std::vector<i32> ScriptExecutor::CollectCallArgs() {
     return args;
 }
 
-// gilde.exe 0x443ff0 — VIBE_Script_EvaluateExpression (operator-precedence fold).
-// Mirrors ScriptVm::EvalExpression but over the live source lexer: accumulator
-// folding for +/-/*///|/&, comparison/bitwise ops short-circuit-return.
+// gilde.exe 0x443ff0 — VIBE_Script_EvaluateExpression (operator-precedence fold)
+// over the live source lexer. Register map: acc == v3, operand == v2 (LOOP-
+// CARRIED — tokens that load no operand fold the stale value), pendOp == v45
+// (the pending fold operator; 2 == kOpOperand seeds), cur == v1 (this token's
+// class-1 sub-code, 0 for operands). Every iteration ends in the LABEL_18 fold
+// ladder followed by `v45 = v1` (LABEL_22); comparison operators return their
+// boolean before the fold.
 i32 ScriptExecutor::EvalExpression() {
-    i32 acc = 0;
-    u8 pendOp = kOpOperand;
+    i32 acc = 0;             // v3
+    i32 operand = 0;         // v2 — carried across iterations
+    u8  pendOp = kOpOperand; // v45 = 2
 
     while (runnable_) {
         ScriptToken_t t = lexer_.Next();
+        u8 cur = 0;          // v1
 
         if (t.cls == kTokSymbol) {
+            cur = t.sub;
             switch (t.sub) {
+                // Comparison / logical operators recurse for the RHS and return
+                // the result immediately (the v1 ladder at 0x444459..0x4445af).
                 case kOpEq:     return acc == EvalExpression();
                 case kOpNe:     return acc != EvalExpression();
                 case kOpLe:     return acc <= EvalExpression();
@@ -220,33 +229,32 @@ i32 ScriptExecutor::EvalExpression() {
                 case kOpBitAnd: return acc &  EvalExpression();
                 // Expression terminators, by recovered operator sub-code
                 // (byte_767958 stride 5): ';'==10, ','==11, ')'==13, ']'==28
-                // (kOpStop). EvaluateExpression's loop is bounded by these /
-                // class-12 end; each ends the current fold and records which
-                // delimiter we stopped on (CollectCallArgs continues on ',').
-                case 10:        lastTerm_ = ';'; return acc;  // ';' statement sep
+                // (kOpStop). A ';' additionally pops a pending single-statement
+                // loop frame (0x443ff0 LABEL_23, the v1==10 block).
+                case 10:        lastTerm_ = ';'; PopFrameAtSemicolon(); return acc;
                 case 11:        lastTerm_ = ','; return acc;  // ',' arg separator
                 case 13:        lastTerm_ = ')'; return acc;  // ')' group/call end
                 case kOpStop:   lastTerm_ = ']'; return acc;  // ']' index end (28)
-                case kOpAdd: case kOpSub: case kOpDiv:
-                case kOpMul: case kOpOr:  case kOpAnd:
-                    pendOp = t.sub;
-                    continue;
+                case 12:
+                    // '(' — parenthesised subexpression: recurse and fold the
+                    // group's value as this iteration's operand (0x444447 ->
+                    // 0x44455b: v1==12 -> v2 = EvaluateExpression(v43)).
+                    operand = EvalExpression();
+                    break;
                 default:
-                    continue;
+                    // Any other operator (+ - * / | & ++ -- '[' ...) folds the
+                    // stale operand via the pending op (usually a no-op), then
+                    // becomes the new pending operator (LABEL_22: v45 = v1).
+                    break;
             }
-        }
-
-        i32 operand = 0;
-        switch (t.cls) {
+        } else switch (t.cls) {
             case kTokVariable: {
-                // Variable read with an optional '[' index ']' subscript. The
-                // lexer emits `name` `[` `idx` `]` as separate tokens (bracket ==
-                // operator sub-code 27/28, shared with paren), exactly as the
-                // LHS AssignVariable path already consumes them; here on the read
-                // side EvaluateExpression resolves the element via storage+index.
-                // Without this, `[`, idx and `]` would re-enter the fold and
-                // corrupt the accumulator (so array reads in argument position —
-                // SetEmitterSize(emitter[0], ...) — would pass a wrong handle).
+                // Variable read with an optional '[' index ']' subscript: the
+                // original reads the next token and recurses for the index on
+                // (1,27), else restores the cursor (0x44425a). The element index
+                // is bounds-checked against the var record's +36 count — an out-
+                // of-range index reports "Array index out of bounce" and
+                // finishes the script (0x4442a0 region), returning 0.
                 int elemIndex = 0;
                 int save = lexer_.cursor();
                 ScriptToken_t nx = lexer_.Next();
@@ -255,55 +263,90 @@ i32 ScriptExecutor::EvalExpression() {
                 } else {
                     lexer_.setCursor(save);                   // no subscript: rewind
                 }
+                if (t.value >= 0 && t.value < (int)cs_.symbols.vars().size()) {
+                    const ScriptVar& v = cs_.symbols.vars()[(std::size_t)t.value];
+                    if (elemIndex > v.count - 1 || elemIndex < 0) {
+                        finished_ = true;   // ReportError + VIBE_Script_Finish
+                        return 0;
+                    }
+                }
                 operand = ReadVar(t.value, elemIndex);
                 break;
             }
-            case kTokIntLit:   operand = t.value; break;
-            case kTokRawSym:   operand = t.value; break;
-            case kTokStrLit:   operand = 0; break;
-            case kTokFuncCall: {                       // command used as value
-                // A command invoked in VALUE position (e.g.
-                // `emitter[0]=CreateEmitter(1,0,...)`) must collect its `(args)`
-                // exactly like the statement-position path, else the args leak
-                // back into the fold and the command runs argument-less. Mirrors
-                // VIBE_Script_EvaluateExpression's class-4 sub-call handling.
+            case kTokIntLit:   operand = t.value; break;   // class 5: v2 = value
+            case kTokRawSym:
+                // class 6 (float literal): the binary evaluator loads NO operand
+                // (0x444331: cmp al,6 / jz -> fold ladder) — the fold uses the
+                // stale v2. Float literals therefore contribute nothing here.
+                break;
+            case kTokStrLit:
+                // class 7: v2 = &unk_7674E0 (pointer to the copied literal in
+                // the shared string scratch). No flat address space here —
+                // string operands read as 0 (host boundary).
+                operand = 0;
+                break;
+            case kTokFuncCall: {                       // class 4: command as value
+                // v2 = VIBE_Script_CallFunction(record) — collect the `(args)`
+                // and invoke, the result is the operand.
                 std::vector<i32> args = CollectCallArgs();
                 operand = host_.invokeCommand ? host_.invokeCommand(t.text, args) : 0;
                 break;
             }
-            case kTokBlockEnd: return acc;
-            default: return acc;
+            case kTokBlockEnd:
+                // class 12 (end of source): fold below, then return
+                // (LABEL_22 -> `if (v41[0] == 12) goto LABEL_23`).
+                break;
+            default:
+                // class 3 (function name) / 8 (declaration) load no operand in
+                // the binary (no case in the class switch); class 0 (unknown
+                // symbol) reports + finishes there — tolerated here because the
+                // standalone lexer resolves fewer names than the live engine
+                // (include refs / not-yet-registered commands), so a faithful
+                // kill would end scripts the binary would run.
+                break;
         }
 
-        switch (pendOp) {
-            case kOpAdd: acc += operand; break;
-            case kOpSub: acc -= operand; break;
-            case kOpDiv: if (operand) acc /= operand; break;
-            case kOpMul: acc *= operand; break;
-            case kOpOr:  acc |= operand; break;
-            case kOpAnd: acc &= operand; break;
-            default:     acc = operand; break;
+        switch (pendOp) {        // the LABEL_18 fold ladder over v45
+            case kOpAdd: acc += operand; break;                    // v45 == 4
+            case kOpSub: acc -= operand; break;                    // v45 == 6
+            case kOpDiv:
+                // v45 == 20: the binary divides unguarded (x86 #DE on 0); the
+                // zero guard only avoids UB on inputs that would crash it.
+                if (operand != 0) acc /= operand;
+                break;
+            case kOpMul: acc *= operand; break;                    // v45 == 21
+            case kOpOr:  acc |= operand; break;                    // v45 == 24
+            case kOpAnd: acc &= operand; break;                    // v45 == 25
+            case kOpOperand: acc = operand; break;                 // v45 == 2 seed
+            default: break;      // no pending operator: operand not folded
         }
-        pendOp = kOpOperand;
+        pendOp = cur;            // LABEL_22: v45 = v1
+        if (t.cls == kTokBlockEnd) return acc;
     }
     return acc;
 }
 
+// gilde.exe 0x4416c4 — VIBE_Script_SkipBraceBlock(1): raw character scan from
+// the cursor; '{' increments the depth, a '}' that drops it to <= 0 stops the
+// scan with the cursor just PAST that '}'.
 void ScriptExecutor::SkipBraceBlock() {
-    // Advance the lexer's cursor over a balanced { } block.
     int pos = lexer_.cursor();
     const std::string& s = cs_.source;
-    while (pos < (int)s.size() && s[pos] != '{') ++pos;
-    if (pos >= (int)s.size()) { lexer_.setCursor(pos); return; }
     int d = 0;
     while (pos < (int)s.size()) {
-        if (s[pos] == '{') ++d;
-        else if (s[pos] == '}') { --d; if (d == 0) { ++pos; break; } }
+        if (s[pos] == '{') {
+            ++d;
+        } else if (s[pos] == '}' && --d <= 0) {
+            ++pos;
+            break;
+        }
         ++pos;
     }
     lexer_.setCursor(pos);
 }
 
+// gilde.exe 0x441660 — VIBE_Script_SkipToSemicolon: scan to the next ';' and
+// leave the cursor just past it.
 void ScriptExecutor::SkipToSemicolon() {
     int pos = lexer_.cursor();
     const std::string& s = cs_.source;
@@ -312,121 +355,168 @@ void ScriptExecutor::SkipToSemicolon() {
     lexer_.setCursor(pos);
 }
 
-// gilde.exe 0x44259c (while, type 1) / 0x4427b4 (for, type 2).
-// The original reads '(' (sub 12 in its table), evaluates the condition, records
-// a loop frame (restart cursor, condition, type, has-brace), and on a false
-// condition skips the body. On a true condition it leaves the cursor at the body
-// start and pushes the frame so the closing '}'/'; rewinds to restartCursor.
-// Advance the cursor past the next '{' and bump the brace-nesting depth. Mirrors
-// the original's "enter block" transition (dword_62E8E0 ++ when NextToken yields
-// a '{' / class-1 sub-8). Returns true if a '{' was consumed.
-bool ScriptExecutor::StepIntoBlock() {
-    int pos = lexer_.cursor();
-    while (pos < (int)cs_.source.size() && cs_.source[pos] != '{') ++pos;
-    if (pos >= (int)cs_.source.size()) { lexer_.setCursor(pos); return false; }
-    ++pos;                       // consume '{'
-    lexer_.setCursor(pos);
-    ++braceDepth_;               // dword_62E8E0 ++
-    return true;
+// gilde.exe 0x444bd0 LABEL_6 / 0x443ff0 LABEL_23 — the ';' frame pop: when the
+// frame count is > 1 and the top frame is a single-statement (noBrace) frame
+// with a live restart cursor, pop it; a popped while frame (type 1) rewinds the
+// cursor to its restart so the statement loop re-reads the `while` keyword.
+void ScriptExecutor::PopFrameAtSemicolon() {
+    if (frameCount_ > 1) {
+        const LoopFrame& f = frames_[frameCount_ - 1];
+        if (f.restartCursor && f.noBrace) {
+            --frameCount_;
+            if (frames_[frameCount_].type == 1)
+                lexer_.setCursor(frames_[frameCount_].restartCursor);
+        }
+    }
 }
 
-void ScriptExecutor::EnterLoop(u8 type) {
-    // Expect '(' then condition expression up to ')'.
-    int restart = lexer_.cursor();   // re-evaluate the condition from here
+// gilde.exe 0x44259c — VIBE_Script_ParseWhileLoop (type 1) and
+// gilde.exe 0x4427b4 — VIBE_Script_ParseForLoop (type 2; IDA-misnamed — this is
+// the `if` statement handler). Both: require '(' (1,12), evaluate the condition,
+// build a frame slot, read the next token to classify a '{ }' body vs a single
+// statement, and push (count capped at 8, "Too many looplevels").
+//   while, false: skip the '{ } ' block (from the '{') or to the ';' — no push.
+//   while, true : slot is memset AFTER the condition write (condition slot
+//                 stays 0), type 1, restart recorded, pushed.
+//   if,   any   : slot memset first, type 2 + restart + condition, pushed.
+//   if,   false : skip the body but leave the cursor ON the closing '}' / ';'
+//                 (the --cursor at 0x442958/0x442988) so the statement loop pops
+//                 the frame through the normal '}' / ';' paths.
+void ScriptExecutor::EnterLoop(u8 type, int restartCursor) {
     ScriptToken_t open = lexer_.Next();
-    (void)open;                      // '(' (operator sub 27)
-    i32 cond = EvalExpression();
-
-    LoopFrame f;
-    f.restartCursor = restart;
-    f.condition = cond;
-    f.type = type;
-
-    // Peek whether a '{' block follows.
-    int look = lexer_.cursor();
-    char b = PeekNonSpace(cs_.source, look);
-    f.hasBrace = (b == '{') ? 1 : 0;
-
-    if (!cond) {
-        // false: skip the body (no depth change — we never entered it).
-        if (f.hasBrace) SkipBraceBlock();
-        else SkipToSemicolon();
+    if (!(open.cls == kTokSymbol && open.sub == 12)) {
+        // "Syntax Error: missing '('..." — ReportError only, no Finish.
         return;
     }
-    if (f.hasBrace) {
-        StepIntoBlock();             // consume '{', braceDepth_ ++
-        f.bodyDepth = braceDepth_;   // body runs at this depth; matching '}' here
-    } else {
-        f.bodyDepth = braceDepth_ + 1;  // single-stmt body: a virtual one-deeper
+    i32 cond = EvalExpression();     // consumes through the matching ')'
+
+    if (type == 1) {
+        // ParseWhileLoop writes the condition into the un-pushed slot first —
+        // visible to the else off-by-one read even when the loop is not taken.
+        frames_[frameCount_].condition = cond;
+        if (!cond) {
+            int save = lexer_.cursor();
+            ScriptToken_t nx = lexer_.Next();
+            lexer_.setCursor(save);
+            if (nx.cls == kTokSymbol && nx.sub == 8) SkipBraceBlock();
+            else SkipToSemicolon();
+            return;
+        }
+        frames_[frameCount_] = LoopFrame{};   // SetGrayColorThunk(0,12,slot)
+        frames_[frameCount_].type = 1;
+        frames_[frameCount_].restartCursor = restartCursor;
+        int save = lexer_.cursor();
+        ScriptToken_t nx = lexer_.Next();
+        if (nx.cls == kTokSymbol && nx.sub == 8) {
+            frames_[frameCount_].noBrace = 0;         // '{' consumed
+        } else {
+            frames_[frameCount_].noBrace = 1;
+            lexer_.setCursor(save);                    // cursor restored
+        }
+        ++frameCount_;
+        if (frameCount_ > 8) --frameCount_;            // "Too many looplevels!"
+        return;
     }
-    loopStack_.push_back(f);
+
+    // type 2: the `if` handler (0x4427b4).
+    frames_[frameCount_] = LoopFrame{};
+    frames_[frameCount_].type = 2;
+    frames_[frameCount_].restartCursor = restartCursor;
+    frames_[frameCount_].condition = cond;
+    int save = lexer_.cursor();
+    ScriptToken_t nx = lexer_.Next();
+    bool brace = (nx.cls == kTokSymbol && nx.sub == 8);
+    if (brace) {
+        frames_[frameCount_].noBrace = 0;              // '{' consumed
+    } else {
+        frames_[frameCount_].noBrace = 1;
+        lexer_.setCursor(save);
+    }
+    ++frameCount_;
+    if (frameCount_ > 8) --frameCount_;
+    if (cond)
+        return;                                        // body executes
+    if (brace) {
+        lexer_.setCursor(save);                        // back to the '{'
+        SkipBraceBlock();                              // past the matching '}'
+        int pos = lexer_.cursor();
+        if (pos > 0 && cs_.source[pos - 1] == '}')
+            lexer_.setCursor(pos - 1);                 // --cursor: leave ON '}'
+    } else {
+        SkipToSemicolon();
+        int pos = lexer_.cursor();
+        if (pos > 0 && cs_.source[pos - 1] == ';')
+            lexer_.setCursor(pos - 1);                 // --cursor: leave ON ';'
+    }
 }
 
-// gilde.exe 0x442ac8 — VIBE_Script_DispatchTokenBranch (the `if` body executes
-// only when the loop frame's condition slot is set; otherwise the braced block
-// or statement is skipped). We model `if (cond) <stmt-or-block>` directly: the
-// condition was just evaluated by ExecStatement; on false, skip.
+// gilde.exe 0x442ac8 — VIBE_Script_DispatchTokenBranch (the `else` keyword).
+// Reads the condition of frame slot [count+1] — one ABOVE the slot the
+// preceding '}' popped (an off-by-one in the original, preserved: 0x442ae7
+// `cmp [edx + 12*(count+1) + 52], 0`). Slot contents persist after pops, so
+// this sees stale frame data (or 0 for never-written slots — the deterministic
+// stand-in for the original's uninitialised heap). Condition zero -> return,
+// the else body executes; nonzero -> skip: SkipBraceBlock only when the next
+// token is the keyword `else` (10,4), otherwise SkipToSemicolon (one statement).
 void ScriptExecutor::DispatchBranch() {
-    int look = lexer_.cursor();
-    char b = PeekNonSpace(cs_.source, look);
-    if (b == '{') SkipBraceBlock();
+    if (frames_[frameCount_ + 1].condition == 0)
+        return;                                        // body executes
+    ScriptToken_t nx = lexer_.Next();
+    if (nx.cls == kTokKeyword && nx.sub == 4) SkipBraceBlock();
     else SkipToSemicolon();
 }
 
+// gilde.exe 0x444bd0 — VIBE_Script_ExecuteStatement. One statement: class-1
+// tokens loop at the top ('}' pops a frame, ';' pops a pending single-statement
+// frame); the first non-symbol token dispatches by class, keywords by sub-code.
 bool ScriptExecutor::ExecStatement() {
     if (++steps_ > budget_) { finished_ = true; return false; }
+    int stmtStart = lexer_.cursor();   // keyword restart anchor (cursor-strlen(kw))
     ScriptToken_t t = lexer_.Next();
 
     switch (t.cls) {
         case kTokSymbol:
-            // block markers: 8 '{', 9 '}', 12 end, 13 ';'
-            if (t.sub == 8) {        // '{' — enter a (bare) block: deepen nesting
-                ++braceDepth_;       // dword_62E8E0 ++
-                return true;
-            }
-            if (t.sub == 9) {        // '}' — leave a block: shallow the nesting
-                if (braceDepth_ > 0) --braceDepth_;   // dword_62E8E0 --
-                // A loop's closing brace is the one that brings the depth back to
-                // (frame.bodyDepth - 1). An inner block's '}' (e.g. a nested if)
-                // lands at a deeper level and must NOT touch the loop frame — that
-                // was the old bug that prematurely re-tested the while.
-                if (!loopStack_.empty() &&
-                    braceDepth_ + 1 == loopStack_.back().bodyDepth) {
-                    LoopFrame f = loopStack_.back();
-                    loopStack_.pop_back();
-                    if (f.type == 1) {       // while: re-test from restartCursor
+            if (t.sub == 9) {
+                // '}' — block pop (the LOBYTE(v21[0]) == 9 branch): with no
+                // frame, the binary runs HandleExitKeyword / Finish (function
+                // return — the host owns call frames here). Otherwise pop the
+                // top frame; a popped while frame rewinds to its restart cursor
+                // so the `while` keyword is re-dispatched (the re-test).
+                if (frameCount_ > 0) {
+                    --frameCount_;
+                    const LoopFrame& f = frames_[frameCount_];
+                    if (f.restartCursor && f.type == 1)
                         lexer_.setCursor(f.restartCursor);
-                        EnterLoop(1);        // re-evaluate the condition + re-enter
-                    }
-                    // for/once (type 2): already popped; fall through past block.
                 }
                 return true;
             }
-            return true;  // ';', operators: no-op at statement position
+            if (t.sub == 10) {
+                // ';' — LABEL_6: pops a pending single-statement frame.
+                PopFrameAtSemicolon();
+                return true;
+            }
+            return true;  // '{' and other operators: no-op at statement position
 
         case kTokVariable: {
-            // gilde.exe 0x4445bc — VIBE_Script_AssignVariable. A variable in
-            // statement position is an assignment. The recovered assignment
-            // operators are exactly: '=' (store), '++' (increment), '--'
-            // (decrement) — there is NO compound '+='/'-=' in this VM. An optional
-            // '[' index ']' subscript precedes the operator (array element).
+            // gilde.exe 0x4445bc — VIBE_Script_AssignVariable. The token after
+            // the variable must be class 1; an optional '[' index ']' subscript
+            // (sub 27) precedes the operator. Operators by sub-code: 3 == '++',
+            // 5 == '--', 2 == '=' (anything else: no-op return). There is NO
+            // compound '+='/'-=' in this VM. Trailing ';' is NOT consumed here —
+            // the statement loop reads it (and runs the ';' frame pop).
             int elemIndex = 0;
             ScriptToken_t op = lexer_.Next();
-            if (op.cls == kTokSymbol && op.sub == 27) {   // '['
+            if (op.cls != kTokSymbol) return true;
+            if (op.sub == 27) {                           // '['
                 elemIndex = EvalExpression();             // up to ']'
                 op = lexer_.Next();                       // the assignment operator
+                if (op.cls != kTokSymbol) return true;
             }
-            if (op.cls == kTokSymbol && op.text == "++") {        // ++ : increment
+            if (op.sub == 3) {                                    // '++'
                 WriteVar(t.value, elemIndex, ReadVar(t.value, elemIndex) + 1);
-                int p = lexer_.cursor(); char sc = PeekNonSpace(cs_.source, p);
-                if (sc == ';') lexer_.setCursor(p + 1);
-            } else if (op.cls == kTokSymbol && op.text == "--") { // -- : decrement
+            } else if (op.sub == 5) {                             // '--'
                 WriteVar(t.value, elemIndex, ReadVar(t.value, elemIndex) - 1);
-                int p = lexer_.cursor(); char sc = PeekNonSpace(cs_.source, p);
-                if (sc == ';') lexer_.setCursor(p + 1);
-            } else {                                              // '=' : store rhs
-                // op is '=' (sub-code 2); evaluate the right-hand expression up to
-                // the ';' / terminator and store it.
+            } else if (op.sub == 2) {                             // '=' store rhs
                 i32 rhs = EvalExpression();
                 WriteVar(t.value, elemIndex, rhs);
             }
@@ -434,81 +524,104 @@ bool ScriptExecutor::ExecStatement() {
         }
 
         case kTokFuncCall: {
-            // command call: collect args up to the closing ')'/';'
+            // class 4 — VIBE_Script_CallFunction: collect the '(args)' and
+            // invoke. The trailing ';' is left for the statement loop.
             std::vector<i32> args = CollectCallArgs();
             if (host_.invokeCommand) host_.invokeCommand(t.text, args);
-            // consume trailing ';'
-            int p = lexer_.cursor();
-            char sc = PeekNonSpace(cs_.source, p);
-            if (sc == ';') lexer_.setCursor(p + 1);
             return true;
         }
 
         case kTokFuncDef:
-            // user function name at statement position: call it (EnterFunction).
+            // class 3 — VIBE_Script_EnterFunction: user function call (the host
+            // owns the call-record push / parameter binding / body run).
             if (host_.callUserFunction) host_.callUserFunction(t.value);
             SkipToSemicolon();
             return true;
 
-        case kTokDeclare:
-            // a local declaration encountered during execution: skip to ';'.
-            SkipToSemicolon();
+        case kTokDeclare: {
+            // gilde.exe 0x442d88 — VIBE_Script_ParseDeclaration (runtime form).
+            // NextToken must be an UNRESOLVED name (class 0) or the declaration
+            // aborts. Then by delimiter sub-code:
+            //   10 ';'  plain scalar: define if not present.
+            //   2  '='  scalar: define if not present; if the initialiser token
+            //           is an int literal (class 5) store it — anything else is
+            //           dropped (the binary only stores class-5 initialisers).
+            //           The trailing ';' stays for the statement loop.
+            //   27 '['  array: class-5 size (else "Illegal array size" -> 1),
+            //           then ']' and ';' are consumed.
+            //   12 '('  function definition: the record was registered by the
+            //           compile pass; the binary restores the cursor to before
+            //           the '(' and lets the signature tokens flow as no-ops.
+            u8 declType = t.sub;
+            ScriptToken_t nameTok = lexer_.Next();
+            if (nameTok.cls != kTokUnknown) return true;
+            int beforeDelim = lexer_.cursor();
+            ScriptToken_t d = lexer_.Next();
+            if (d.cls != kTokSymbol) return true;
+            if (d.sub == 10) {                                   // ';'
+                if (cs_.symbols.LookupVariable(nameTok.text) < 0)
+                    cs_.symbols.DefineVariable(nameTok.text, declType, 1);
+                return true;
+            }
+            if (d.sub == 2) {                                    // '='
+                int vi = cs_.symbols.LookupVariable(nameTok.text);
+                if (vi < 0)
+                    vi = cs_.symbols.DefineVariable(nameTok.text, declType, 1);
+                ScriptToken_t init = lexer_.Next();
+                if (init.cls == kTokIntLit) WriteVar(vi, 0, init.value);
+                return true;
+            }
+            if (d.sub == 27) {                                   // '[' size ']'
+                ScriptToken_t sz = lexer_.Next();
+                int n = (sz.cls == kTokIntLit) ? sz.value : 1;
+                if (cs_.symbols.LookupVariable(nameTok.text) < 0)
+                    cs_.symbols.DefineVariable(nameTok.text, declType, n);
+                lexer_.Next();                                   // ']' (sub 28)
+                lexer_.Next();                                   // ';' (sub 10)
+                return true;
+            }
+            if (d.sub == 12)                                     // '(' func def
+                lexer_.setCursor(beforeDelim);
             return true;
+        }
 
         case kTokKeyword:
-            // gilde.exe VIBE_Script_ExecuteStatement (0x444bd0) class-10 switch on
-            // the keyword sub-code (byte_767450 stride 16, subcode == offset/16):
+            // Class-10 switch on the keyword sub-code (byte_767450 stride 16):
             //   1 while  -> ParseWhileLoop (0x44259c)
-            //   2 if     -> "ParseForLoop" (0x4427b4, IDA-misnamed; THIS is the
-            //              if-statement handler: reads '(' cond ')', then a '{'
-            //              braced body or a single statement; skips it when false)
-            //   3 return -> EvaluateExpression + Finish
-            //   4 else   -> DispatchTokenBranch (0x442ac8, the branch dispatcher)
+            //   2 if     -> "ParseForLoop" (0x4427b4, IDA-misnamed if handler)
+            //   3 return -> EvaluateExpression + HandleExitKeyword/Finish
+            //   4 else   -> DispatchTokenBranch (0x442ac8)
             //   5 #include-> ParseInclude
             //   6/7/8    -> single/normal/multi step (ctx+2564)
             // script_vm.h's enum names are mislabeled vs the binary spellings:
             // kKwFor==2 is actually `if`; kKwIf==4 is the `else`/branch code. We
             // dispatch by the binary sub-code, not by the (mislabeled) name.
             switch (t.sub) {
-                case kKwWhile:  EnterLoop(1); return true;   // 1: while
-                case kKwFor: {                               // 2: if-statement
-                    // if ( cond ) <stmt/block>   (0x4427b4)
-                    lexer_.Next();                     // '(' (sub 12)
-                    i32 cond = EvalExpression();       // up to ')'
-                    if (!cond) {
-                        DispatchBranch();              // skip the braced body / stmt
-                    } else {
-                        // true: step into the body. A braced body deepens the brace
-                        // nesting (so its '}' returns to THIS depth, not the
-                        // enclosing loop's). A single-statement body just runs next.
-                        int look = lexer_.cursor();
-                        char b = PeekNonSpace(cs_.source, look);
-                        if (b == '{') StepIntoBlock();
-                    }
-                    return true;
-                }
+                case kKwWhile: EnterLoop(1, stmtStart); return true;  // 1: while
+                case kKwFor:   EnterLoop(2, stmtStart); return true;  // 2: if
                 case kKwReturn:                              // 3: return
                     returnValue_ = EvalExpression();
                     finished_ = true;
                     return false;
                 case kKwIf:                                  // 4: else / branch
-                    // DispatchTokenBranch (0x442ac8): skip the following braced
-                    // block or single statement (the else/branch dispatch path).
                     DispatchBranch();
                     return true;
                 case kKwInclude: SkipToSemicolon(); return true;  // 5: #include
                 case kKwModeA:    stmtMode_ = 1; return true;
                 case kKwModeB:    stmtMode_ = 0; return true;
                 case kKwModeLoop: stmtMode_ = 2; return true;
-                default: finished_ = true; return false;
+                default: finished_ = true; return false;  // "Keyword is not surported!"
             }
 
         case kTokBlockEnd:
+            // class 12: clear the runnable bit (+164 &= ~1) and stop.
             runnable_ = false;
             return false;
 
-        default:   // unknown symbol
-            // tolerate stray tokens (skip) rather than aborting the whole run
+        default:   // class 0 unknown symbol / literals in statement position
+            // The binary reports "Unknown symbol" + Finish; tolerated here
+            // because the standalone lexer resolves fewer names than the live
+            // engine (see EvalExpression's class-0 note).
             return true;
     }
 }

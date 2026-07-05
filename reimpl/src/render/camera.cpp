@@ -10,16 +10,19 @@ constexpr double kHalf = 0.5;
 } // namespace
 
 // gilde.exe 0x407428 — VIBE_Coord_ProjectPoint
-//   v7 = point[0]-camera[0]; v9 = point[2]-camera[2];
-//   v3 = 1.0 / camera[4];
-//   out[0] = (int)trunc(v7*v3 + 0.5); out[1] = (int)trunc(0.5 + v3*v9);
+//   v7 = (float)(point[0]-camera[0]); v9 = (float)(point[2]-camera[2]);
+//   v3 = 1.0 / camera[4];              (80-bit reciprocal, never stored)
+//   v8 = (float)(v7*v3); v10 = (float)(v3*v9);   (products STORED to float)
+//   out[0] = (int)trunc(v8 + 0.5); out[1] = (int)trunc(0.5 + v10);
 // The two ConvertX calls truncate each (value + 0.5) toward zero.
 void ProjectPoint(const float* camera, const float* point, i32* out) {
     double inv = 1.0 / camera[4];
-    double sx = (double)(point[0] - camera[0]) * inv;
-    double sy = inv * (double)(point[2] - camera[2]);
-    out[0] = (i32)util::ConvertX(sx + kHalf);
-    out[1] = (i32)util::ConvertX(kHalf + sy);
+    float dx = point[0] - camera[0];                // v7 (float store)
+    float dz = point[2] - camera[2];                // v9
+    float sx = (float)((double)dx * inv);           // v8 (float store)
+    float sy = (float)(inv * (double)dz);           // v10
+    out[0] = (i32)util::ConvertX((double)sx + kHalf);
+    out[1] = (i32)util::ConvertX(kHalf + (double)sy);
 }
 
 // gilde.exe 0x407488 — VIBE_Coord_ProjectFramePoint

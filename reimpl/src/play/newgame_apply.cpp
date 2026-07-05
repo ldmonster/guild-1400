@@ -88,22 +88,22 @@ const char* NewGameApplyHooks::ParentFirstName(bool female, int index) {
     return sim::NameAt(female ? sim::kNameFemale : sim::kNameMale, index);
 }
 
-// gilde.exe 0x52d9f9..0x52da0e — talents = record BYTES [1..5] of TypeRecordA
-// (NOT [0..4]). LookupTypeRecordA @0x589778 writes a 6-byte record at the byref:
-// dword0 (LE) at +0..3, word4 at +4..5. The copy loop runs eax=1..5 reading
-// [esp+eax] and stores byte_122F4F0[0..4] = record[1..5] — i.e. it SKIPS byte 0.
-// Evidence (disasm 0x52da00): `inc eax; mov dl,[esp+eax]; mov (122F4EC+3)[eax],dl;
-// cmp eax,5; jl` -> eax 1..5 in, F0..F4 out.
+// gilde.exe 0x52d9f9..0x52da0e — talents = record BYTES [0..4] of TypeRecordA.
+// LookupTypeRecordA @0x589778 writes a 6-byte record at the byref: dword0 (LE)
+// at +0..3, word4 at +4..5. The copy loop runs eax=1..5 reading [esp+eax-1]
+// (raw bytes @0x52da01: 8a 54 04 ff = `mov dl, [esp+eax-1]` — disp8 is -1, so
+// with the record at [esp] the reads are record[0..4]) and stores
+// byte_122F4F0[0..4] via `mov (122F4EC+3)[eax], dl` (0x122F4F0..0x122F4F4).
 void NewGameProfessionTalents(int professionVariant, u8 out[5]) {
     sim::TypeRecord rec{};
     sim::Building_LookupTypeRecordA(static_cast<std::uint8_t>(professionVariant), &rec);
     // record bytes laid out: b0=dword0&0xFF, b1=dword0>>8, b2=dword0>>16,
-    // b3=dword0>>24, b4=word4&0xFF, b5=word4>>8. Take b1..b5.
-    out[0] = static_cast<u8>(rec.dword0 >> 8);
-    out[1] = static_cast<u8>(rec.dword0 >> 16);
-    out[2] = static_cast<u8>(rec.dword0 >> 24);
-    out[3] = static_cast<u8>(rec.word4);
-    out[4] = static_cast<u8>(rec.word4 >> 8);
+    // b3=dword0>>24, b4=word4&0xFF, b5=word4>>8. Take b0..b4.
+    out[0] = static_cast<u8>(rec.dword0);
+    out[1] = static_cast<u8>(rec.dword0 >> 8);
+    out[2] = static_cast<u8>(rec.dword0 >> 16);
+    out[3] = static_cast<u8>(rec.dword0 >> 24);
+    out[4] = static_cast<u8>(rec.word4);
 }
 
 NewGameApplyResult ApplyNewGameParams(const gui::NewGameParams& p,
@@ -215,7 +215,8 @@ NewGameApplyResult ApplyNewGameParams(const gui::NewGameParams& p,
     sim::EnqueueCmd15(q, res.motherId, -1, res.purseMother, in.rateByte);
 
     // ---- 5. mission slot ----------------------------------------------------
-    // 0x533a15..0x533a4d — `if ((signed byte)0x63C8F1 > -1)  // dword_63C8F0+1, sar 0x18
+    // 0x533a15..0x533a4d — `if ((int @0x63C8F1) >> 24 > -1)`, i.e. the SIGNED
+    // BYTE @0x63C8F4 is tested; on pass:
     //   Mission_SlotRegister(player id, LOBYTE(dword_122F4EC))`. The byte
     // arrives as in.missionModeByte (cold image 0xFE = -2 -> skipped); the
     // same original byte backs world::g_missionSlotMode inside SlotRegister.

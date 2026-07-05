@@ -247,11 +247,14 @@ TEST(WorldMarketStall, SortedItemList) {
     slots[3] = {103, 0, 7, 4};   // Mark
     CHECK_EQ(TradeSortableCount(slots), 4);
     TradeBuildSortedItemList(slots, 5, NameForCurrency, nullptr);
-    // descending name order: ZZZZ(none) > Silber > Mark > AAAA(home)
-    CHECK_EQ(slots[0].currency, 0);   // ZZZZ first
-    CHECK_EQ(slots[1].currency, 6);   // Silber
-    CHECK_EQ(slots[2].currency, 7);   // Mark
-    CHECK_EQ(slots[3].currency, 5);   // AAAA home last
+    // ascending name order (gilde.exe 0x51b3ca swaps when name(i) > name(j)):
+    // AAAA(home) < Mark < Silber < ZZZZ(none).
+    // [old pin (descending, ZZZZ first) PROVEN wrong: VIBE_Util_StrCmp @0x5d3f10
+    //  returns 1 when its eax operand (key(i)) is greater — see 0x51b3bc/0x51b3ca.]
+    CHECK_EQ(slots[0].currency, 5);   // AAAA home first
+    CHECK_EQ(slots[1].currency, 7);   // Mark
+    CHECK_EQ(slots[2].currency, 6);   // Silber
+    CHECK_EQ(slots[3].currency, 0);   // ZZZZ last
 }
 
 // ---------------------------------------------------------------------------

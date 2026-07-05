@@ -52,8 +52,8 @@ const float kAnim3E_else[] = { 306, 580, 456, 600, 616, 520, 626, 350, 35, 142, 
 const TutorialAnimTable kAnim3E = { 2, kAnim3E_800, kAnim3E_1024, kAnim3E_else };
 
 // chapter 3, node G (5 frames)
-const float kAnim3G_800[]  = { 465, 195, 536, 440, 356, 420, 140, 170, 35, 170, 106,
-                                75, 170, 206, 300, 426, 260, 465, 195, 35, 170, 106,
+const float kAnim3G_800[]  = { 465, 195, 536, 440, 356, 420, 140, 170, 35, 142, 71,
+                                75, 170, 206, 300, 426, 260, 465, 195, 35, 142, 71,
                                465, 195, 286, 290, 406, 530, 115, 510, 35, 142, 71,
                                700, 310, 700, 310, 700, 310, 700, 310,  0,   7, 21,
                                700, 280, 700, 280, 700, 280, 700, 280,  0,   7, 21 };
@@ -121,7 +121,7 @@ const TutorialNodeSpecEx kChapter3[] = {
   { 3, "8s3c", 2, 7468, "CHAPTER_3_G_MAIN", 7471, "CHAPTER_3_G_REMIND", 7470, "Chapter_3_G_Step_Aux", 7472, "CHAPTER_3_G_DONE", kVoice, 213, CB::kNone345,             CB::kNone345,                    CB::kHandleMultiStageDrop, 23,  1420, 9,  36,  0,  0,                          kMask, 8048, nullptr,  &kAnim3G,  CB::kQueryEventStateRange },
   { 3, "9s3c", 1, 7473, "CHAPTER_3_H_MAIN",    0,   nullptr,             0,   nullptr,              0,   nullptr,            kVoice,  71,  CB::kNone345,             CB::kNone345,                    CB::kSharedMatch,         3,    355,  11,  0,   0,  0,                           kMask, 8048, nullptr,  nullptr,   CB::kNone345 },
   { 3, "As3c", 2, 7475, "CHAPTER_3_I_MAIN",    0,   nullptr,          7477, "Chapter_3_I_Step_Aux", 7479, "CHAPTER_3_I_DONE", kVoice, 213,  CB::kNone345,             CB::kNone345,                    CB::kHandleConfirmDropStep, 18, 1420, 9,  38,  0,  0,                           23607, 7792, nullptr,  &kAnim3I,  CB::kNone345 },
-  { 7, "3rtu", 3, 7480, "CHAPTER_3_OUTRO",     0,   nullptr,             0,   nullptr,              0,   nullptr,            -1,     355,  CB::kNone345,             CB::kNone345,                    CB::kNone345,             0,    0,    11,  0,   0,  0,                           kMask, 8048, nullptr,  nullptr,   CB::kNone345 },
+  { 3, "3rtu", 3, 7480, "CHAPTER_3_OUTRO",     0,   nullptr,             0,   nullptr,              0,   nullptr,            -1,     355,  CB::kNone345,             CB::kNone345,                    CB::kNone345,             0,    0,    11,  0,   0,  0,                           kMask, 8048, nullptr,  nullptr,   CB::kNone345 },
 };
 
 // ===========================================================================

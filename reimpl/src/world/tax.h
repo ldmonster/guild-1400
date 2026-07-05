@@ -40,8 +40,9 @@ void TaxSetCommitHook(bool (*hook)(i32 payerObjectId, i32 payerId, i32 amount));
 // gilde.exe 0x57aa88 — VIBE_Tax_CollectTradeIncome (formula + commit dispatch).
 //   flags bit0 -> queue the network command (TaxCommitToCommandQueue)
 //   flags bit1 -> add the amount to the city tax accumulator (out param)
-// Returns 1 if a positive account produced a tax line, 0 if law-book slot 8 was
-// already full (>=6 active finance laws) or the account was non-positive.
+// Returns 0 only when law-book slot 8 was already full (>=6 active finance
+// laws); otherwise 1 — even for a non-positive account (0x57ab34 `test ebx,ebx;
+// jle` skips the writes but still falls through to `mov eax,1`).
 struct TradeTaxResult {
     i32  amount = 0;     // computed tax (>=0)
     bool committed = false;

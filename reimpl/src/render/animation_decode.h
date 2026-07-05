@@ -73,7 +73,13 @@ struct FrameBlitState {
     const u16* indexTable = nullptr;   // dword_1406938 (Bounds default mode)
     u16  darkMask16  = 0x3DEF;         // word_1406944  (mode 2 odd-pixel mask)
     u32  darkMask32  = 0x3DEFBDEF;     // dword_1406930 (mode 2 dword-pair mask)
-    u16  fillColor16 = 0;              // dword_1406940 (mode 5)
+    u16  fillColor16 = 0;              // dword_1406940 (mode 5; the binary stores
+                                       //   the colour duplicated in both halves:
+                                       //   0x5d88dd `result | (result << 16)`)
+    bool disabled  = false;            // byte_140694B  (Process global gate)
+    bool index16Sel = false;           // HIBYTE(dword_1406947): depth-0 RLE frames
+                                       //   go to Bounds (index->16) when set,
+                                       //   Index (8bpp dest) when clear
 };
 
 // Frame header field byte offsets.

@@ -31,7 +31,8 @@
 //   * WalkStep @0x4093b0 advances ONE WAYPOINT per completed segment: it
 //     writes the segment target into the walk-anim attachment (+76..84) and
 //     the segment DURATION into anim+92 — 20 base / 40 mounted, 8 / 24 on the
-//     final segment, x1.2 indoors (WalkSegmentDuration, charaction_walk.h).
+//     final segment, x3.0 indoors (dbl_610814; WalkSegmentDuration,
+//     charaction_walk.h).
 //   * WalkUpdate then writes the PLAYBACK SPEED anim+96 = mesh+416 baseSpeed
 //     x terrain factor flt_6108F0..FC = {2.2, 2.5, 1.7, 1.9} (keyed by the
 //     tile-type-ahead 6/11 and the cart bit mesh+4&8, @0x40a40b..0x40a4c1)

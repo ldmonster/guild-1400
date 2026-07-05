@@ -38,9 +38,11 @@ const u32 kSocializeStrideTable[16] = {
 i32 NpcAction9_TruncToInt(double v) { return static_cast<i32>(v); }
 
 bool NpcAction9_ShootTooExpensive(int wealthSelf, int wealthTarget, int currency) {
-    // v17 = wealthSelf * 0.005; v10 = wealthTarget*0.005 + v17; v18 = (int)v10.
+    // 0x470d38: v17 = wealthSelf * 0.005 is spilled to a 4-byte FLOAT stack slot
+    // before the target term is added (fstp dword) — model the float rounding.
+    float selfTerm = static_cast<float>(static_cast<double>(wealthSelf) * kShootWealthMul);
     double combined = static_cast<double>(wealthTarget) * kShootWealthMul
-                      + static_cast<double>(wealthSelf) * kShootWealthMul;
+                      + static_cast<double>(selfTerm);
     int budget = static_cast<int>(static_cast<double>(currency) * kShootCurrencyMul);
     // return 0 (too expensive) when (double)v18 > v11.
     return static_cast<double>(NpcAction9_TruncToInt(combined)) > static_cast<double>(budget);
@@ -134,8 +136,10 @@ int NpcAction9_EvaluateShoot(const u16* record, u8 relFlag, void* reqA, void* re
     int wealthTarget = hk.personTotalWealth
         ? hk.personTotalWealth(matchedId, record) : 0;            // ComputeTotalWealth(v8, a1)
 
+    // v17 (self term) is a float stack spill in the binary — round through float.
+    float selfTerm = static_cast<float>(static_cast<double>(wealthSelf) * kShootWealthMul);
     int budget = NpcAction9_TruncToInt(static_cast<double>(wealthTarget) * kShootWealthMul
-                                       + static_cast<double>(wealthSelf) * kShootWealthMul); // v18
+                                       + static_cast<double>(selfTerm)); // v18
 
     if (static_cast<double>(budget) > static_cast<double>(currencyAmount) * kShootCurrencyMul) {
         return 0;

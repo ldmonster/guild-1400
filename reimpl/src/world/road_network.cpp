@@ -56,11 +56,15 @@ struct Store {
     u16&  w(int byteOff, int node)       { return *reinterpret_cast<u16*>(buf + byteOff + kStride * node); }
     u16   w(int byteOff, int node) const { return *reinterpret_cast<const u16*>(buf + byteOff + kStride * node); }
     u8&   b(int byteOff, int node)       { return buf[byteOff + kStride * node]; }
-    // Swap two whole 44-byte records (the `rep movsd` of 0xB dwords at +2).
+    // Swap two whole 44-byte records (the `rep movsd` of 0xB dwords).
+    // 0x592fe9/0x592ffc/0x59300b: `lea esi,(dword_12CDD8E+2)[edx]` — the swap
+    // base is 0x12CDD8E+2 = record base 0x12CDD68 + 0x28, i.e. the *logical*
+    // record {nodeId,parentFrom,parentTo,depth,cost,...} biased +0x28 into the
+    // physical 44-byte slots.
     void swapRec(int a, int c) {
         u8 tmp[kStride];
-        u8* pa = buf + 2 + kStride * a;   // (dword_12CDD8E+2) base
-        u8* pc = buf + 2 + kStride * c;
+        u8* pa = buf + 0x28 + kStride * a;   // (dword_12CDD8E+2) base
+        u8* pc = buf + 0x28 + kStride * c;
         std::memcpy(tmp, pa, kStride);
         std::memcpy(pa, pc, kStride);
         std::memcpy(pc, tmp, kStride);
@@ -273,7 +277,11 @@ int RoadComputeNetworkLayout(RoadLayoutState& st,
     int v27 = v80 / (2 * count0);
     int v28 = 2 * v27;
     for (j = 0; j < count0; ++j) {
-        s.d(OFF_COORDX, j) = v27 - kRoadNodeHalf;          // 0x5930ea dword_12CDD6C
+        // 0x5930e4: `add edx,2Ch` BEFORE the store 0x5930ea — the write lands at
+        // dword_12CDD6C + 44*(j+1) == absolute 0x30+44j, i.e. node j's COST slot
+        // (the laid-out X aliases the cost field; the consumer 0x59361c reads
+        // node X back as LOWORD(dword_12CDD98[11j])).
+        s.d(OFF_COORDX, j + 1) = v27 - kRoadNodeHalf;      // 0x5930ea dword_12CDD6C[+1]
         v27 += v28;
     }
 
@@ -324,7 +332,11 @@ int RoadComputeNetworkLayout(RoadLayoutState& st,
             } while (lvlSwapped);
 
             // (C) equal-cost runs spread across the band (0x593269).
-            for (j = levStart; j < levEnd; ) {
+            // 0x59331b..0x59332f: after a run is (or is not) spread, the outer
+            // loop advances j by exactly ONE (`add ecx,2Ch; inc ebx`), not past
+            // the run — overlapping re-runs on the freshly spread costs are the
+            // original behavior.
+            for (j = levStart; j < levEnd; ++j) {
                 int v43 = j;
                 while (v43 < levEnd && s.d(OFF_D98, j) == s.d(OFF_D98, v43)) {
                     ++v43;
@@ -346,7 +358,6 @@ int RoadComputeNetworkLayout(RoadLayoutState& st,
                         }
                     }
                 }
-                j = v43;
             }
 
             // (D) enforce min 80px spacing within the level (0x5933b1).
@@ -381,16 +392,23 @@ int RoadComputeNetworkLayout(RoadLayoutState& st,
     if (v59 - kRoadNodeHalf < 0 || v58 + 4 * kRoadNodeHalf >= v80) {
         int v62  = v59 - kRoadNodeHalf;
         int v101 = v58 + 4 * kRoadNodeHalf - v62;
-        double v91 = static_cast<double>(v80) / static_cast<double>(v101);
-        double v63 = static_cast<double>(v62) * -v91;
+        // 0x593511 `fstp [esp+var_40]` stores the quotient as a 4-byte FLOAT
+        // (float v91), then every product reloads that float.
+        float v91 = static_cast<float>(static_cast<double>(v80) /
+                                       static_cast<double>(v101));
+        double v63 = static_cast<double>(v62) * -static_cast<double>(v91);
         int v90 = static_cast<int>(util::ConvertX(v63));   // truncate-toward-zero
         for (int lvl = 0; lvl < levelCount; ++lvl) {
             int sIdx = levelStart[lvl];
             int eIdx = levelStart[lvl + 1];
             for (j = sIdx; j < eIdx; ++j) {
-                double v71 = static_cast<double>(s.d(OFF_D98, j)) * v91;
+                double v71 = static_cast<double>(s.d(OFF_D98, j)) *
+                             static_cast<double>(v91);
                 int scaled = static_cast<int>(util::ConvertX(v71));
-                s.d(OFF_COORDX, j) = v90 + scaled;         // 0x593589
+                // 0x59356c: `add eax,2Ch` BEFORE the store 0x593589 — the write
+                // lands at dword_12CDD6C + 44*(j+1) == 0x30+44j, overwriting the
+                // very cost slot just read (in-place rescale of the X alias).
+                s.d(OFF_COORDX, j + 1) = v90 + scaled;     // 0x593589
             }
         }
     }
@@ -402,7 +420,10 @@ int RoadComputeNetworkLayout(RoadLayoutState& st,
     }
     for (j = 0; j < nodeCount; ++j) {
         int v77 = v72 * static_cast<u16>(s.w(OFF_DEPTH, j)) / levelCount;
-        s.d(OFF_COORDY, j) = v77 + kRoadTopMargin;         // 0x593602 dword_12CDD70
+        // 0x5935f7: `add ecx,2Ch` BEFORE the store 0x593602 — the write lands at
+        // dword_12CDD70 + 44*(j+1) == absolute 0x34+44j; the consumer 0x59361c
+        // reads node Y back as LOWORD(dword_12CDD9C[11j]) (same byte).
+        s.d(OFF_COORDY, j + 1) = v77 + kRoadTopMargin;     // 0x593602 dword_12CDD70[+1]
     }
 
     // --- mirror the flat store into the public RoadLayoutState ---
@@ -415,8 +436,11 @@ int RoadComputeNetworkLayout(RoadLayoutState& st,
         RoadNode& n = st.nodes[j];
         n.childType    = s.w(OFF_CHILD, j);
         n.reserved02   = s.w(OFF_PARIDX, j);
-        n.coordX       = s.d(OFF_COORDX, j);
-        n.coordY       = s.d(OFF_COORDY, j);
+        // Node j's laid-out X/Y live one record up (absolute 0x30+44j / 0x34+44j):
+        // the consumer VIBE_Building_BuildUpgradeTree @0x59361c reads them as
+        // LOWORD(dword_12CDD98[11j]) and LOWORD(dword_12CDD9C[11j]).
+        n.coordX       = s.d(OFF_COORDX, j + 1);
+        n.coordY       = s.d(OFF_COORDY, j + 1);
         n.link10       = s.d(OFF_L10, j);
         n.link14       = s.d(OFF_L14, j);
         n.link18       = s.d(OFF_L18, j);

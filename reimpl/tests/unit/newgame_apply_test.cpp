@@ -89,15 +89,17 @@ sim::Person* Spawn(int slot, i32 id, u8 kind, u8 alive = 100) {
 TEST(NewGameApply, TalentsGoldenFromTypeRecordA) {
     u8 t[5];
     // variant 1 — byte_649910 record 1 = 69 69 BD 93 69 04 (get_bytes @0x649916).
-    // The copy loop @0x52da00 takes record BYTES [1..5] (skips byte 0), so
-    // talents = {69, BD, 93, 69, 04}.
+    // The copy loop @0x52da00 takes record BYTES [0..4]: the load's raw bytes
+    // are 8a 54 04 ff = `mov dl, [esp+eax-1]` (disp8 -1, record at [esp]), so
+    // eax=1..5 reads record[0..4].  Old pin {69,BD,93,69,04} assumed [1..5]
+    // from the decompile pseudo-index and was wrong.
     play::NewGameProfessionTalents(1, t);
-    CHECK_EQ((int)t[0], 0x69); CHECK_EQ((int)t[1], 0xBD); CHECK_EQ((int)t[2], 0x93);
-    CHECK_EQ((int)t[3], 0x69); CHECK_EQ((int)t[4], 0x04);
-    // variant 2 — record 2 = 3F 3F 93 69 3F 03 -> bytes [1..5] = {3F,93,69,3F,03}.
+    CHECK_EQ((int)t[0], 0x69); CHECK_EQ((int)t[1], 0x69); CHECK_EQ((int)t[2], 0xBD);
+    CHECK_EQ((int)t[3], 0x93); CHECK_EQ((int)t[4], 0x69);
+    // variant 2 — record 2 = 3F 3F 93 69 3F 03 -> bytes [0..4] = {3F,3F,93,69,3F}.
     play::NewGameProfessionTalents(2, t);
-    CHECK_EQ((int)t[0], 0x3F); CHECK_EQ((int)t[1], 0x93); CHECK_EQ((int)t[2], 0x69);
-    CHECK_EQ((int)t[3], 0x3F); CHECK_EQ((int)t[4], 0x03);
+    CHECK_EQ((int)t[0], 0x3F); CHECK_EQ((int)t[1], 0x3F); CHECK_EQ((int)t[2], 0x93);
+    CHECK_EQ((int)t[3], 0x69); CHECK_EQ((int)t[4], 0x3F);
     // variant 0 / out-of-range fall back to record 0 (all zero).
     play::NewGameProfessionTalents(0, t);
     for (int i = 0; i < 5; ++i) CHECK_EQ((int)t[i], 0);
@@ -163,8 +165,10 @@ TEST(NewGameApply, FullCommitWritesPlayerAndParentRecords) {
     CHECK_EQ(RStr(pl, 0x1F0), "");                 // unk_122F4F5 (automatic path)
     for (int i = 0; i < 5; ++i)                    // talents @ +0x80..+0x84
         CHECK_EQ((int)pl[0x80 + i], (int)r.talents[i]);
-    CHECK_EQ((int)r.talents[0], 0x69);             // variant-1 TypeRecordA bytes[1..5]
-    CHECK_EQ((int)r.talents[2], 0x93);             // record[3] (loop @0x52da00 skips byte 0)
+    CHECK_EQ((int)r.talents[0], 0x69);             // variant-1 TypeRecordA bytes[0..4]
+    CHECK_EQ((int)r.talents[2], 0xBD);             // record[2] (load @0x52da01 is
+                                                   // [esp+eax-1] -> bytes [0..4];
+                                                   // old pin 0x93 assumed [1..5])
 
     // --- the parents (opcode 11 / HandleCreatePersonA @0x496614) ---
     CHECK_EQ((int)mo[2], 9);                       // kind 9 (parent NPC)

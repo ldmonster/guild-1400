@@ -384,7 +384,12 @@ TEST(AppSpine, FrameLoopRenderWorldRunsDayCycleWhenBitSetAndNotHeadless) {
         CHECK_EQ(log.count("f.dayCycleMusic"), 1);
         CHECK_EQ(log.count("f.present"), 0); // present needs kGameObjects
     }
-    // Headless suppress kills renderWorld day-cycle inner block & returns 0.
+    // Headless suppress kills the renderWorld DAY-CYCLE inner block (gilde.exe
+    // 0x4c0c61: (v54 & 0x10000)==0 && (v54 & 0x40000)!=0) — but the MUSIC half of
+    // the fused hook still runs: the binary's music gate at 0x4c0d56 is
+    // `dword_63C8F8 && (v54 & 0x40000)` with NO headless term, so the fused
+    // dayCycleAndOutdoorMusic hook must fire exactly once whenever bit 0x40000 is
+    // set. [Pin updated from 0 with that binary evidence.]
     {
         CallLog log;
         MockPlatform plat(log); MockGfx gfx(log); MockAudio audio(log); MockSubsystems sub(log);
@@ -393,7 +398,7 @@ TEST(AppSpine, FrameLoopRenderWorldRunsDayCycleWhenBitSetAndNotHeadless) {
                                      app::mask::kHeadlessSuppress);
         CHECK_EQ(rc, 0);
         CHECK_EQ(log.count("f.renderWorld"), 1);   // render still gated by kRenderWorld
-        CHECK_EQ(log.count("f.dayCycleMusic"), 0); // inner block suppressed when headless
+        CHECK_EQ(log.count("f.dayCycleMusic"), 1); // music half: 0x40000 alone (0x4c0d56)
     }
 }
 

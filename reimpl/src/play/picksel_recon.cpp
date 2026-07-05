@@ -116,21 +116,27 @@ char ComputeSelectionVolumeSolve(const float cornerPos[4][3],
     const float dz = pp.scaleX;                            // v70 = flt_13FCD0C
 
     // ----- triangle (apex=v95, e1=v16, e2=v15) --------------------------------
-    auto solveTri = [&](int apex, int b, int c, float* su, float* sv) -> char {
+    // (`su` receives the FULL-precision t (v31 stays on the x87 stack for the
+    //  acceptance compare); the float truncations v53/v58 are taken by the
+    //  caller exactly where the original stores them.)
+    auto solveTri = [&](int apex, int b, int c, double* su, float* sv) -> char {
         const float* P = cornerPos[apex];
         const float* B = cornerPos[b];
         const float* C = cornerPos[c];
         // e_b = P - B (v74/v75/v76), e_c = P - C (v62/v63/v64)
         float e1x = P[0]-B[0], e1y = P[1]-B[1], e1z = P[2]-B[2];
         float e2x = P[0]-C[0], e2y = P[1]-C[1], e2z = P[2]-C[2];
-        // normal n = e_c x e_b   (v71/v72/v73, exactly as the decompile orders it)
-        float nx = e2z*e1x - e2y*e1z;   // v71 = v64*v75 - v63*v76
+        // normal n = e_b x e_c   (v71/v72/v73; fsubrp chain @0x5b74b7..0x5b74e6)
+        float nx = e2z*e1y - e2y*e1z;   // v71 = v64*v75 - v63*v76
         float ny = e2x*e1z - e2z*e1x;   // v72 = v62*v76 - v64*v74
         float nz = e2y*e1x - e2x*e1y;   // v73 = v63*v74 - v62*v75
         float planeD = nx*P[0] + ny*P[1] + nz*P[2];   // v83/v82
         double denom = nx*dx + ny*dy + nz*dz;          // v24/v41
         if (std::fabs(denom) <= kParallelEps) return 0;
-        double tt = (nx*ox + ny*oy + nz*oz + planeD) / denom;   // v25/v42
+        // fst var_150 @0x5b7583 truncates the denominator to FLOAT before the
+        // fdiv @0x5b75c3 (the fabs test above uses the pre-truncation value).
+        const float denomF = (float)denom;             // v56
+        double tt = (nx*ox + ny*oy + nz*oz + planeD) / denomF;  // v25/v42
         float hx = (float)(dx*tt) + ox;     // v89
         float hy = (float)(dy*tt) + oy;     // v90
         float hz = (float)(dz*tt) + oz;     // v92
@@ -139,23 +145,27 @@ char ComputeSelectionVolumeSolve(const float cornerPos[4][3],
         float qz = P[2]-hz;  // v94
         // barycentric s = (e_b.x*q.y - e_c?.. ) — follow the decompile exactly:
         //   v58 = (v75*v91 - v74*v93)/(v75*v62 - v74*v63)
-        double s = (e1y*qx - e1x*qy) / (e1y*e2x - e1x*e2y);   // v58
-        // then re-project q -= s*e_c and average the three ratios * 1/3 -> t
+        double s = (e1y*qx - e1x*qy) / (e1y*e2x - e1x*e2y);   // v26 (v58 = float)
+        // then re-project q -= s*e_c (with the full-precision s = v27 = -v26)
+        // and average the three ratios * 1/3 -> t
         qx = (float)(-s*e2x + qx);   // v91
         qy = (float)(-s*e2y + qy);   // v93
         qz = (float)(-s*e2z + qz);   // v94
-        double t = ((qy/e1y) + (qx/e1x) + (qz/e1z)) * (double)kThird;  // v53
-        *su = (float)t;
+        double t = ((qy/e1y) + (qx/e1x) + (qz/e1z)) * (double)kThird;  // v31
+        *su = t;
         *sv = (float)s;
         return 1;
     };
 
-    float s_first = 0.0f, t_first = 0.0f;
-    if (!solveTri(v95, v16, v15, &t_first, &s_first))
+    float s_first = 0.0f;
+    double t_full = 0.0;
+    if (!solveTri(v95, v16, v15, &t_full, &s_first))
         return 0;
+    const float t_first = (float)t_full;   // v53 = v31 @0x5b7731
 
-    // first triangle accepted iff t + s <= 1 and both in [0,1]
-    if ((double)(t_first + s_first) <= 1.0) {
+    // first triangle accepted iff t + s <= 1 (the original adds the x87
+    // FULL-precision v31 to the float v58 @0x5b7743) and both in [0,1]
+    if (t_full + (double)s_first <= 1.0) {
         if (t_first >= 0.0f && t_first <= 1.0f &&
             s_first >= 0.0f && s_first <= 1.0f) {
             // u along v95..v16, v along v95..v15
@@ -175,30 +185,38 @@ char ComputeSelectionVolumeSolve(const float cornerPos[4][3],
         const float* C = cornerPos[v15];
         float e1x = P[0]-B[0], e1y = P[1]-B[1], e1z = P[2]-B[2]; // v62/63/64 -> e toward v16
         float e2x = P[0]-C[0], e2y = P[1]-C[1], e2z = P[2]-C[2]; // v74/75/76 -> e toward v15
-        // n = e1 x e2 (matching v71=v64*v75-v63*v76 with v62/63/64 = e1, v74/75/76 = e2)
-        float nx = e1z*e2x - e1y*e2z;
-        float ny = e1x*e2z - e1z*e2x;
-        float nz = e1y*e2x - e1x*e2y;
+        // n = e1 x e2 (v71=v64*v75-v63*v76 with v62/63/64 = e1, v74/75/76 = e2)
+        float nx = e1z*e2y - e1y*e2z;   // v71 = v64*v75 - v63*v76
+        float ny = e1x*e2z - e1z*e2x;   // v72 = v62*v76 - v64*v74
+        float nz = e1y*e2x - e1x*e2y;   // v73 = v63*v74 - v62*v75
         float planeD = nx*P[0] + ny*P[1] + nz*P[2];   // v82
         double denom = nx*dx + ny*dy + nz*dz;          // v41
         if (std::fabs(denom) <= kParallelEps) return 0;
-        double tt = (nx*ox + ny*oy + nz*oz + planeD) / denom;
+        // fst/fdiv float-denominator truncation, same as the first triangle
+        // (v54 = v41 @0x5b7925, fdiv by the float @0x5b7965).
+        const float denomF = (float)denom;             // v54
+        double tt = (nx*ox + ny*oy + nz*oz + planeD) / denomF;
         float hx = (float)(dx*tt) + ox;
         float hy = (float)(dy*tt) + oy;
         float hz = (float)(dz*tt) + oz;
         float qx = P[0]-hx, qy = P[1]-hy, qz = P[2]-hz;
         // v86 = (v75*v91 - v74*v93)/(v75*v62 - v74*v63) with v74/75/76=e2, v62/63/64=e1
-        double s = (e2y*qx - e2x*qy) / (e2y*e1x - e2x*e1y);   // *(float*)&v86
+        double s = (e2y*qx - e2x*qy) / (e2y*e1x - e2x*e1y);   // v43 (*(float*)&v86)
         qx = (float)(-s*e1x + qx);
         qy = (float)(-s*e1y + qy);
         qz = (float)(-s*e1z + qz);
-        double tline = ((qy/e2y) + (qx/e1x) + (qz/e2z)) * (double)kThird; // *(float*)&v85
-        if (tline < 0.0 || tline > 1.0 || s < 0.0 || s > 1.0)
+        // v85 = (v45/v75 + v46/v74 + v47/v76) * third  ->  qy/e2y + qx/e2x + qz/e2z
+        double tline = ((qy/e2y) + (qx/e2x) + (qz/e2z)) * (double)kThird; // *(float*)&v85
+        // The original stores v85/v86 as FLOATS and range-checks/interpolates
+        // with those float values (SLODWORD compares @0x5b7ae1..0x5b7b0b).
+        const float tlineF = (float)tline;   // *(float*)&v85
+        const float sF     = (float)s;       // *(float*)&v86
+        if (tlineF < 0.0f || tlineF > 1.0f || sF < 0.0f || sF > 1.0f)
             return 0;
         double uA = std::fabs(uv[v95][0]);
-        *outU = (float)(uA + (std::fabs(uv[v16][0]) - uA) * (1.0 - tline));
+        *outU = (float)(uA + (std::fabs(uv[v16][0]) - uA) * (1.0 - tlineF));
         double vA = std::fabs(uv[v95][1]);
-        *outV = (float)(1.0 - (vA + (std::fabs(uv[v15][1]) - vA) * (1.0 - s)));
+        *outV = (float)(1.0 - (vA + (std::fabs(uv[v15][1]) - vA) * (1.0 - sF)));
         return 1;
     }
 }
@@ -266,11 +284,13 @@ bool DragBoxContains(const DragRect& r, float sx, float sy) {
 
 bool DragUnitCentroidHit(float sumX, float sumY, float sumZ, float weight,
                          const ProjectParams& pp, const DragRect& r) {
-    float cx = sumX * weight;
-    float cy = sumY * weight;
-    double inv = 1.0 / (double)(weight * sumZ);
-    float sx = (float)((double)pp.scaleX * cx * inv) + pp.centerX;
-    float sy = (float)(inv * ((double)pp.scaleY * cy)) + pp.centerY;
+    float cx = sumX * weight;   // v28 = v27 * dbl_61E208 (float store)
+    float cy = sumY * weight;   // v30
+    double inv = 1.0 / ((double)weight * (double)sumZ);   // v20
+    // 0x4bde16 / 0x4bde30: ONE float store each — the + center happens on the
+    // x87 stack BEFORE truncation (v25 = scaleX*v28*v20 + flt_13FCD18).
+    float sx = (float)((double)pp.scaleX * cx * inv + pp.centerX);
+    float sy = (float)(inv * ((double)pp.scaleY * cy) + pp.centerY);
     return DragBoxContains(r, sx, sy);
 }
 

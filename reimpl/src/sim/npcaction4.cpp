@@ -226,11 +226,15 @@ HeRecord* NpcAction4_PatrolStep(HeRecord* h) {
             }
             if (anyBusy) {
                 ApptAdvance(h, 0, 0, 4);          // +4 min on the existing appt
+                // Disasm 0x4ce9b5: mov eax,400h — entity29(1024) re-arm.
                 i32 r = H->queueRequestEntity29 ? H->queueRequestEntity29(1024, h) : 0;
                 He_ReqHandle(h) = r;
             } else {
                 StampAppt(h);
-                He_ApptTime(h).day = -1;          // *(eax+82h) dword = -1 (sentinel)
+                // Decompile: v36 = rec+82; *(v36+130) = -1 → rec+212 = -1: the
+                // all-idle exit CLEARS the +212 force-1024 marker (it does NOT
+                // write ApptTime.day; 130 == 0x82 was misread as +82 before).
+                He_PatrolForce1024(h) = -1;       // +212 := -1
                 ApptAdvance(h, 0, 0, 2);
                 i32 r = H->queueRequestEntity29 ? H->queueRequestEntity29(3, h) : 0;
                 He_ReqHandle(h) = r;
@@ -496,8 +500,12 @@ HeRecord* NpcAction4_RunSabotage(HeRecord* h) {
             if (st == 0)
                 return h;
         }
+        // 0x4e2158 case 7: VIBE_Person_QueryBegin(.., *(a1+172)) runs FIRST and a
+        // null result aborts (goto LABEL_25) before the handler lookup result is
+        // consulted — the target building must still exist.
+        void* tgt7 = H->personQueryBegin ? H->personQueryBegin(He_FilterA4(h)) : nullptr;
         void* hd = H->findHandlerByFilter ? H->findHandlerByFilter(He_SabViolationSeq(h)) : nullptr;
-        if (!hd) { He_State(h) = -1; return h; }
+        if (!tgt7 || !hd) { He_State(h) = -1; return h; }
         i32 recId = H->handlerRecordId ? H->handlerRecordId(hd) : -1;
         if (recId != He_Id(h) || He_SabPacket(h) == -1) {
             He_State(h) = -1;
@@ -754,6 +762,10 @@ HeRecord* NpcAction4_RaidStep(HeRecord* h) {
         return h;
     }
     case 4: {  // state 3 -> the combat resolve (discovery roll + cmd39)
+        // 0x4cea84 case 4 head: `if ((*(BYTE*)(a1+120) & 2) == 0) return;` — the
+        // Raid twin gates the resolve on flag 0x02 (the Attack twin does not).
+        if ((He_Flags(h) & 2) == 0)
+            return h;
         CombatCaseResolve(h, /*isAttack=*/false);
         return h;
     }

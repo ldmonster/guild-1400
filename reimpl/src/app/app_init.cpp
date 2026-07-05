@@ -11,13 +11,18 @@ GameApp::GameApp(shim::IPlatform& plat, shim::IGraphicsDevice& gfx,
     : plat_(plat), gfx_(gfx), audio_(audio), sub_(sub) {}
 
 // gilde.exe 0x52895c — VIBE_Window_CreateMainWindow(hInstance, mode).
-// RegisterClassA("Die Gilde") + CreateWindowExA. mode 3/4 -> fullscreen
-// (WS_POPUP|WS_VISIBLE, WS_EX_TOPMOST), else windowed (WS_OVERLAPPED-ish). Here
-// the OS-specific window plumbing is routed through shim::IPlatform; the
+// RegisterClassA("Die Gilde") + CreateWindowExA. The style branch tests
+// `a2 == 3` ONLY: mode 3 -> fullscreen (WS_POPUP|WS_VISIBLE = 0x90000000,
+// WS_EX_TOPMOST = 8, plus the mode-3 SetWindowPos to the full screen metrics);
+// every other mode (including 4) gets the windowed style
+// (WS_CLIPSIBLINGS|WS_CLIPCHILDREN = 0x06000000, exstyle 0) with the
+// MoveWindow centering path. (Mode 4 only joins mode 3 later, in
+// VIBE_Render_InitDisplayAndPaths @0x527fa4's topmost SetWindowPos.) Here the
+// OS-specific window plumbing is routed through shim::IPlatform; the
 // fullscreen-vs-windowed decision (the only logic the spine depends on) is
 // preserved.
 bool GameApp::CreateMainWindow(int mode) {
-    const bool fullscreen = (mode == 3 || mode == 4);
+    const bool fullscreen = (mode == 3);
     // Title in the original is "Die Gilde - <buildversion>".
     return plat_.createMainWindow("Die Gilde", resW_, resH_, fullscreen);
 }

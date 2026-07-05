@@ -339,9 +339,10 @@ i32 Scene_SyncWorldOnEnter(SceneState& s, const SceneHooks& h,
 // Pure bbox-merge math is reconstructed; mesh/scene-graph access via hooks.
 u8 Scene_SpawnBuildingMesh(const SceneHooks& h, const char* name);
 
-// Pure bbox-merge kernel used by SpawnBuildingMesh: min/max over 20 source
-// vertices (stride 20 floats), seeded from vertex 0. Exposed for testing.
-void SpawnBuildingMesh_MergeBBox(const float* srcVerts /*[20*20]*/,
+// Pure bbox-merge kernel used by SpawnBuildingMesh: min/max over 8 source
+// vertices (stride 20 floats / 80 bytes; merge loop v10+80..v10+640
+// @0x503821..0x503977), seeded from vertex 0. Exposed for testing.
+void SpawnBuildingMesh_MergeBBox(const float* srcVerts /*[8*20]*/,
                                  float outMin[3], float outMax[3]);
 
 // 0x5e860c — VIBE_Scene_SaveObjectGroup. Writes an object group to <path>:

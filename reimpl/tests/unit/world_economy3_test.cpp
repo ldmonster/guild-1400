@@ -88,8 +88,11 @@ TEST(WorldEconomy3, Level2JoinFee) {
     CHECK_EQ(GuildLevel2JoinFee(5), 160);
     CHECK_EQ(GuildLevel2JoinFee(16000), 160);     // 159.99.. -> floor 160
     CHECK_EQ(GuildLevel2JoinFee(16001), 160);     // 160.0099 > floor -> trunc 160
-    CHECK_EQ(GuildLevel2JoinFee(1000000), 9999);  // 9999.99 -> 9999
-    CHECK_EQ(GuildLevel2JoinFee(2000000), 19999);
+    // The binary stores the fee to a 4-byte float before truncation (fstp dword
+    // var_10 @0x520a8e): 9999.99978 rounds UP to 10000.0f. Old pins 9999/19999
+    // (double-precision trunc) were proven wrong against gilde.exe 0x520838.
+    CHECK_EQ(GuildLevel2JoinFee(1000000), 10000);
+    CHECK_EQ(GuildLevel2JoinFee(2000000), 20000);
     CHECK_EQ(GuildLevel2JoinFee(-1000000), 160);  // negative -> below floor
 }
 
@@ -115,7 +118,7 @@ TEST(WorldEconomy3, ViaHookDefaultsAreInert) {
 // --- hook-routed wrappers with installed hooks ------------------------------
 namespace {
 float FakeOutput(const void*) { return 400.0f; }       // -> tier 1603
-int   FakeWealth(int, const void*) { return 5000000; } // -> 49999
+int   FakeWealth(int, const void*) { return 5000000; } // -> 50000 (float fee, 0x520a8e)
 }
 TEST(WorldEconomy3, ViaHookInstalled) {
     WorldEconomy3Hooks h{};
@@ -123,6 +126,6 @@ TEST(WorldEconomy3, ViaHookInstalled) {
     h.personTotalWealth = &FakeWealth;
     WorldEconomy3Hooks prev = WorldEconomy3SetHooks(h);
     CHECK_EQ(GuildCandidateRatingViaHook(nullptr), 1603);
-    CHECK_EQ(GuildLevel2JoinFeeViaHook(1, nullptr), 49999);
+    CHECK_EQ(GuildLevel2JoinFeeViaHook(1, nullptr), 50000);  // was 49999 pre float-store fix
     WorldEconomy3SetHooks(prev);
 }

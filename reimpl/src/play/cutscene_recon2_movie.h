@@ -8,8 +8,9 @@
 //     mov_Play_, mov_Stop_, mov_Prepare_, mov_PrepareDD_, mov_Dispose_,
 //     mov_SetVisible_, mov_GetEvent_, mov_Exit_) behind a guard flag (dword_63C8F0);
 //   * a fade-to-BLACK pre-roll that spins the game frame loop until the fade
-//     overlay reports "done" (flag bit 0x4) AND the fade timer (flt_62DA00) has
-//     elapsed (compared against -1.0f);
+//     overlay reports "done" (flag bit 0x4) AND the music-fade timer (flt_62DA00)
+//     has gone negative (VIBE_Audio_MixerUpdate @0x43a3e4 parks it at -1.0 when
+//     the fade completes);
 //   * save/restore of the global "movies enabled" byte (byte_642008) and the
 //     master music volume (byte_1233552 * (1/127)) across the playback;
 //   * input re-acquire / window-focus restore after the clip ends.
@@ -31,12 +32,16 @@ using guild::i32;
 using guild::u8;
 using guild::u32;
 
-// flt_62DA00 == 0xBF800000 == -1.0f : the fade-timer "armed" sentinel the loop
-// compares against (0.0 > flt_62DA00 ? keep spinning).
+// flt_62DA00 == 0xBF800000 == -1.0f : the fade-COMPLETE sentinel. While a music
+// fade is in progress the timer is >= 0.0 and the loop keeps spinning
+// (@0x534a8e jbe back into the body); MixerUpdate sets -1.0 on completion,
+// which is what lets the loop exit (0.0 > flt_62DA00).
 inline constexpr float kMovieFadeTimerSentinel = -1.0f;
 // flt_623640 == 0x3C010204 : the master-volume scale (≈ 1/127) applied to the
 // stored 0..127 music-volume byte when restoring the music fade after the clip.
-inline constexpr float kMovieMusicVolumeScale  = 0.00787353515625f;  // bit-exact 0x3C010204
+// (0.00787353515625f was WRONG — that encodes 0x3C010000; get_bytes @0x623640
+// gives 04 02 01 3C == 0x1.020408p-7f == 0.0078740157186985...)
+inline constexpr float kMovieMusicVolumeScale  = 0x1.020408p-7f;  // bit-exact 0x3C010204
 
 inline constexpr int   kMovieFadeColorTime = 90;     // VIBE_Fade_Register fade-time arg (0x5A)
 inline constexpr int   kMovieMusicFadeMs   = 1000;   // music fade duration (both pre/post)

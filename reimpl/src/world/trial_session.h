@@ -16,20 +16,25 @@
 // cutscene playback (VIBE_Cutscene_LoadScene / _BuildSpeechPacket) and voice
 // (the .sbf banks) are DEFERRED leaves — see TrialSessionLeaves below.
 //
-// Phase map (recovered from the in-function string-ref ordering, see report):
+// Phase map (semantics binary-verified in the hardening pass):
 //   kIntro          load "Gericht.ed3", build the cutscene slot   (0x4a0f81)
 //   kAccusation     PROZESS_2_VORWURF_KOMMENTARE.sbf  -> evidence score core
-//                                                       (0x4a1853)
-//   kJuryVerdict    tally juror votes -> PROZESS_3_SCHULDIG / _NICHT_SCHULDIG
-//                                                       (0x4a1d3b / 0x4a1de4)
-//   kTorture        (convicted-but-uncertain path) PROZESS_4_FOLTER_1,
-//                   PROZESS_5_FOLTER2_<instrument>, PROZESS_6_FOLTERERGEBNIS
-//                                       (0x4a21ff / 0x4a2392 / 0x4a2e2b)
-//   kVoteAnnounce   PROZESS_6_ANKUENDIGUNG, PROZESS_6_ABSTIMMUNG_ERGEBNISSE
-//                                       (0x4a2ec4 / 0x4a3346)
-//   kSentence       PROZESS_7_SCHULDIG + PROZESS_7_STRAFEN (fine commit) OR
-//                   PROZESS_7_NICHT_SCHULDIG (acquit), then PROZESS_8 close
-//                                       (0x4a34cd / 0x4a34de / 0x4a3c82 / 0x4a34bc)
+//                   (the v318 float accumulation; v280 = v318 @0x4a15f6)
+//   kPlea           the DEFENDANT's plea: his panel-row value == 1
+//                   (dword_11AB094 load @0x4a1adb, `cmp ecx,1` @0x4a1b27) ->
+//                   PROZESS_3_SCHULDIG (+ favorability fine-adjust, fmul
+//                   flt_61CCF4 @0x4a1b3e) / PROZESS_3_NICHT_SCHULDIG (torture
+//                   gate: torturer(ctx+72) resolves && evidenceCount > 2)
+//   kTorture        torture-cost fine (wealth-score-B/3 x3, QueueRequest16
+//                   triple) BEFORE the scene; PROZESS_4_FOLTER_1,
+//                   PROZESS_5_FOLTER2_<instrument>, PROZESS_6_FOLTERERGEBNIS;
+//                   running score * flt_61CCFC (confess) / flt_61CD00 (deny)
+//   kVoteAnnounce   PROZESS_6_ANKUENDIGUNG, PROZESS_6_ABSTIMMUNG_ERGEBNISSE;
+//                   jury tally v313 = judge + present assessors' rows;
+//                   v313 >= 2 -> acquitted
+//   kSentence       PROZESS_7_SCHULDIG + wealth-score-A/3 fine (v291/3 x3) +
+//                   PROZESS_7_STRAFEN, OR PROZESS_7_NICHT_SCHULDIG (acquit);
+//                   then PROZESS_8 close
 //   kDone
 //
 // The original runs each phase to completion inline; we expose a tick-able FSM
@@ -86,14 +91,27 @@ struct TrialSetup {
     int        juryCount  = 0;
 
     // Judge->defendant favorability (VIBE_Ai_ComputePersonFavorability), supplied
-    // as a value; drives the guilty-fine adjustment.
+    // as a value; drives the guilty-fine adjustment (applied at kPlea on the
+    // guilty-plea branch, fmul flt_61CCF4 @0x4a1b3e).
     double judgeFavorability = 0.0;
 
-    // Torture sub-decision (only consulted on the torture path): whether the
-    // defendant confessed under torture, and which instrument was used.
-    bool torture          = false;  // does this trial enter the torture phase?
-    bool tortureConfessed = false;  // confession outcome (BuildTortureChoiceForm)
-    int  tortureInstrument = 0;     // index into kTrialTortureEsc (0..6)
+    // The defendant's plea: his panel-row value == 1 (dword_11AB094[215*row]
+    // @0x4a1adb, `cmp ecx,1` @0x4a1b27) -> the PROZESS_3 SCHULDIG branch.
+    bool defendantPleadsGuilty = false;
+
+    // Torture gate + sub-decision. The original enters torture from the
+    // not-guilty-plea branch only when the torturer person (ctx+72) resolves
+    // AND the evidence count exceeds 2 (`if (v327 && v314 > 2) v279[0] = 1`).
+    bool torturerPresent  = false;  // VIBE_Person_FindRecordById(ctx+72) != 0
+    bool tortureConfessed = false;  // confession outcome (v298/v315 panel read)
+    int  tortureInstrument = 0;     // (panel & 0xF) clamped 0..6 (the v330 clamp)
+
+    // Wealth scores (VIBE_AiMethod_ComputeWealthScoreA/B — deferred AI leaves,
+    // supplied as inputs). A drives the PROZESS_7 sentence fine (v291/3 per
+    // seat); B drives the torture-cost fine committed when torture proceeds
+    // (v292/3 per seat).
+    i32 wealthScoreA = 0;   // v291 = ComputeWealthScoreA() (prologue)
+    i32 wealthScoreB = 0;   // v292 = ComputeWealthScoreB() (torture entry)
 };
 
 // ===========================================================================
@@ -102,10 +120,10 @@ struct TrialSetup {
 enum class TrialPhase : int {
     kIntro       = 0,  // LoadScene Gericht.ed3 + alloc cutscene slot
     kAccusation  = 1,  // evidence presentation -> TrialComputeEvidenceScore
-    kJuryVerdict = 2,  // TrialTallyVerdict -> guilty/acquit branch
-    kTorture     = 3,  // torture scenes -> TrialApplyTortureFine
-    kVoteAnnounce= 4,  // announce + ABSTIMMUNG result voice
-    kSentence    = 5,  // TrialApplyGuiltyFine + TrialCommitFine, or acquit
+    kPlea        = 2,  // defendant plea (panel==1) -> guilty-adjust / torture gate
+    kTorture     = 3,  // torture-cost fine + scenes -> TrialApplyTortureFine
+    kVoteAnnounce= 4,  // announce + ABSTIMMUNG tally -> TrialTallyVerdict
+    kSentence    = 5,  // convicted: wealth-score-A fine commit; else acquit
     kDone        = 6,
 };
 
@@ -137,10 +155,11 @@ struct TrialSession {
 
     // Rules-core outputs, filled as phases advance:
     TrialScore    score;                    // kAccusation
-    TrialVerdict  verdict = TrialVerdict::kConvicted;  // kJuryVerdict
-    int           voteTotal = 0;            // jury vote sum
-    float         runningScore = 0.0f;      // score after torture/guilty fine
-    i32           perSeatFine = 0;          // kSentence (TrialCommitFine result)
+    TrialVerdict  verdict = TrialVerdict::kConvicted;  // kVoteAnnounce tally
+    int           voteTotal = 0;            // jury vote sum (v313)
+    float         runningScore = 0.0f;      // v280: score after plea/torture adj
+    i32           tortureFine = 0;          // kTorture (wealth-score-B / 3)
+    i32           perSeatFine = 0;          // kSentence (wealth-score-A / 3)
     bool          finished = false;
 
     // Gesetz_GetRecord dependency for the evidence-score phase (set by Init).

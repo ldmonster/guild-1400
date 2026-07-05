@@ -72,14 +72,18 @@ bool LoadAnimation(const u8* data, size_t size, const char* name, AnimClip& out,
                    u8 loadFlag = 1);
 
 // gilde.exe 0x5c9394 — VIBE_Anim_ComputeMorphWeights (blend-weight pair).
-//   Given the current segment [fromFrame .. toFrame] of `clip` and an integer
-//   sub-frame `phase` in [0, segDuration], returns the "to" weight w = phase/seg in
-//   [0,1] (and, via wFrom, the "from" weight 1-w). `ease` selects the cosine-ease
-//   variant (engine flag bit 4): at clip extremes w is shaped by the recovered
-//   constants. Pure; no side effects.
+//   Play-object state mapped to parameters: obj+0x00 -> fromFrame, obj+0x04 ->
+//   toFrame, obj+0x08 -> phase, obj+0x64 -> offset, flags obj+0x6D bit 0x2 ->
+//   reverse, bit 0x4 -> ease. Forward: wTo = inv*offset + v with v =
+//   phase/frames[fromFrame].dur, optionally cosine-shaped at the clip extremes
+//   (tiny clip (cos(v*pi)+1)*0.5 form; trailing cos((v+1)*pi/2)+1; leading
+//   cos(v*pi/2); interior segments UNshaped); wFrom = 1 - wTo. Reverse uses
+//   frames[toFrame].dur and yields wFrom = v - inv*offset, wTo = 1 - wFrom.
+//   No [0,1] clamp in the original. Pure; no side effects.
 struct MorphWeights { float wFrom = 1.0f; float wTo = 0.0f; };
 MorphWeights ComputeMorphWeights(const AnimClip& clip, int fromFrame, int toFrame,
-                                 int phase, bool ease = false);
+                                 int phase, bool ease = false, float offset = 0.0f,
+                                 bool reverse = false);
 
 // A posed mesh sample at time t: the morph points interpolated between two frames.
 struct PosedMesh {
@@ -106,11 +110,13 @@ PosedMesh SamplePosedMesh(const AnimClip& clip, float t, bool clamp = true);
 PosedMesh SamplePosedMeshSeg(const AnimClip& clip, int fromFrame, int toFrame, float wTo);
 
 // gilde.exe 0x5ca2fc — VIBE_Math_VectorLerp: out = a + (b-a)*t, per component.
-// Exposed so callers (and the bone leaves) share one definition.
+// Exposed so callers (and the bone leaves) share one definition. Each component is
+// one x87 fld/fsub/fmul/fadd chain at 80-bit with a single fstp to float
+// (disasm 0x5ca301..0x5ca32a) — modeled with double intermediates.
 inline void VectorLerp(const float a[3], const float b[3], float t, float out[3]) {
-    out[0] = (b[0] - a[0]) * t + a[0];
-    out[1] = (b[1] - a[1]) * t + a[1];
-    out[2] = a[2] + t * (b[2] - a[2]);
+    out[0] = (float)(((double)b[0] - a[0]) * t + a[0]);
+    out[1] = (float)(((double)b[1] - a[1]) * t + a[1]);
+    out[2] = (float)((double)t * ((double)b[2] - a[2]) + a[2]);
 }
 
 } // namespace guild::render

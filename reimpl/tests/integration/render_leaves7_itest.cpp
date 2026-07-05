@@ -50,21 +50,22 @@ TEST(RenderLeaves7_Integration, TruncTowardForwardsToRealConvertX) {
 // ---------------------------------------------------------------------------
 // Wire the directional-falloff kernel against the REAL light-falloff LUT.
 //
-// The original indexes flt_1405110[idx], which is the falloff table base
-// (flt_140510C) + 1 float. We seed the genuine table via the reconstructed
-// sibling guild::render::InitFalloffTable and read it back with the +1 offset,
-// proving DirectionalFalloffScale's lookup matches the live wiring end to end.
+// The original indexes flt_1405110[idx]. InitFalloffTable's store loop
+// pre-increments (add ecx,4 before fstp @0x5c8929), so its 1024 stores START
+// at flt_1405110 — out[i] from the reconstructed sibling IS flt_1405110[i].
+// (Harden fix: the previous +1 offset double-counted the pre-increment and
+// read one entry past the binary's lookup, going OOB at idx=1023.)
 // ---------------------------------------------------------------------------
 TEST(RenderLeaves7_Integration, DirectionalFalloffUsesRealLUT) {
     static float table[render::kFalloffEntries];
     render::InitFalloffTable(table);                 // REAL sibling fills 1024.
 
-    // flt_1405110 == flt_140510C + 1 float (see render_leaves7.h note).
-    const float* lut1405110 = table + 1;
+    // out[i] == flt_1405110[i] (see falloff_lut.h store-base note).
+    const float* lut1405110 = table;
 
-    // table[i] = 1 - asin(i/1024)*(2/pi); strictly decreasing from table[0]=1.
-    CHECK(approx(table[0], 1.0f));
-    CHECK(table[1] < table[0]);
+    // table[i] = 1 - acos(i/1024)*(2/pi); strictly increasing from table[0]~=0.
+    CHECK(approx(table[0], 0.0f));
+    CHECK(table[1] > table[0]);
 
     const float NdotL = -0.5f;                       // -> idx = (int)(0.5*1023) = 511
     int idx = static_cast<int>(NdotL * render::kFalloffIdxScale);
@@ -72,13 +73,13 @@ TEST(RenderLeaves7_Integration, DirectionalFalloffUsesRealLUT) {
 
     float intensity = 3.0f;
     float got = render::DirectionalFalloffScale(NdotL, intensity, lut1405110);
-    // Independent: intensity * table[idx + 1] (the +1 offset of flt_1405110).
-    float want = intensity * table[idx + 1];
+    // Independent: intensity * table[idx] (flt_1405110[idx]).
+    float want = intensity * table[idx];
     CHECK(approx(got, want));
 
     // Spot-check a second angle near the grazing end of the table.
     float n2 = -0.999f;
     int idx2 = static_cast<int>(n2 * render::kFalloffIdxScale);
     float got2 = render::DirectionalFalloffScale(n2, 1.0f, lut1405110);
-    CHECK(approx(got2, table[idx2 + 1]));
+    CHECK(approx(got2, table[idx2]));
 }

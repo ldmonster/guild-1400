@@ -22,7 +22,14 @@
 namespace guild::world {
 
 float StatisticsCategoryTotal(const float* accum, int k) {
-    return (accum[k] + accum[k + 5] + accum[k + 10] + accum[k + 15]) * kStatScale;
+    // 0x579b04..0x579b89: fld a[k+15]; fadd a[k+10]; fadd a[k+5]; fadd a[k];
+    // fmul flt_62570C; fstp — the sum runs HIGH offset first entirely on the
+    // x87 stack (80-bit intermediates, modeled with double); only the final
+    // store rounds to float.
+    return static_cast<float>(
+        (static_cast<double>(accum[k + 15]) + accum[k + 10] + accum[k + 5] +
+         accum[k]) *
+        static_cast<double>(kStatScale));
 }
 
 void StatisticsAccumulateCategoryTotals(const float* accum, float* out) {

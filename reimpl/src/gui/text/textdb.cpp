@@ -36,6 +36,15 @@ int TextDb::Add(const std::string& text, const std::string& name, u8 tag) {
     return idx;
 }
 
+void TextDb::SetAt(int index, const std::string& text, const std::string& name,
+                   u8 tag) {
+    if (index < 0)
+        return;
+    if (index >= static_cast<int>(entries_.size()))
+        entries_.resize(static_cast<std::size_t>(index) + 1);
+    entries_[static_cast<std::size_t>(index)] = Entry{text, name, tag};
+}
+
 const char* TextDb::Text(int id) const {
     if (id < 0 || id >= Count())
         return nullptr;

@@ -64,14 +64,18 @@ u32 CrtRng(u32 range, void*) {
 // Full convict-and-fine trial, tick by tick, with a torture detour.
 // ===========================================================================
 TEST(WorldCourtSessionE2E, FullTrialConvictWithTorture) {
-    // Hand-computed reference:
+    // Hand-computed reference (binary-verified phase semantics, 0x4a0eb8):
     //   evidence: law 5 (pen 30) x2, law 6 (pen 50) x1  -> 3 crimes, 2 law types
     //   maxWanted 1 -> weight 1.2
     //   score = (30 + 30 + 50) * 1.2 = 110 * 1.2 = 132.0
-    //   convicted (jury total 0 < 2); torture, confessed -> 132 * 1.1 = 145.2
-    //   guilty fine: 145.2 - favor(20) * (145.2*0.2) * 0.01
-    //              = 145.2 - 20 * 29.04 * 0.01 = 145.2 - 5.808 = 139.392
-    //   commit: floor(139 / 3) = 46 per seat, sum = 138, 3 calls
+    //   plea NOT guilty (panel != 1) -> torture gate: torturer present AND
+    //   evidenceCount 3 > 2 -> torture.
+    //   torture-cost fine: wealthScoreB 90 / 3 = 30 per seat (3 calls, sum 90),
+    //   committed BEFORE the instrument scene (the QueueRequest16 triple).
+    //   confessed -> 132 * 1.1 = 145.2 (no favorability adjust: that only runs
+    //   on the guilty-plea branch, fmul flt_61CCF4 @0x4a1b3e).
+    //   jury tally 0 < 2 at PROZESS_6 -> convicted.
+    //   sentence fine: wealthScoreA 138 / 3 = 46 per seat (v291/3).
     int penalties[8] = {-1, -1, -1, -1, -1, 30, 50, -1};
     CrimeRecord ev[3] = {MakeCrime(200, 5), MakeCrime(201, 5), MakeCrime(202, 6)};
     int votes[3] = {0, 0, 0};   // all guilty -> total 0 -> convicted
@@ -83,7 +87,11 @@ TEST(WorldCourtSessionE2E, FullTrialConvictWithTorture) {
     st.evidence = ev; st.evidenceCount = 3;
     st.juryVotes = votes; st.juryCount = 3;
     st.judgeFavorability = 20.0;
-    st.torture = true; st.tortureConfessed = true; st.tortureInstrument = 0; // dschraube
+    st.defendantPleadsGuilty = false;   // NICHT_SCHULDIG plea
+    st.torturerPresent = true;          // ctx+72 resolves
+    st.tortureConfessed = true; st.tortureInstrument = 0; // dschraube
+    st.wealthScoreB = 90;               // torture-cost fine 90/3 = 30
+    st.wealthScoreA = 138;              // sentence fine 138/3 = 46
 
     TrialSession s; TrialSessionInit(s, st, &LawLookup, penalties);
     Fines fines; TrialSetFineHook(&FineHook, &fines);
@@ -93,7 +101,7 @@ TEST(WorldCourtSessionE2E, FullTrialConvictWithTorture) {
 
     // Tick through every phase, asserting the exact phase ordering.
     TrialPhase order[] = {
-        TrialPhase::kIntro, TrialPhase::kAccusation, TrialPhase::kJuryVerdict,
+        TrialPhase::kIntro, TrialPhase::kAccusation, TrialPhase::kPlea,
         TrialPhase::kTorture, TrialPhase::kVoteAnnounce, TrialPhase::kSentence,
         TrialPhase::kDone,
     };
@@ -101,20 +109,23 @@ TEST(WorldCourtSessionE2E, FullTrialConvictWithTorture) {
         TrialPhase ran = TrialSessionStep(s, leaves);
         CHECK(ran == order[i]);
         if (i == 1) { CHECK(approx(s.score.score, 132.0f)); CHECK_EQ(s.score.uniqueCount, 2); }
-        if (i == 2) { CHECK(s.verdict == TrialVerdict::kConvicted); CHECK_EQ(s.voteTotal, 0); }
-        if (i == 3) { CHECK(approx(s.runningScore, 145.2f)); }
+        if (i == 3) {
+            CHECK(approx(s.runningScore, 145.2f));
+            CHECK_EQ(s.tortureFine, 30);
+        }
+        if (i == 4) { CHECK(s.verdict == TrialVerdict::kConvicted); CHECK_EQ(s.voteTotal, 0); }
     }
     CHECK(s.finished);
-    CHECK(approx(s.runningScore, 139.392f));
-    CHECK_EQ(s.perSeatFine, 46);     // floor(139/3)
-    CHECK_EQ(fines.calls, 3);
-    CHECK_EQ(fines.sum, 138);
+    CHECK(approx(s.runningScore, 145.2f));
+    CHECK_EQ(s.perSeatFine, 46);     // wealthScoreA / 3
+    CHECK_EQ(fines.calls, 6);        // 3 torture-cost + 3 sentence
+    CHECK_EQ(fines.sum, 228);        // 90 + 138
 
     // Verify the cutscene/voice invocation sequence against the reference.
     const char* expect[] = {
         "load:Gericht.ed3",
         "voice:PROZESS_2_VORWURF_KOMMENTARE.sbf",
-        "voice:PROZESS_3_SCHULDIG.sbf",
+        "voice:PROZESS_3_NICHT_SCHULDIG.sbf",
         "form:BuildTortureChoiceForm",
         "voice:PROZESS_4_FOLTER_1.sbf",
         "esc:dschraube.esc",

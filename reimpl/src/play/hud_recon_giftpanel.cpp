@@ -23,31 +23,37 @@ GiftSliderRange Gift_ComputeSliderRange(int wealth, int held) {
     GiftSliderRange r{};
     r.aborted = false;
 
-    // --- upper bound (v37) ---
-    //   v7 = wealth * flt_624A3C ; ConvertX ; if ((int)v7 >= 1600) v37 = ConvertX(...)
-    //   else v37 = 1600
-    double hiProd = static_cast<double>(wealth) * kGiftWealthMaxFraction;
-    int hi = Gift_ConvertX(hiProd);
+    // --- upper bound (v37) — gilde.exe 0x55d07d..0x55d096 ---
+    //   fild wealth ; fmul ds:flt_624A3C ; call ConvertX ; fistp (RC=trunc).
+    //   The product NEVER leaves the x87 stack: a 31-bit int x 24-bit float
+    //   product is EXACT in the 80-bit register, so the truncation acts on the
+    //   exact product (long double models this; a double product can round up
+    //   across an integer).  >= 1600 re-runs the identical computation
+    //   (0x55d2aa..0x55d2e4) — provably the same value.
+    int hi = Gift_ConvertX(static_cast<long double>(wealth) *
+                           static_cast<long double>(kGiftWealthMaxFraction));
     r.sliderMax = (hi >= kGiftMaxFloor) ? hi : kGiftMaxFloor;
 
-    // --- lower endpoint (v38) ---
-    //   v31 = wealth * flt_624A40
-    //   v8  = (held <= v31) ? held : (wealth * flt_624A40)     // == min(held, cap)
-    //   v36 = v8 ; ConvertX ; if ((int)v36 >= 3200) { recompute, v38 = ConvertX;
-    //                                                  if (v38 <= 0) return 0 }
-    //         else v38 = 3200
-    double cap = static_cast<double>(wealth) * kGiftWealthCapFraction;
-    double v8 = (static_cast<double>(held) <= cap) ? static_cast<double>(held) : cap;
-    int v36 = Gift_ConvertX(v8);
-    if (v36 >= kGiftMinFloor) {
-        // The original re-evaluates min(held, cap) identically and re-converts.
-        double cap2 = static_cast<double>(wealth) * kGiftWealthCapFraction;
-        double v18 = (static_cast<double>(held) <= cap2) ? static_cast<double>(held)
-                                                         : cap2;
-        int v38 = Gift_ConvertX(v18);
-        r.sliderMin = v38;
-        if (v38 <= 0)
-            r.aborted = true; // dialog returns 0
+    // --- lower endpoint (v38) — gilde.exe 0x55d0a4..0x55d16c ---
+    //   The cap is SPILLED TO A 4-BYTE FLOAT before the compare
+    //   (fstp dword @0x55d0fe), the compare is fild held / fcomp dword
+    //   (@0x55d10a..0x55d10e), and the selected min value is spilled to a
+    //   float AGAIN (fstp dword @0x55d14f; held path jumps into the same
+    //   fstp via 0x55d313->0x55d14f) before ConvertX/fistp.
+    const float capF = static_cast<float>(
+        static_cast<long double>(wealth) *
+        static_cast<long double>(kGiftWealthCapFraction));
+    const float v36 = (static_cast<long double>(held) <=
+                       static_cast<long double>(capF))
+                          ? static_cast<float>(held)   // (float)held spill
+                          : capF;                      // recomputed spill == capF
+    int lo = Gift_ConvertX(v36);
+    if (lo >= kGiftMinFloor) {
+        // 0x55d31c..0x55d3c8 — identical recompute (float spills @0x55d36e /
+        // 0x55d3bb), so v38 == lo exactly.
+        r.sliderMin = lo;
+        if (lo <= 0)
+            r.aborted = true; // 0x55d3cc..0x55d3d7 — dialog returns 0
     } else {
         r.sliderMin = kGiftMinFloor;
     }

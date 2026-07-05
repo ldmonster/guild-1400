@@ -138,12 +138,16 @@ LABEL_else_cond:                                             // the while-condit
             goto LABEL_29;
 
         // v9 = (double)*(unsigned int*)(Ptr+116);
-        double v9 = static_cast<double>(*reinterpret_cast<u32*>(Ptr + 116));
-        double v10 = v9 * static_cast<double>(v29);          // v10 = v9*v29
-        v10 = Coord_ConvertX(v10);                           // ConvertX()
+        // The products v9*v29 / v9*v28 stay ON THE X87 STACK (st6/st7) until
+        // ConvertX's frndint truncates them in-register — a 32-bit-int by
+        // 24-bit-float product needs up to 56 mantissa bits, exact in the
+        // 80-bit register but ROUNDED by a double.  long double models this.
+        long double v9 = static_cast<long double>(*reinterpret_cast<u32*>(Ptr + 116));
+        long double v10 = v9 * static_cast<long double>(v29); // v10 = v9*v29 (st6)
+        v10 = std::trunc(v10);                               // ConvertX() frndint RC=11
         int v31 = static_cast<int>(v10);                     // v31 = (int)v10
-        double v11 = v9 * static_cast<double>(v28);          // v11 = v9*v28
-        v11 = Coord_ConvertX(v11);                           // ConvertX()
+        long double v11 = v9 * static_cast<long double>(v28); // v11 = v9*v28 (st7)
+        v11 = std::trunc(v11);                               // ConvertX() frndint RC=11
         int v32 = static_cast<int>(v11);                     // v32 = (int)v11
         if (v13 == 1)                                        // if (v13==1) v32 += 256
             v32 += 256;

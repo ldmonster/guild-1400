@@ -229,15 +229,17 @@ int FormatItemLabelWithIcon(u32 item_id,
     case 4: {                                                       /*0x59d14a*/
         if (B(356)) {
             int base = B(9) ? 370 : 294;                            /*0x59d21c / 0x59d173*/
-            // id byte = (*(int*)(record+353) >> 24)               /*0x59d192*/
-            int id = static_cast<int>(record[356]);                 // (record+353)>>24 == record[356]
+            // id byte = (*(int*)(record+353) >> 24) — `sar ecx, 18h` @0x59d181:
+            // an ARITHMETIC shift, i.e. the SIGN-EXTENDED byte at offset 356.
+            int id = static_cast<int>(static_cast<signed char>(record[356]));
             const char* title = HResolve(id + base, v62);
             std::sprintf(v64_base, "%s$A%s", title, name48);        /*0x59d19c*/
         } else if (B(357)) {                                        /*0x59d226*/
             int base = B(9) ? 498 : 471;                            /*0x59d275 / 0x59d247*/
             // v65 is __int16*, so (v65 + 177) is byte offset 354;
-            // *(int*)(record+354) >> 24 == byte at offset 357.
-            int id = static_cast<int>(record[357]);
+            // *(int*)(record+354) >> 24 — `sar ecx, 18h` @0x59d255: the
+            // SIGN-EXTENDED byte at offset 357.
+            int id = static_cast<int>(static_cast<signed char>(record[357]));
             const char* title = HResolve(id + base, v62);           /*0x59d266*/
             std::sprintf(v64_base, "%s$A%s", title, name48);        /*0x59d270*/
         } else if (v67 == 2) {                                      /*0x59d285*/

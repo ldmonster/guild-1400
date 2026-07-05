@@ -218,6 +218,37 @@ TEST(AppReconEngineInit, AudioEnabledOrder) {
           idx("audioSetTrackNamePrefix:\\project\\game\\msx\\"));
 }
 
+// --- 0x528560: Sound_LibInit failure clears the MUSIC gate too ---------------
+// gilde.exe 0x528779..0x52878a: if ( VIBE_Sound_LibInit(...) ) { dword_63C900 =
+// 0; dword_63C8F8 = 0; } — and the music block re-reads dword_63C8F8 at
+// 0x528800, so a failed lib init must SKIP soundInitThread/audioSetTrackNamePrefix
+// even when music was enabled going in.
+TEST(AppReconEngineInit, SfxLibInitFailureSkipsMusicBringup) {
+    std::vector<std::string> log;
+    EngineInitHooks h = MakeRecordingHooks(log, /*sfxLibInitFails=*/true);
+    EngineInitGlobals g;
+    g.sfxEnabled = true;
+    g.musicEnabled = true;
+
+    VIBE_App_InitEngineAndScriptCommands(g, h);
+
+    auto idx = [&](const std::string& s) -> int {
+        for (size_t i = 0; i < log.size(); ++i)
+            if (log[i] == s) return static_cast<int>(i);
+        return -1;
+    };
+    // The rest of the sfx block still runs after the failed lib init (the
+    // original does not early-out; it only clears the gates).
+    CHECK(idx("soundLibInit") >= 0);
+    CHECK(idx("sound3dInitPool:64") > idx("soundLibInit"));
+    CHECK(idx("soundPreloadFromIncludeFile:\\include_sfx.ini") >= 0);
+    // Music bring-up is skipped: dword_63C8F8 was cleared at 0x52878a.
+    CHECK(idx("soundInitThread") == -1);
+    CHECK(idx("audioSetTrackNamePrefix:\\project\\game\\msx\\") == -1);
+    // The unconditional tail still runs.
+    CHECK(idx("audioApplyVolumeSettings") >= 0);
+}
+
 // --- 0x528560: editor text mode takes BuildTextArray, not LoadDefinitionFile -
 TEST(AppReconEngineInit, EditorTextMode) {
     std::vector<std::string> log;

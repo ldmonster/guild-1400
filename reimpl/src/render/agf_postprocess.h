@@ -59,10 +59,14 @@ namespace guild::render {
 // Position tolerance for the dedup compare (gilde.exe 0x5d248c literal 0.001).
 constexpr float kAgfVertexMergeTolerance = 0.001f;
 
-// Morph-bake constants (gilde.exe data; see header banner for the decoded values).
-constexpr double kAgfMorphAngleA = -1.5707963267948966;  // dbl_6290CC = -PI/2
-constexpr double kAgfMorphAngleB =  3.14159265358979312;  // dbl_6290D4 =  PI
-constexpr double kAgfMorphZScale = -1.0;                  // dbl_6290DC = -1.0
+// Morph-bake constants. get_bytes @0x6290CC (24 bytes) shows the shipped doubles
+// are DECIMAL-ROUNDED approximations of -pi/2 / pi, NOT the true IEEE values:
+//   dbl_6290CC = 0xBFF921FB54442EEA = -1.570796326795   (true -pi/2 ends ...2D18)
+//   dbl_6290D4 = 0x400921FB54442EEA =  3.14159265359    (true  pi   ends ...2D18)
+//   dbl_6290DC = 0xBFF0000000000000 = -1.0
+constexpr double kAgfMorphAngleA = -1.570796326795;   // dbl_6290CC (bit-exact)
+constexpr double kAgfMorphAngleB =  3.14159265359;    // dbl_6290D4 (bit-exact)
+constexpr double kAgfMorphZScale = -1.0;              // dbl_6290DC
 
 // gilde.exe 0x5caa4c — VIBE_Math_VectorWithinTolerance. True iff the per-axis
 // absolute differences of two positions are all <= tol.

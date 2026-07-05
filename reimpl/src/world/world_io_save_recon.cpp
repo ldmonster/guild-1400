@@ -23,7 +23,7 @@
 //   VIBE_Bio_WriteVec4       @0x5dca40  — four dwords, one stream call each
 //   VIBE_Bio_WriteArray      @0x5dcbb0  — u32 count, u32 stride, then count*stride
 // and the two string leaves the writer calls inline:
-//   VIBE_Util_StrChr         @0x5d3ef0  — first occurrence of a char (NUL-terminated)
+//   VIBE_Util_StrChr         @0x5d3ef0  — LAST occurrence of a char (strrchr-like)
 //   byte_64A208              @0x64a208  — MSVC ctype table (only its &0x20 bit used)
 //
 // Cross-slab pointer follows stored *inside* a record (node+492 stock block,
@@ -148,14 +148,18 @@ inline guild::u8* ResolveLink(const guild::u8* slot) {
     return g_linkResolver ? g_linkResolver(id) : nullptr;
 }
 
-// VIBE_Util_StrChr @0x5d3ef0 — first occurrence of `c` in NUL-terminated `s`.
+// VIBE_Util_StrChr @0x5d3ef0 — despite the name, the binary scans the WHOLE
+// string and keeps overwriting the result on every match, so it returns the
+// LAST occurrence of `c` (strrchr semantics):
+//   v2 = 0; do { if (a2 == *a1) v2 = a1; } while (*a1++); return v2;
+// (For c == 0 it returns the terminator pointer; the writer only passes '_'.)
 inline char* UtilStrChr(char* s, int c) {
-    for (;; ++s) {
-        if (static_cast<unsigned char>(*s) == static_cast<unsigned char>(c))
-            return s;
-        if (!*s)
-            return nullptr;
-    }
+    char* v2 = nullptr;
+    do {
+        if (static_cast<char>(c) == *s)
+            v2 = s;
+    } while (*s++);
+    return v2;
 }
 
 // byte_64A208 @0x64a208 — MSVC ctype table (first 128 entries; the writer only
@@ -166,9 +170,9 @@ const guild::u8 kCType64A208[128] = {
     0x01,0x0a,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,
     0x0c,0x38,0x38,0x38,0x38,0x38,0x38,0x38,0x38,0x38,0x38,0x0c,0x0c,0x0c,0x0c,0x0c,
     0x0c,0x0c,0x58,0x58,0x58,0x58,0x58,0x58,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,
-    0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x0c,0x0c,0x0c,
-    0x0c,0x0c,0x0c,0x98,0x98,0x98,0x98,0x98,0x98,0x88,0x88,0x88,0x88,0x88,0x88,0x88,
-    0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x0c,0x0c,0x0c,
+    0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x48,0x0c,0x0c,0x0c,0x0c,
+    0x0c,0x0c,0x98,0x98,0x98,0x98,0x98,0x98,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,
+    0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x0c,0x0c,0x0c,0x0c,
 };
 
 // ---- forward ----
@@ -176,19 +180,33 @@ void WrObject(Sink* s, guild::u8* node);
 
 // VIBE_Event_WriteEventNames @0x5f4b60 — the trailing event-name list serializer.
 // Owned by the event module (out of this slice). In the original WriteObject
-// *returns* its result. Reconstructed faithfully as a leaf that walks the
-// event-name list pointer at node+468 only if a hook is installed; the default
-// emits the empty-list terminator the loader expects (a single 0 byte = "no
-// events"), which is byte-exact for the common (no-event) node. The full
-// VIBE_Event_WriteEventNames is reported as a cross-module dependency.
+// *returns* its result. The binary:
+//   if (!list)  return Bio_WriteDwordPair(h, 0);           // 4-byte 0 count
+//   count = #entries (7 entries, stride 132) whose +0 dword is nonzero;
+//   Bio_WriteDwordPair(h, count);
+//   for (i = 0; i < 7; ++i) if (entry[i].dword0)
+//       { Bio_WriteString(EventTable_LookupIdToName(i)); Bio_WriteString(entry+4); }
+// The default (no hook) reproduces the null / empty-list paths byte-exactly
+// (a single 4-byte 0 count dword). A non-empty list needs the event module's
+// VIBE_EventTable_LookupIdToName (cross-module) — the hook carries that; with
+// no hook installed the sink is failed rather than emitting unfaithful bytes.
 EventNamesHook g_eventNamesHook = nullptr;
 
 guild::u32 WriteEventNames(Sink* s, guild::u8* listHead) {
     if (g_eventNamesHook)
         return g_eventNamesHook(s->buf, s->cap, &s->pos, &s->ok, listHead);
-    // Default: emit the no-events terminator (single 0 count byte). The loader
-    // reads a leading byte/flag of 0 to mean "no event names".
-    BioWriteByte(s, 0);
+    if (!listHead) {                    // 0x5f4b60: if (!a2) WriteDwordPair(a1, 0)
+        BioWriteDwordPair(s, 0);
+        return s->ok ? 1u : 0u;
+    }
+    // count the nonzero +0 dwords over the 7 fixed 132-byte entries (+0..+924)
+    guild::u32 count = 0;
+    for (int i = 0; i < 7; ++i)
+        if (RdU32(listHead + 132 * i) != 0)
+            ++count;
+    BioWriteDwordPair(s, count);
+    if (count != 0)
+        s->ok = false;  // names need VIBE_EventTable_LookupIdToName -> hook required
     return s->ok ? 1u : 0u;
 }
 
@@ -367,8 +385,11 @@ void WrBuildingData(Sink* s, const guild::u8* bld) {
         if (RdU32(bld + 24)) {
             const guild::u8 roomCount = bld[7277];                 // [edi+1C6Dh]
             BioWriteDwordPair(s, roomCount);
-            if (roomCount == 0) {
-                // loc_5E6186: write the +24 array, then fall into the (empty) loop
+            if (roomCount != 0) {
+                // 0x5e6054: cmp byte [edi+1C6Dh],0 ; ja loc_5E6186 — a NONZERO
+                // room count jumps to 0x5e6186, which writes the +24 array
+                // (WriteArray(n, [edi+18h], n)) and then enters the room loop.
+                // roomCount == 0 falls through to the loop init and writes nothing.
                 BioWriteArray(s, n, n, ResolveLink(bld + 24));
             }
             const guild::u8* roomBase = ResolveLink(bld + 6624);    // [edi+19E0h]

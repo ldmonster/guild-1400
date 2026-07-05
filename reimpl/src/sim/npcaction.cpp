@@ -2,7 +2,7 @@
 
 #include "sim/gametime.h"
 #include "util/math_random.h"
-#include "crt/rand.h"
+#include "util/math_rng_float.h"   // RandomFloatScaled (VIBE_Math_RandomFloatScaled 0x58b910)
 
 #include <cstdint>
 
@@ -41,15 +41,17 @@ void SetNpcCityIdResolver(i32 (*fn)(u16)) { g_cityIdFromIndex = fn; }
 // ===========================================================================
 static constexpr double kMoodCeiling    = 252.0;       // dbl_624E30
 static constexpr float  kMoodCeilingF    = 252.0f;      // flt_624E38
-static constexpr float  kMoodInvCeiling  = 0.0039682314f; // flt_624E3C (~1/252)
+// flt_624E3C @0x624E3C: raw bytes 21 08 82 3B == 0x3B820821 == float
+// 0.003968254197388887 (float(1/252)). Was mistranscribed as 0.0039682314f
+// (~49 ulps off) — fixed against get_bytes @0x624E3C.
+static constexpr float  kMoodInvCeiling  = 0x1.041042p-8f; // flt_624E3C
 static constexpr double kMoodCurveA      = 0.6;          // dbl_624E40
 static constexpr double kMoodCurveB      = 0.2;          // dbl_624E48
 static constexpr float  kMoodScale       = 42.0f;        // flt_624E50
-// VIBE_Math_RandomFloatScaled = (int)RandNext() * 2^-15  (flt_62675C).
-static inline double RandomFloatScaled() {
-    return static_cast<double>(static_cast<i32>(crt::RandNext()))
-         * (1.0 / 32768.0);
-}
+// VIBE_Math_RandomFloatScaled @0x58b910 = (int)RandNext() * flt_62675C, where
+// flt_62675C @0x62675C = 0x38000100 = float(1/32767) — NOT 1/32768. The local
+// copy that multiplied by 1/32768 is replaced by the canonical
+// util::RandomFloatScaled (math_rng_float.cpp, kCrtScale).
 
 // ===========================================================================
 // Dispatch table (funcs_5766CB @0x63d964) — recovered addresses, in order.
@@ -198,9 +200,9 @@ int NpcAction_BeginCombatWalkStep(HeRecord* h) {    // 0x4ed910 (+1 second)
 int NpcAction_BeginIdleAnim(HeRecord* h) {
     StampClock(He_ApptTime(h));                       // +82 <- clock
     u16 v2 = static_cast<u16>(util::RandomModulo(0x1E));  // 0..29
-    // Original: GameTime_Advance(rec, addDays=1, addSeconds=<uninit ecx>, addMinutes=v2-20).
-    // The addSeconds slot holds an uninitialised register in the binary (latent
-    // bug); we pass 0. The meaningful delta is addMinutes = v2 - 20 (range -20..9).
+    // Disasm 0x4e754c/0x4e754e (and twin 0x4eaec4/0x4eaec6): xor ebx,ebx /
+    // xor ecx,ecx — addSeconds(ecx) IS zeroed (Hex-Rays shows it as an uninit
+    // local, but the instructions prove 0). addMinutes = v2 - 20 (range -20..9).
     return GameTimeAdvance(&He_ApptTime(h), 1, 0, static_cast<i16>(v2) - 20);
 }
 
@@ -280,12 +282,15 @@ int NpcAdjustRelationByMood(HeRecord* person, i8 kind) {
         return 0;
 
     // v5 = (252 - level) * (1/252)            (normalised headroom, 0..1)
-    double headroom = (static_cast<double>(kMoodCeilingF) - static_cast<double>(level))
-                    * static_cast<double>(kMoodInvCeiling);
-    // v11 = headroom * 0.6 + 0.2              (noise amplitude)
-    double amp = headroom * kMoodCurveA + kMoodCurveB;
+    // 0x56840c: the headroom (v12) and amplitude (v11) locals are spilled to
+    // 4-byte FLOAT stack slots (fstp dword) — model the float rounding exactly.
+    double v5 = (static_cast<double>(kMoodCeilingF) - static_cast<double>(level))
+              * static_cast<double>(kMoodInvCeiling);
+    float headroom = static_cast<float>(v5);                          // v12 (float slot)
+    // v11 = (float)(v5 * 0.6 + 0.2)           (noise amplitude, float slot)
+    float amp = static_cast<float>(v5 * kMoodCurveA + kMoodCurveB);   // v11
     // v6 = (RandFloat*amp + 1 - amp) * 42 * headroom + 1   -> increment
-    double inc = (RandomFloatScaled() * amp + 1.0 - amp)
+    double inc = (util::RandomFloatScaled() * amp + 1.0 - amp)
                * static_cast<double>(kMoodScale) * headroom + 1.0;
     u8 delta = static_cast<u8>(static_cast<int>(inc));  // truncate (ftol)
 

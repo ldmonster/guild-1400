@@ -69,31 +69,45 @@ void BuildBoundingBoxPlaneTable(const CameraViewFrustum& f, BBoxPlaneEntry table
     }
 }
 
-// gilde.exe 0x5E9024 — orbit/zoom rate arithmetic.
+// gilde.exe 0x5E9024 — orbit/zoom rate arithmetic (exact float-store sequence).
+// PAN branch (dword_672220): true DIVISIONS in double, one float store each:
+//   v30 = (float)((double)dx / (double)width * flt_62BF10)
+//   v24 = (float)(flt_62BF10 * ((double)dy / (double)height))
+// ORBIT branch (dword_672234): the X side uses a FLOAT-stored reciprocal
+//   v23 = (float)(1.0/width) for both v22 and v29; the Y side DIVIDES for v21
+//   but uses the float reciprocal v19 = (float)(1.0/(float)height) for v25.
+//   Every intermediate is stored to float (v22/v29/v28/v21/v25/v27), and the
+//   final products v26/v31 are float×float×float chains with one store.
 OrbitRates ComputeOrbitRates(int dx, int dy, int width, int height,
                              const OrbitRateConfig& cfg) {
     OrbitRates r{0.0f, 0.0f, 0.0f, 0.0f};
 
-    const double invW = 1.0 / static_cast<double>(width);
-    const double invH = 1.0 / static_cast<double>(height);
+    // ---- pan (double divisions, float stores) ----
+    r.pan  = static_cast<float>(static_cast<double>(dx)
+                                / static_cast<double>(width) * cfg.panSens);
+    r.panY = static_cast<float>(cfg.panSens
+                                * (static_cast<double>(dy)
+                                   / static_cast<double>(height)));
 
-    // Straight pan: pan = (dx/width)*panSens ; panY = (dy/height)*panSens.
-    //   (v30 = (double)dx / width * flt_62BF10 ; v24 = flt_62BF10 * (dy/height).)
-    r.pan  = static_cast<float>(static_cast<double>(dx) * invW * cfg.panSens);
-    r.panY = static_cast<float>(cfg.panSens * (static_cast<double>(dy) * invH));
+    // ---- accelerated yaw (X: float reciprocal v23) ----
+    const float v23 = static_cast<float>(1.0 / static_cast<double>(width));
+    const float v22 = static_cast<float>(static_cast<double>(dx) * v23);
+    const float v29 = static_cast<float>(
+        (std::fabs(static_cast<double>(dx)) + 1.0) * cfg.accelScale * v23);
+    const float v28 = (static_cast<double>(cfg.accelClamp) >= (double)v29)
+                          ? v29 : 3.0f;
+    r.yaw = static_cast<float>((double)v22 * cfg.rateX * v28);   // v26
 
-    // Accelerated yaw: cx = (|dx|+1)*accelScale/width ; ax = cx<=clamp ? cx : 3.0 ;
-    //   yaw = (dx*invW) * rateX * ax.
-    const double vx = static_cast<double>(dx) * invW;            // v22
-    double cx = (std::fabs(static_cast<double>(dx)) + 1.0) * cfg.accelScale * invW; // v29
-    double ax = (static_cast<double>(cfg.accelClamp) >= cx) ? cx : 3.0;             // v28
-    r.yaw = static_cast<float>(vx * cfg.rateX * ax);             // v26
-
-    // Accelerated pitch: symmetric in dy / height / rateY.
-    const double vy = static_cast<double>(dy) * invH;            // v21
-    double cy = (std::fabs(static_cast<double>(dy)) + 1.0) * cfg.accelScale * invH; // v25
-    double ay = (static_cast<double>(cfg.accelClamp) >= cy) ? cy : 3.0;             // v27
-    r.pitch = static_cast<float>(vy * cfg.rateY * ay);          // v31
+    // ---- accelerated pitch (Y: v21 divides; v25 uses v19 = 1/(float)height) ----
+    const float v21 = static_cast<float>(static_cast<double>(dy)
+                                         / static_cast<double>(height));
+    const float v18 = static_cast<float>(height);
+    const float v19 = static_cast<float>(1.0 / (double)v18);
+    const float v25 = static_cast<float>(
+        (std::fabs(static_cast<double>(dy)) + 1.0) * cfg.accelScale * v19);
+    const float v27 = (static_cast<double>(cfg.accelClamp) >= (double)v25)
+                          ? v25 : 3.0f;
+    r.pitch = static_cast<float>((double)v21 * cfg.rateY * v27); // v31
 
     return r;
 }

@@ -207,9 +207,13 @@ bool SceneMainLoop_StepFrame(SceneMainLoopState& s, SceneMainLoopHooks& h,
         (run.selFlags & 1) != 0) {
         const i32 b = s.dword_11BC278;                  // 0x50f2fe (re-read)
         if ((h.buildingFlagByte5A(b) & 1) == 0) {       // 0x50f304
-            if (h.buildingIsProductionType(b)) {        // 0x587f80 @0x50f30e
-                if (h.interactionInvokeHandlerSlot60(27, b, 0) == 1)  // 0x50f326
-                    h.buildingEnterForeignShop(b);      // 0x51e88c @0x50f336
+            // 0x50f30e IsProductionType: jz 0x50f57c (not production -> the
+            // storage block). 0x50f32e Invoke(27)!=1 ALSO jumps to 0x50f57c —
+            // a failed slot-60 op 27 falls through to the IsStorageType /
+            // op-25 path, it does NOT skip it.
+            if (h.buildingIsProductionType(b) &&        // 0x587f80 @0x50f30e
+                h.interactionInvokeHandlerSlot60(27, b, 0) == 1) {  // 0x50f326
+                h.buildingEnterForeignShop(b);          // 0x51e88c @0x50f336
             } else if (!h.buildingIsStorageType(b)) {   // 0x587f50 @0x50f57e
                 // 0x50f58b..0x50f59a: param = *(i32*)(b+0x27) >> 16.
                 if (h.interactionInvokeHandlerSlot60(

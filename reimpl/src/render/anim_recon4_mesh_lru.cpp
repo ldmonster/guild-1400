@@ -52,7 +52,9 @@ char EvictMeshesForBudget(i32 budget, i32 usage,
         if (!victim)
             return 0;
         usage -= ComputeMeshMemorySize(arena.at(victim), arena);
-        ReleaseMeshData(victim, /*unlink=*/false, listHead, sentinel, budget,
+        // gilde.exe 0x5cfe10: `mov edx, 1` — the eviction call passes a2 = 1
+        // (unlink + free), NOT 0.
+        ReleaseMeshData(victim, /*unlink=*/true, listHead, sentinel, budget,
                         arena, hooks);
     }
     return 1;
@@ -274,9 +276,11 @@ AnimFlagsResult AnimationFlagsCompute(i32 handle, const void* recTable,
     if (!st) { r.ret = 0; return r; }                // result == 0
     if (type == 8 || type == 5) {
         const i32 sel = rd_i32(recTable, recOff + 116); // *(v5+116)
-        // v7 = st + *(st + 4*sel + 69)
+        // v7 = st + *(st + 4*sel + 69); the binary guards `if (v7)` — the SUM,
+        // which is nonzero whenever st != 0 (already established above), so the
+        // read happens even for a zero table offset (then it reads st+6/st+10).
         const u32 kfOff = rd_u32(st, 4 * sel + 69);
-        if (kfOff) {
+        {
             void* kf = static_cast<u8*>(st) + kfOff;
             r.outW = rd_u16(kf, 6);                   // *(v7+6)
             r.outH = rd_u16(kf, 10);                  // *(v7+10)
@@ -403,7 +407,10 @@ i32 Shape_RegisterLoaded(void* table, i32 startIndex,
     f = static_cast<u8>((f | 1) & 0xFD);
     wr_u8(table, base + FLAGS, f);
 
-    i32 count = startIndex + 1;
+    // gilde.exe 0x41f5e0 tail: dword_62D208 = v38 — v38 stays at startIndex for
+    // a single-frame shape and advances by (frames - 1) for multi-frame; the
+    // stored global is NOT startIndex + frames. Return exactly that value.
+    i32 count = startIndex;
 
     // Multi-frame shapes register extra sub-frame slots.
     const i32 frameType = rd_i32(table, base + TYPE);
@@ -445,9 +452,9 @@ i32 Shape_RegisterLoaded(void* table, i32 startIndex,
             ++v19;
             wr_u32(table, v20 + PARENT, static_cast<u32>(startIndex));
         }
-        count = idx + 1;
+        count = idx;   // v38 after the loop = startIndex + frames - 1
     }
-    return count; // dword_62D208 = v38 (new count)
+    return count; // dword_62D208 = v38
 }
 
 } // namespace guild::render::anim_recon4

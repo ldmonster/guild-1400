@@ -131,7 +131,9 @@ struct DragLayoutResult {
     // Per-column visibility: false -> the original hides the widget (field 52 = 1);
     // true -> it lays the widget out at (formX+xOff, formY+yOff) (field 52 = 0).
     std::array<bool, kDragColumns> visible{{false, false, false, false}};
-    // Absolute laid-out widget origin for visible columns (formX/Y + loword(off)).
+    // Absolute laid-out widget origin for visible columns: the 16-bit sum
+    // sext16(u16(formX/Y) + u16(off)) — the original adds the two low words and
+    // sign-extends the SUM (0x50b48b/0x50b49d, 0x50c282/0x50c294).
     std::array<i32, kDragColumns> widgetX{{0, 0, 0, 0}};
     std::array<i32, kDragColumns> widgetY{{0, 0, 0, 0}};
     // The 16 slider-row placements, in order.

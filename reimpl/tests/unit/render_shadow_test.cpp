@@ -15,14 +15,15 @@ using namespace guild;
 using namespace guild::render;
 
 // ===========================================================================
-// Falloff LUT — table[i] = 1 - asin(i/1024)*(2/pi), vs a Python/<cmath> oracle.
+// Falloff LUT — table[i] = 1 - acos(i/1024)*(2/pi), vs a Python/<cmath> oracle.
+// (Harden fix @0x5f0b9c: AcosGuarded is ACOS, not asin — see falloff_lut.cpp.)
 // ===========================================================================
 TEST(RenderFalloff, MatchesAcosOracle) {
     static float table[kFalloffEntries];
     InitFalloffTable(table);
     for (int i = 0; i < kFalloffEntries; ++i) {
         double x = (double)i * (1.0 / 1024.0);
-        float ref = (float)(1.0 - std::asin(x) * (2.0 / M_PI));
+        float ref = (float)(1.0 - std::acos(x) * (2.0 / M_PI));
         CHECK(std::fabs(table[i] - ref) <= 1e-6f);
     }
 }
@@ -30,25 +31,26 @@ TEST(RenderFalloff, MatchesAcosOracle) {
 TEST(RenderFalloff, GoldenVectors) {
     static float table[kFalloffEntries];
     InitFalloffTable(table);
-    // Golden values computed in float by python (see report).
+    // Golden values computed in float by python (acos form; old asin goldens
+    // replaced by the @0x5f0b9c harden fix, e.g. table[0] 1.0 -> ~4.03e-8).
     auto close = [](float a, float b) { return std::fabs(a - b) <= 1e-6f; };
-    CHECK(close(table[0],    1.0f));
-    CHECK(close(table[1],    0.9993783235549927f));
-    CHECK(close(table[16],   0.9900524020195007f));
-    CHECK(close(table[64],   0.9601852893829346f));
-    CHECK(close(table[256],  0.8391387462615967f));
-    CHECK(close(table[512],  0.6666666865348816f));
-    CHECK(close(table[768],  0.46010690927505493f));
-    CHECK(close(table[1023], 0.028137175366282463f));
-    // Monotone non-increasing and bounded.
+    CHECK(close(table[0],    4.034205858260975e-08f));
+    CHECK(close(table[1],    0.0006217394256964326f));
+    CHECK(close(table[16],   0.00994762871414423f));
+    CHECK(close(table[64],   0.039814725518226624f));
+    CHECK(close(table[256],  0.1608612835407257f));
+    CHECK(close(table[512],  0.3333333730697632f));
+    CHECK(close(table[768],  0.5398930907249451f));
+    CHECK(close(table[1023], 0.9718628525733948f));
+    // Monotone non-decreasing and bounded.
     for (int i = 1; i < kFalloffEntries; ++i)
-        CHECK(table[i] <= table[i - 1] + 1e-7f);
+        CHECK(table[i] >= table[i - 1] - 1e-7f);
 }
 
-TEST(RenderFalloff, AcosGuardedIsAsin) {
-    CHECK(std::fabs(AcosGuarded(0.0) - 0.0) <= 1e-12);
-    CHECK(std::fabs(AcosGuarded(0.5) - std::asin(0.5)) <= 1e-12);
-    CHECK(std::fabs(AcosGuarded(-0.25) - std::asin(-0.25)) <= 1e-12);
+TEST(RenderFalloff, AcosGuardedIsAcosShadow) {
+    CHECK(std::fabs(AcosGuarded(0.0) - M_PI / 2.0) <= 1e-12);
+    CHECK(std::fabs(AcosGuarded(0.5) - std::acos(0.5)) <= 1e-12);
+    CHECK(std::fabs(AcosGuarded(-0.25) - std::acos(-0.25)) <= 1e-12);
     // |x|==1 guard.
     CHECK(std::fabs(AcosGuarded(1.0) - 0.0) <= 1e-12);
     CHECK(std::fabs(AcosGuarded(-1.0) - M_PI) <= 1e-12);

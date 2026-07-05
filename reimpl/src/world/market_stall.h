@@ -105,7 +105,8 @@ int MarketStallUpsertTradeEntry(const TradeOrder& order, bool dstResolved,
 // The original reads the currency id at slot+12 for BOTH compared slots and, for
 // each ordered pair (i, j) with j>i, swaps the two whole 28-byte records when
 //   StrCmp( name(slot[j]+12), name(slot[i]+12) ) == 1
-// (i.e. name(j) sorts strictly AFTER name(i)). With "AAAA…" for the home currency
+// (StrCmp @0x5d3f10 returns 1 when its SECOND operand — name(i) — is greater, so
+// the swap fires when name(i) > name(j): ascending). With "AAAA…" for the home currency
 // and "ZZZZ…" for the none-currency, this orders the home currency to the FRONT
 // and empties to the BACK. We model one slot as a SortSlot keyed on its +12
 // currency id and reproduce that exact swap rule; the widget layout that follows

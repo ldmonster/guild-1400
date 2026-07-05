@@ -82,9 +82,9 @@ TEST(ShimWheel, WheelNotchesDriveTheRealCameraZoomBranch) {
     shim::MouseState ms;
     plat.getMouse(ms);
     cam.Frame(ms, false, false, false, false, (float)ms.wheel, 16.0f);
-    CHECK(std::fabs(cam.zoom() - 0.2f) < 1e-6f);   // 2 notches -> 0.2
+    CHECK(std::fabs(cam.zoom() - 0.53f) < 1e-6f);  // boot 0.33 + 2 notches*0.1
 
     plat.getMouse(ms);                  // cleared: zoom holds
     cam.Frame(ms, false, false, false, false, (float)ms.wheel, 16.0f);
-    CHECK(std::fabs(cam.zoom() - 0.2f) < 1e-6f);
+    CHECK(std::fabs(cam.zoom() - 0.53f) < 1e-6f);
 }

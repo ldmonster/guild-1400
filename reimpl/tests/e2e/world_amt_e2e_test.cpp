@@ -181,7 +181,7 @@ TEST(WorldAmtE2E, TradeRouteThenTreasury) {
     //   gid7: 71 *2 = 142
     //   gid11:111 *4 = 444   => 739
     double value = TradeTransportComputeCargoValue(cargo, false, 1.0f, 1, 2,
-                                                   TransportMode::Slow);
+                                                   /*panelMode=*/1);
     CHECK(value > 738.99 && value < 739.01);
 
     // Ship it Fast: cart cost on a 100000-value load = 15000.

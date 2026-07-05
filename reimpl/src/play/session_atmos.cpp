@@ -90,10 +90,12 @@ void SkyLayerSetScrollSpeed(SkyLayer& l, float speed) {
 
 // gilde.exe 0x5ef7cc (the per-layer loop body @0x5ef843..0x5ef8c8).
 void SkyLayerStep(SkyLayer& l, float dtMs) {
-    // progress += step * dt; clamp at 1 (and stop).
-    float p = l.fadeStepPerMs * dtMs + l.fadeProgress;     // 0x5ef854
-    l.fadeProgress = p;
-    if (p > 1.0f) {                                        // 0x5ef861
+    // progress += step * dt; clamp at 1 (and stop). The original keeps the
+    // sum on the x87 stack: fst (store float) THEN fcompp against 1.0 on the
+    // UNROUNDED intermediate (0x5ef857/0x5ef85c) — model with double.
+    double p = (double)l.fadeStepPerMs * (double)dtMs + (double)l.fadeProgress;
+    l.fadeProgress = (float)p;                             // 0x5ef857 fst
+    if (p > 1.0) {                                         // 0x5ef861
         l.fadeProgress  = 1.0f;
         l.fadeStepPerMs = 0.0f;
     }
@@ -102,8 +104,10 @@ void SkyLayerStep(SkyLayer& l, float dtMs) {
              + ((double)l.fadeTarget - (double)l.fadeFrom) * (double)l.fadeProgress;
     int iv = render::TruncToward(v);                       // VIBE_Coord_ConvertX
     l.fade = (iv <= 255) ? (u8)iv : (u8)0xFF;              // 0x5ef8a5
-    // scrollPos = fmod(speed*dt + pos, 1.0)               // 0x5ef8c3
-    l.scrollPos = (float)std::fmod((double)(l.scrollSpeed * dtMs + l.scrollPos), 1.0);
+    // scrollPos = fmod(speed*dt + pos, 1.0) — the fmod argument is the x87
+    // 80-bit sum (fld/fmul/fadd @0x5ef8b3..0x5ef8bc, no store): double model.
+    l.scrollPos = (float)std::fmod(
+        (double)l.scrollSpeed * (double)dtMs + (double)l.scrollPos, 1.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +315,9 @@ void SessionAtmos::brightnessStep(const sim::GameTime& clock, std::uint32_t nowM
 
     // 0x4b270d..0x4b2751: latch band/blend and rebuild the lighting tables.
     band  = v11 % 7;                          // dword_631DD0
-    blend = (float)(v3 - (double)v11);        // flt_631DD4
+    // blend uses the FLOAT spill of v3 (fst dword @0x4b2677), not the 80-bit
+    // value: flt_631DD4 = (float)((float)v3 - (double)v11)  (fsubr @0x4b272f).
+    blend = (float)((double)(float)v3 - (double)v11); // flt_631DD4
     // VIBE_SkyColor_BlendBandLighting(band, blend, 1.0f, v9):
     if (hasSkyBands)
         ambient = render::BlendBandLighting(skyBands, band, blend, 1.0f);

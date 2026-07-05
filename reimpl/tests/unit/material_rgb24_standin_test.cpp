@@ -46,6 +46,12 @@ render::DecodedBmp Make24() {
             else       { rgb[i] = 30;  rgb[i + 1] = 60; rgb[i + 2] = 220; }
         }
     std::vector<u8> file = render::BmpSave24Bit(w, h, rgb.data());
+    // Engine Save24 (gilde.exe 0x5f18f4) writes pixel data at 58; loaders seek
+    // the standard 0x36 (0x5f0ce4) like real tool-authored assets. Convert the
+    // synthetic fixture to standard layout.
+    file.erase(file.begin() + 54, file.begin() + 58);
+    file[10] = 54;
+    for (int k = 0; k < 4; ++k) file[2 + k] = (u8)(file.size() >> (8 * k));
     return render::DecodeBmpBuffer(file);
 }
 

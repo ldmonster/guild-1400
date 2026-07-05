@@ -39,11 +39,14 @@ struct MapGrid;
 // Cost model (gilde.exe unk_62E630 + dword_62E75C/flt_62E770 + flt_62E610).
 // ---------------------------------------------------------------------------
 // Per-terrain-type traversal cost, indexed by the tile's type byte (+0). A
-// negative entry marks the type impassable. Profile 0 (the only shipped one):
+// negative entry marks the type impassable. FIVE profiles are shipped
+// (unk_62E630..0x62E75B, 60 bytes each; dword_765308 = &unk_62E630 +
+// 60*profile at 0x43bfe9). Profile 0:
 //   {999, 20, 30, 30, 30, 30, 1, 30, 40, 30, -1, 10, 0.5, -1, 99}
-// (15 entries; 60 bytes per profile, dword_765308 = &unk_62E630 + 60*profile.)
 constexpr int   kPathCostTypes = 15;
-extern const float kPathTypeCost[kPathCostTypes];
+constexpr int   kPathCostProfileCount = 5;
+extern const float kPathCostProfiles[kPathCostProfileCount * kPathCostTypes];
+extern const float* const kPathTypeCost;  // profile-0 view
 
 // Per-profile diagonal/heuristic weights. dword_62E75C[profile] (origin cost
 // scale, 0.25) and flt_62E770[profile] (heuristic weight, 0.25). Heuristic
@@ -62,7 +65,7 @@ struct PathStep {
 // Runs the bidirectional A*. Returns the linear node index of the start node on
 // success (the route is reconstructed by following the `parent` (+22) links from
 // the start node to the goal), or 0xFFFF (== -1 as u16) when no path exists.
-// `profile` selects the cost table (only 0 is shipped).
+// `profile` selects the cost table (5 shipped; profile 3 used by 0x577320).
 //   NOTE the original's odd arg interleave (startX in ecx, startY in dx): a tile
 //   (col,row) maps to node index (row<<shift)+col.
 int PathFindRoute(const MapGrid& g, int startX, int startY,

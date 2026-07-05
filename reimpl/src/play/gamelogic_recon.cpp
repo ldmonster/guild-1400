@@ -50,8 +50,12 @@ static inline bool has(u32 m, u32 b) { return (m & b) != 0; }
 //     alpha = rec[28] + 8;  rec[28] = alpha;
 //     if (alpha <= 255)  -> SetFadeParams(rec[16],rec[4],rec[20],rec[28]);
 //     else               -> for (row=0; row<rec[5]; ++row) copy 2*rec[4] bytes;
-//     if (rec[7] > 288)  -> free rec[0], rec[1]; DestroyByType(rec[6]); free rec;
+//     if (alpha > 288)   -> free rec[0], rec[1]; DestroyByType(rec[6]); free rec;
 //   }
+// NOTE (1:1): the teardown gate the decompile shows as v3[7] is int index 7 ==
+// byte offset +28 — the SAME field as the alpha written at 0x41e830. The alpha
+// doubles as the teardown timer (matches the twin reconstruction in
+// sim/command_leaves.cpp). There is no separate "age" field in the record.
 // Returns the new alpha (rec[28]); 0 when the record is null/empty.
 // (CrossFadeRec / CrossFadeHooks are declared in gamelogic_recon.h.)
 // ===========================================================================
@@ -65,7 +69,7 @@ int GfxCrossFadeStep(CrossFadeRec& rec, CrossFadeHooks& h) {
         for (int row = 0; row < rec.height; ++row) // 0x41e849 do/while v6<v3[5]
             h.copyRow(row);            // 0x41e881 qmemcpy 2*stride bytes
     }
-    if (rec.age > 288) {               // 0x41e897
+    if (rec.alpha > 288) {             // 0x41e897: v3[7] == byte +28 == alpha
         h.teardown();                  // 0x41e8b8..0x41e8c1
     }
     return rec.alpha;
@@ -556,7 +560,7 @@ void ProcessTurnActions(GameLogicState& st, IGameLogicHooks& h) {
         if (h.npcActionFindInteractionTarget(i)) {
             // if target changed: finish the old script, stand up, insert new action.
             h.scriptFinish();              // (only if old script handle != -1)
-            // 0x530813 — VIBE_Character_StandUp(dword_12CEA94[218*i]). The action
+            // 0x530813 — VIBE_Character_StandUp(dword_12CEA94[134*i]). The action
             // handle table is host-owned; the inert retarget loop passes 0.
             h.characterStandUp(0);         // 0x530813
             h.charActionInsertActionVararg(); // 0x53084b ("Beamed home")
@@ -653,7 +657,9 @@ void RunTurnTransition(GameLogicState& st, IGameLogicHooks& h) {
         // 0x5318ab: tax rows.
         if (h.taxCollectOfficeAllTaxes()) {
             for (int i = 0; i < 6; ++i)
-                h.textRenderRichString(0x6975); // ($L%s %i%%:$R-%T$A) per tax
+                // 0x5318f0: fmt = "$L%s %i%%:$R-%T$A" (aLSIRTA); the tax-name id
+                // arg is (raw >> 24) + 6975 (DECIMAL 6975, not 0x6975).
+                h.textRenderRichString(6975);   // per-tax row (base name id)
         }
         h.textRenderRichString(0x1C25);    // 0x53194e (production total)
         h.buildingCollectByCityHandle();   // 0x531967 (office upkeep loop)

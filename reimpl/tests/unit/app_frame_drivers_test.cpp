@@ -66,9 +66,12 @@ TEST(AppFrameDrivers, RunFrameLoopWrapperMaskAndCount) {
 }
 
 // ---------------------------------------------------------------------------
-// RunPauseLoop: paused frames run a 0 mask and terminate on the un-pause key
-// (scancode 57). Before the key is hit they keep pumping; once held, the loop
-// ends on that frame.
+// RunPauseLoop: paused frames run (lastMask | 0x100000) & ~0x2000 — gilde.exe
+// 0x56e7e7 (mov ecx, dword_11BC2D0), 0x56e7f2 (or ecx, 100000h), 0x56e805
+// (and ch, 0DFh) — and terminate on the un-pause key (scancode 57). Before the
+// key is hit they keep pumping; once held, the loop ends on that frame.
+// [Pin updated from 0u: the original mask is NOT zero — it derives from the
+//  last published frame mask, evidence at 0x56e7e0.]
 // ---------------------------------------------------------------------------
 TEST(AppFrameDrivers, RunPauseLoopEndsOnUnpauseKey) {
     DriverFixture f;
@@ -82,7 +85,20 @@ TEST(AppFrameDrivers, RunPauseLoopEndsOnUnpauseKey) {
     };
     int frames = app::RunPauseLoop(f.appObj, keyState, /*maxFrames=*/50);
     CHECK_EQ(frames, 4);                 // ran exactly until the key was reported
-    CHECK_EQ(f.appObj.lastFeatureMask(), 0u); // paused frames use the 0 mask
+    // Fresh app: lastFeatureMask == 0, so the paused mask is 0x100000.
+    CHECK_EQ(f.appObj.lastFeatureMask(), (unsigned)app::mask::kInputSuppress);
+}
+
+// The paused mask derives from the previously published frame mask: run a main
+// session frame first (publishes 0x67FFF), then pause — the paused frames must
+// run under (0x67FFF | 0x100000) & ~0x2000.
+TEST(AppFrameDrivers, RunPauseLoopMaskDerivesFromLastMask) {
+    DriverFixture f;
+    (void)f.appObj.RunFrameLoop(app::kMainSessionMask); // publish 0x67FFF
+    app::RunPauseLoop(f.appObj, []() { return 0; }, /*maxFrames=*/2);
+    const std::uint32_t want =
+        (0x67FFFu | app::mask::kInputSuppress) & ~app::mask::kOptionsAndPanels;
+    CHECK_EQ(f.appObj.lastFeatureMask(), want); // 0x165FFF
 }
 
 // RunPauseLoop respects the frame cap when the key never comes.
@@ -102,10 +118,31 @@ TEST(AppFrameDrivers, RunEndRoundScreenRaisesAdvance) {
     // dword_75BF38 != -1 on the 2nd frame onward -> raises the advance flag.
     auto pending = [&]() -> int { return ++probes >= 2 ? 42 : -1; };
     bool advance = false;
-    int frames = app::RunEndRoundScreen(f.appObj, pending, /*maxFrames=*/6, &advance);
+    bool modeSwitch = true;
+    int frames = app::RunEndRoundScreen(f.appObj, pending, /*maxFrames=*/6, &advance,
+                                        &modeSwitch);
     CHECK_EQ(frames, 6);
     CHECK(advance); // the pending action was posted
+    // 42 != 0x4BA -> the mode-switch latch (gilde.exe 0x527c14 cmp edx, 4BAh)
+    // stays clear.
+    CHECK(!modeSwitch);
     CHECK_EQ(f.appObj.lastFeatureMask(), 0x67FFFu);
+}
+
+// A pending action of exactly 0x4BA latches the mode switch (gilde.exe
+// 0x527c14..0x527c1c: cmp edx, 4BAh / mov ecx, 1; post-loop `if (ecx)` runs
+// dword_63CC3C = 1 + Hud_FindModeIndex(InitOrLoadSession)).
+TEST(AppFrameDrivers, RunEndRoundScreenLatchesModeSwitchOn0x4BA) {
+    DriverFixture f;
+    CHECK_EQ(app::kEndRoundModeSwitchAction, 0x4BA);
+    int probes = 0;
+    // Post 0x4BA only on the 3rd frame; -1 otherwise. The latch must stick.
+    auto pending = [&]() -> int { return ++probes == 3 ? 0x4BA : -1; };
+    bool advance = false;
+    bool modeSwitch = false;
+    app::RunEndRoundScreen(f.appObj, pending, /*maxFrames=*/5, &advance, &modeSwitch);
+    CHECK(advance);
+    CHECK(modeSwitch);
 }
 
 // Without a pending action the advance flag stays clear.
@@ -230,5 +267,5 @@ TEST(AppWiring6, SoundWaveInitSineTablesIsReal) {
     DriverFixture f;
     f.sub.soundWaveInitSineTables();
     CHECK(f.sub.firedReal("soundWaveInitSineTables"));
-    CHECK_EQ(f.sub.sineTableCount(), 256); // real audio::InitSineTables(256)
+    CHECK_EQ(f.sub.sineTableCount(), 48); // real audio::InitSineTables(0x30) — gilde.exe 0x52879f
 }

@@ -75,9 +75,11 @@ constexpr int kPersonOfficeIdOff = 39;
 // Installable hooks (RNG / coord / table access). Defaults inert/deterministic.
 // ===========================================================================
 struct WorldEconomy2Hooks {
-    // VIBE_Math_RandomFloatScaled() == (double)RandNext()/32767. The payment /
-    // price / direction rolls. Default deterministic 0.
-    float (*randFloatScaled)() = nullptr;
+    // VIBE_Math_RandomFloatScaled (0x58b910) == (double)(int)RandNext() *
+    // flt_62675C — returns DOUBLE (the FPU st0); the payment / price / direction
+    // rolls consume the full double (no float rounding before use at 0x4822a0 /
+    // 0x481f1c / 0x4825c9). Default deterministic 0.
+    double (*randFloatScaled)() = nullptr;
 
     // VIBE_Coord_ConvertX() == round-toward-zero of the FPU st0. The payment and
     // label-offset results are truncated through it. Default = (i32) truncation.
@@ -127,18 +129,32 @@ int ScanMaxCandidateRank(const u8* candidateRanks, int count);
 
 // ===========================================================================
 // VIBE_Amt_BuildElectionDialog (0x482218) — dismissal severance split. The
-// original scans all 768 person records and, for each whose office-id (@+39)
-// equals the dismissed holder's entity AND whose record index differs from the
-// holder's own office-id value, counts a dependent and (in the second pass) queues
-// each one a severance command. The severance per head is totalAmount / count.
-// `officeIds[i]` is person i's office-id field; `present[i]` mirrors the original's
-// "word_12CE910[i] != -1" liveness gate; `holderOfficeId` is the dismissed
-// holder's office-id (the `v11 != v4` self-exclusion). Returns the dependent
-// count; *outPerHead is the integer severance per head (0 when count==0).
+// original scans all 768 person records and, for each live one (word_12CE910[i]
+// != -1) whose +364 entity dword (dword_12CEA7C) equals the dismissed entity AND
+// whose record index differs from the holder's office-id (the `v11 != v4`
+// self-exclusion), counts a dependent and queues
+//   VIBE_Command_QueueRequestCoord27(objId[holderOfficeId], objId[i], -payment)
+// (0x482322..0x482343: both ids come from dword_12CE914, the +4 object-id dword;
+// `payment` is the freshly rolled office-payment v27, NOT the record amount).
+// The second pass then queues each dependent
+//   VIBE_Command_QueueRequest16(objId[i], -1, trunc(totalAmount/count) + 32, cur)
+// — note the `add ebp, 20h` @0x482390: the queued per-head severance is the
+// truncated quotient PLUS 32. The kernel models pass 1 (count + coord27 fan-out
+// through the queueCoord27 hook) and surfaces the pass-2 per-head amount in
+// *outPerHead (== trunc(totalAmount/count) + 32, or 0 when count==0); the caller
+// emits the pass-2 QueueRequest16 commands.
+//   `personEntity[i]`  models dword_12CEA7C[134*i] (the compared +364 entity),
+//   `personObjIds[i]`  models dword_12CE914[134*i] (the queued +4 object-id;
+//                      also indexed at holderOfficeId for the first coord27 arg;
+//                      pass the real table — null falls back to the raw
+//                      index/entity values, which is NOT the binary's id class),
+//   `present[i]`       models the word_12CE910[268*i] != -1 liveness gate,
+//   `totalAmount`      models the command record's +8 amount (the severance pool),
+//   `paymentAmount`    models v27 (the ConvertX-truncated office payment).
 int CountOfficeDependents(i32 targetEntity, const i32* personEntity,
-                          const u16* officeIds, const bool* present,
+                          const i32* personObjIds, const bool* present,
                           u16 holderOfficeId, int count, i32 totalAmount,
-                          i32* outPerHead);
+                          i32 paymentAmount, i32* outPerHead);
 
 // ===========================================================================
 // VIBE_Amt_RunOfficeGridWindow (0x558200) — the grid-cell label x-offset. For a

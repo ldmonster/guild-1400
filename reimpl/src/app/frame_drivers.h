@@ -60,35 +60,50 @@ int RunFrameLoopWrapper(GameApp& app, int maxFrames = -1);
 //   dword_62EB4C = 1;                              // enter paused state
 //   VIBE_Hud_SetStatusBannerText("Pause");
 //   byte_63CC40 = 0;                               // suppress owner-collect
-//   while ( VIBE_GameLogic_RunFrameLoop(v2, ..) && byte_67225C != 57 ) ;
+//   mask = (dword_11BC2D0 | 0x100000) & ~0x2000;   // 0x56e7e7/0x56e7f2/0x56e805
+//   while ( VIBE_GameLogic_RunFrameLoop(mask, ..) && byte_67225C != 57 ) ;
 //   VIBE_Hud_SetStatusBannerText(byte_6252D8);     // restore prior banner
 //   dword_62EB4C = v4; byte_63CC40 = v5;           // restore prior state
-// `v2` (the mask) is left uninitialised-but-zero by the original (paused frames do
-// no simulation), so this passes a 0 feature mask. The HUD banner set/restore and
-// the byte_63CC40 owner-collect suppress are engine-state side effects the host
-// applies; the reconstructed core is the paused-frame pump loop + its key-gated
-// termination. `keyState()` returns the current make-code each iteration (the
-// host's byte_67225C); the loop ends when it equals kUnpauseKeyScancode (57) or
+// The paused mask is the LAST published frame mask (dword_11BC2D0, i.e.
+// GameApp::lastFeatureMask()) with kInputSuppress (0x100000) OR'd in and
+// kOptionsAndPanels (0x2000) cleared — computed once before the loop and reused
+// every paused tick. The HUD banner set/restore and the byte_63CC40
+// owner-collect suppress are engine-state side effects the host applies; the
+// reconstructed core is the paused-frame pump loop + its key-gated termination.
+// `keyState()` returns the current make-code each iteration (the host's
+// byte_67225C); the loop ends when it equals kUnpauseKeyScancode (57) or
 // RunFrameLoop returns 0. `maxFrames` (<0 = unbounded) bounds it; returns frames.
 int RunPauseLoop(GameApp& app, const std::function<int()>& keyState,
                  int maxFrames = -1);
 
+// The pending-action id that latches the end-round mode switch (gilde.exe
+// 0x527c14: cmp edx, 4BAh — dword_75BF38 == 0x4BA = 1210).
+constexpr int kEndRoundModeSwitchAction = 0x4BA;
+
 // gilde.exe 0x527be8 — VIBE_GameLogic_RunEndRoundScreen.
 //   v1 = VIBE_GameTick_Finalize(0, 0, "Runde beenden");  // build the end screen
 //   VIBE_Form_CenterChildWindows(v1);
+//   ecx = 0;                                             // 0x527c00
 //   do {
-//     if ( dword_75BF38 != -1 ) dword_631614 = 1;        // a pending action posts
-//     a flag
+//     if ( dword_75BF38 != -1 ) {
+//       if ( dword_75BF38 == 0x4BA ) ecx = 1;            // 0x527c14..0x527c1c
+//       dword_631614 = 1;                                // 0x527c21
+//     }
 //   } while ( VIBE_GameLogic_RunFrameLoop(425983, v1, 1) );
 //   VIBE_Form_Destroy(v1);
-//   if (...) { dword_63CC3C = 1; return Hud_FindModeIndex(InitOrLoadSession); }
+//   if ( ecx ) { dword_63CC3C = 1; Hud_FindModeIndex(InitOrLoadSession); }
 // The form build/center/destroy and the mode-switch tail are GUI/HUD leaves
 // (deferred). The reconstructed core is the loop body: each tick, if a pending
 // end-of-round action is posted (`pendingAction()` != -1, the original's
-// dword_75BF38 probe) raise the "advance" flag, then run a full-feature frame; the
-// loop ends when RunFrameLoop returns 0. Returns the number of frames run and sets
-// `*advanceRaised` (optional) if the pending-action flag was ever raised.
+// dword_75BF38 probe) raise the "advance" flag — and if that pending action id is
+// exactly kEndRoundModeSwitchAction (0x4BA) latch the mode-switch flag (the
+// original's ecx) — then run a full-feature frame; the loop ends when
+// RunFrameLoop returns 0. Returns the number of frames run; sets `*advanceRaised`
+// (optional) if the pending-action flag was ever raised and `*modeSwitchRaised`
+// (optional) if the 0x4BA action was ever seen (the post-loop
+// dword_63CC3C = 1 + Hud_FindModeIndex(InitOrLoadSession) trigger).
 int RunEndRoundScreen(GameApp& app, const std::function<int()>& pendingAction,
-                      int maxFrames = -1, bool* advanceRaised = nullptr);
+                      int maxFrames = -1, bool* advanceRaised = nullptr,
+                      bool* modeSwitchRaised = nullptr);
 
 } // namespace guild::app

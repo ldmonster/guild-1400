@@ -52,9 +52,10 @@ TEST(Cutscene2ReconMovie, FullPlaybackSavesAndRestoresGlobals) {
 
     ctl.musicSetTrackFade = [&](float v, int ms){ musicVols.push_back(v); (void)ms; };
     ctl.fadeRegister   = [&]() -> const guild::u8* { return nullptr; };
-    // Fade reports done immediately (bit 0x4 set, timer 0.0 -> not(0>0) -> exit).
+    // Fade reports done immediately (bit 0x4 set, timer -1.0 == music-fade
+    // complete; @0x534a8e the loop exits only when 0.0 > flt_62DA00).
     ctl.fadeStatusByte = [&]() -> guild::u8 { ++fadeStatusCalls; return 0x4; };
-    ctl.fadeTimer      = [&]() -> float { return 0.0f; };
+    ctl.fadeTimer      = [&]() -> float { return kMovieFadeTimerSentinel; };
     ctl.runFrameLoop   = [&](){};
     ctl.presentFrame   = [&](){ presented = true; };
     ctl.pollKeyboard   = [&](bool){};
@@ -97,7 +98,7 @@ TEST(Cutscene2ReconMovie, FadeLoopSpinsUntilDone) {
     ctl.fadeRegister = [&]() -> const guild::u8* { return nullptr; };
     // First 3 reads: not done (status 0). Then done.
     ctl.fadeStatusByte = [&]() -> guild::u8 { ++statusReads; return statusReads > 3 ? 0x4 : 0x0; };
-    ctl.fadeTimer = [&]() -> float { return 0.0f; };
+    ctl.fadeTimer = [&]() -> float { return kMovieFadeTimerSentinel; };  // music fade already complete
     ctl.runFrameLoop = [&](){ ++frames; };
     ctl.presentFrame = [&](){};
     ctl.pollKeyboard = [&](bool){};
@@ -118,9 +119,9 @@ TEST(Cutscene2ReconMovie, FadeTimerHoldsLoopWhenArmed) {
     ctl.musicSetTrackFade=[&](float,int){};
     ctl.fadeRegister=[&]()->const guild::u8*{return nullptr;};
     ctl.fadeStatusByte=[&]()->guild::u8{return 0x4;};   // always "done" bit
-    // timer < 0 (armed, == sentinel -1.0) keeps spinning since 0.0 > -1.0;
-    // becomes 0.0 after 2 frames.
-    ctl.fadeTimer=[&]()->float{ ++reads; return reads > 2 ? 0.0f : kMovieFadeTimerSentinel; };
+    // timer >= 0 (music fade in progress) keeps spinning — @0x534a8e jbe loops
+    // back while 0.0 <= flt_62DA00; MixerUpdate parks -1.0 after 2 frames.
+    ctl.fadeTimer=[&]()->float{ ++reads; return reads > 2 ? kMovieFadeTimerSentinel : 0.0f; };
     ctl.runFrameLoop=[&](){++frames;};
     ctl.presentFrame=[&](){}; ctl.pollKeyboard=[&](bool){}; ctl.acquireMouse=[&](bool){};
     ctl.pumpMessages=[&](){}; ctl.setFocus=[&](){}; ctl.sleep=[&](guild::u32){};

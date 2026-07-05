@@ -10,16 +10,19 @@ float FadeAlpha(int dir, u32 now, u32 startTick, u32 lastTick, int duration) {
     if ((u32)(now - lastTick) > 3u)
         raw = (float)((i32)lastTick + 3 - (i32)startTick);
 
-    double t;
+    // v23 is a FLOAT store (fstp dword) of the double ratio; the clamp compares
+    // and widens the float copy, not the 80-bit value.
+    float v23;
     if (dir & kFadeIn)
-        t = raw / (double)duration;
+        v23 = (float)(raw / (double)duration);
     else if (dir & kFadeOut)
-        t = 1.0 - raw / (double)duration;
+        v23 = (float)(1.0 - raw / (double)duration);
     else
-        t = 0.0; // neither bit set: original leaves t undefined; treat as 0
+        v23 = 0.0f; // neither bit set: original leaves v23 undefined; treat as 0
 
-    // clamp(t, 0, 1) exactly as the two staged compares in the original.
-    double low = (t <= 0.0) ? 0.0 : t;
+    // clamp(v23, 0, 1) exactly as the two staged compares in the original
+    // (v20 = (double)v23; v21/v25).
+    double low = (v23 <= 0.0f) ? 0.0 : (double)v23;
     float alpha = (low >= 1.0) ? 1.0f : (float)low;
     return alpha;
 }

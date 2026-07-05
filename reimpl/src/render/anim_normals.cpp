@@ -87,11 +87,14 @@ void CalculateAnimNormals(const std::vector<std::vector<float>>& frames,
 }
 
 std::uint8_t QuantizeNormalByte(float n) {
-    // (n + bias 1.0) * 0.5 * 255, truncated toward zero (Coord_ConvertX), clamped to a byte.
-    float q = (n + 1.0f) * 0.5f * 255.0f;
-    if (q <= 0.0f) return 0;
-    if (q >= 255.0f) return 255;
-    return static_cast<std::uint8_t>(static_cast<int>(q));   // truncate toward zero
+    // gilde.exe 0x5d0020 quantize: (n + 1.0) * dbl_628F04 (0.5) * dbl_628F0C
+    // (255.0) at x87/double precision, truncated toward zero (Coord_ConvertX
+    // RC=11), LOW BYTE stored with NO clamp (the y/z axes store the float sum
+    // before the double multiplies; for a unit normal the result is already in
+    // [0,255], so the old 0/255 clamps were dead for valid inputs and are
+    // removed to match the binary exactly). Bias vector = (1,1,1) @0x5CBA30.
+    float t = n + 1.0f;                       // v113/v114 float store
+    return static_cast<std::uint8_t>((int)((double)t * 0.5 * 255.0));
 }
 
 } // namespace guild::render

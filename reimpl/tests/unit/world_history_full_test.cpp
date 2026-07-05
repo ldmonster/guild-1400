@@ -258,7 +258,9 @@ TEST(WorldTutorialSteps, Chapter1Table) {
     CHECK_EQ(c1[0].kind, kTutNodeIntro + 1);         // chapter1 intro marker == 1
     CHECK_EQ(c1[0].mainTextId, 7362);
     CHECK(std::strcmp(c1[0].mainRes, "CHAPTER_1_INTRO") == 0);
-    CHECK_EQ(c1[10].kind, kTutNodeOutro);            // outro marker == 7
+    // Binary-verified (hardening): the chapter-1 outro writes the CHAPTER number
+    // as the kind (`*(_DWORD *)v73 = 1` at the 0x597f5c tail), not 7. Old pin: 7.
+    CHECK_EQ(c1[10].kind, 1);
     CHECK_EQ(c1[10].mainTextId, 7401);
     // Step A: main 7364, remind 7366, done 7367, arrow target 22.
     CHECK_EQ(c1[1].mainTextId, 7364);

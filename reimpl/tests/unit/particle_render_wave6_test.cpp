@@ -141,11 +141,13 @@ TEST(ParticleRenderW6, AlphaBlendDrawsIntoFrame) {
     // Pixels were written; the blend of white over black = (0xFFFF>>1)&mask = ~half.
     int nz = CountNonZero(fb);
     CHECK(nz > 0);
-    // 50/50 blend of white(0xFFFF) over black(0) with RGB565 mask 0xF7DE:
-    //   ((0xFFFF>>1)&0xF7DE) + ((0>>1)&0xF7DE) = 0x77DE
+    // 50/50 blend of white(0xFFFF) over black(0). The engine's blend mask
+    // (word_1406944, VIBE_Shape_InitColorMasks @0x5d4ad4) is applied AFTER the
+    // >>1, so it clears each channel's TOP bit: 565 -> 0x7BEF. Thus
+    //   ((0xFFFF>>1)&0x7BEF) + ((0>>1)&0x7BEF) = 0x7BEF.
     const u16* px = (const u16*)fb->pixels;
     // center pixel (32,32) is inside the quad.
-    CHECK_EQ((int)px[32 * fb->widthPx + 32], 0x77DE);
+    CHECK_EQ((int)px[32 * fb->widthPx + 32], 0x7BEF);
     SurfaceDestroy(fb);
 }
 
@@ -309,8 +311,9 @@ TEST(ParticleRenderW6, SeedParticlesDeterministicWithSeed) {
 // INTEGRATE — blend mask derivation (RGB565 / RGB555).
 // ===========================================================================
 TEST(ParticleRenderW6, BlendMaskFormats) {
-    // RGB565: clear bit0 of R@11, G@5, B@0 -> ~(0x800|0x20|0x01) = 0xF7DE, so a
-    // 50/50 white-over-black pixel == (0xFFFF>>1)&0xF7DE = 0x77DE.
+    // RGB565: the post->>1 blend mask (word_1406944 @0x5d4ad4) clears each
+    // channel's TOP bit = 0x7BEF, so a 50/50 white-over-black pixel ==
+    // (0xFFFF>>1)&0x7BEF = 0x7BEF.
     Surface* s565 = Make16(64, 64);        // SurfaceCreate default fmt = 565
     Texture tex = MakeSolidTex(0xFFFF);
     std::vector<u16> pal; MakePalette(pal, 0xFFFF);
@@ -321,7 +324,7 @@ TEST(ParticleRenderW6, BlendMaskFormats) {
     fx::render_system_to_surface(s565, sys, Identity(), ps, fx::kBlendAlpha, false);
     const u16* px = (const u16*)s565->pixels;
     bool found = false;
-    for (int i = 0; i < 64 * 64; ++i) if (px[i] == 0x77DE) found = true;
+    for (int i = 0; i < 64 * 64; ++i) if (px[i] == 0x7BEF) found = true;
     CHECK(found);
     SurfaceDestroy(s565);
 }

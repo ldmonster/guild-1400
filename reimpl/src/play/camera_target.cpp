@@ -25,14 +25,17 @@ void ComputeWorldTarget(CameraTargetGlobals& g, u16 mask) {
 
         if ((mask & 0x100) != 0) {
             // v2 = var_4 - (1.0 * flt_61E514)  == py - 6.0
-            float ay = py - (kCamOne * kCamOffsetY);
-            ay = (float)util::ConvertX((double)ay);   // frndint(trunc); fistp A4
-            g.targetX = (i32)ay;
+            // @0x4c08b8 fsubr var_4: the difference STAYS on the x87 stack
+            // (80-bit) into ConvertX + fistp — there is no fstp to a float
+            // local. Model the wide intermediate with double; narrowing to
+            // float first could round up across an integer boundary and
+            // change the truncation.
+            double ay = (double)py - (double)kCamOne * (double)kCamOffsetY;
+            g.targetX = (i32)util::ConvertX(ay);      // fistp A4
             // remaining st was the dup'd 1.0; fmul flt_61E518 -> 1.0*10.0;
-            // fadd var_8 (px) == px + 10.0
-            float ax = (kCamOne * kCamOffsetX) + px;
-            ax = (float)util::ConvertX((double)ax);   // fistp A0
-            g.targetY = (i32)ax;
+            // fadd var_8 (px) == px + 10.0  (@0x4c08cd, also kept on-stack)
+            double ax = (double)kCamOne * (double)kCamOffsetX + (double)px;
+            g.targetY = (i32)util::ConvertX(ax);      // fistp A0
         } else {
             float ay = (float)util::ConvertX((double)py); // fistp A4
             g.targetX = (i32)ay;

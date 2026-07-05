@@ -191,14 +191,18 @@ int RasterizeMeshList(const MeshList& list, Surface* fb, const SpanDispatch& dis
         // Re-project each surviving vertex whose +76 flag byte is >= 0 (sign bit
         // clear) through the projection scalars. The original:
         //   r = 1/z;  screenX = D0C*x*r + D18;  screenY = AF8*y*r + D10;
+        // x87 NOTE (disasm 0x5aee26..0x5aee59): the whole chain — fdiv [z],
+        // fmul, faddp — stays on the FPU stack at extended precision and is
+        // only narrowed to float by the final fstp to +0x10/+0x14. Model with
+        // double intermediates and a single float store per coordinate.
         for (i32 k = 0; k < scratch.outCount; ++k) {
             Vertex* v = clipped[k];
             if ((i8)VertexClipByte(v) >= 0) {     // *(char*)(v+76) >= 0
-                float r = 1.0f / v->z;            // 1.0 / v20[2]
-                float sx = proj.xScale * v->x * r + proj.xOffset; // D0C*x*r + D18
-                float sy = r * (proj.yScale * v->y) + proj.yOffset; // r*(AF8*y)+D10
-                v->screenX = sx;                  // v20[4]  (+0x10)
-                v->screenY = sy;                  // v20[5]  (+0x14)
+                double r = 1.0 / (double)v->z;    // fdiv dword ptr [eax+8]
+                v->screenX = (float)((double)proj.xScale * v->x * r
+                                     + proj.xOffset);   // fstp [eax+10h]
+                v->screenY = (float)(r * ((double)proj.yScale * v->y)
+                                     + proj.yOffset);   // fstp [eax+14h]
             }
         }
 

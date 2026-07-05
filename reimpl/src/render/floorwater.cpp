@@ -76,11 +76,13 @@ void FloodFillMask(u8* mask, int stride, int y, int x, u8 from, u8 to) {
 void FillHeightGradient(u8* dst, int lo, int hi, u8 loVal, u8 hiVal) {
     if (lo > hi) return;
     double v = (double)(float)loVal;                       // v9 = (float)a2
-    double step = (double)(hiVal - loVal) / (double)(hi - lo);
+    // v8 is a FLOAT stack slot: the quotient is fstp'd to dword and re-loaded
+    // each iteration (only the accumulator v4 stays 80-bit on the FPU).
+    const float step = (float)((double)(hiVal - loVal) / (double)(hi - lo));
     for (int i = lo; i <= hi; ++i) {
         // VIBE_Coord_ConvertX truncates (v + 0.5) toward zero.
         dst[i] = (u8)(int)util::ConvertX(v + (double)kHalf);
-        v += step;
+        v += (double)step;
     }
 }
 
@@ -262,7 +264,9 @@ WaterRegions BuildWaterRegions(const u8* waterMaskGrid, const u8* terrainHeights
             }
         }
         if (inRun) {                    // run reaches the row end
-            u8 hiVal = seedHeight(n - 1 + n * row - 1);
+            // 0x5ba95c: v39 = terrain[*a1 + *a1*row - 1] - 2 == the row's LAST
+            // cell (n*row + n - 1). (Harden fix: was off by one, n*row + n - 2.)
+            u8 hiVal = seedHeight(n - 1 + n * row);
             FillHeightGradient(heights + n * row, runLo, n - 1, loVal, hiVal);
         }
     }

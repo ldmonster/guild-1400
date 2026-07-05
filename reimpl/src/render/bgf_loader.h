@@ -117,6 +117,11 @@ struct BgfModel {
     u32 polyCount     = 0;
     u32 objectFlags   = 0;   // the +0x1D4 dword
     u32 dummyCount    = 0;
+    // Token-0x02 flag bits (VIBE_ModelIo_ReadFlagBits @0x5e43cc): the handler
+    // stores byte&1 at parse-ctx+0 and (byte>>1)&1 at ctx+1. LoadBgfFile
+    // @0x5d2348 runs the vertex-dedup stage ONLY when ctx+1 == 0.
+    u8  parseFlag0 = 0;      // ctx+0 = byte & 1
+    u8  parseFlag1 = 0;      // ctx+1 = (byte >> 1) & 1  (1 => skip vertex dedup)
 
     std::vector<BgfVertex>   vertices;   // size = vertexCount + 8 (engine allocates +8)
     std::vector<BgfPolygon>  polygons;

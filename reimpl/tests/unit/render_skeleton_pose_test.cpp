@@ -173,9 +173,12 @@ TEST(RenderPose, ComputeBoneMatrices_TwoBones) {
     CHECK_EQ(n, 2);
     CHECK_EQ(cap.n, 2);
 
-    // head: accT = 1.0 * ((5,6,7) - (1,1,1)) = (4,5,6); euler identity -> (0,0,0).
+    // head: gilde.exe 0x5cc0d0 new-record path stores accT = refT + w*(lerp-refT)
+    // (the binary ADDS refT back after the weighted delta: v52 = accT + refT), so
+    // accT = (1,1,1) + 1.0*((5,6,7)-(1,1,1)) = (5,6,7). Old pin (4,5,6) predates
+    // the refT re-add. Euler identity -> (0,0,0).
     CHECK(std::string(cap.names[0]) == "head");
-    CHECK(feq(cap.pos[0][0], 4.0f)); CHECK(feq(cap.pos[0][1], 5.0f)); CHECK(feq(cap.pos[0][2], 6.0f));
+    CHECK(feq(cap.pos[0][0], 5.0f)); CHECK(feq(cap.pos[0][1], 6.0f)); CHECK(feq(cap.pos[0][2], 7.0f));
     CHECK(feq(cap.euler[0][0], 0.0f)); CHECK(feq(cap.euler[0][1], 0.0f)); CHECK(feq(cap.euler[0][2], 0.0f));
     // hand: accT = 2.0 * ((10,0,0) - 0) = (20,0,0).
     CHECK(std::string(cap.names[1]) == "hand");
@@ -202,8 +205,10 @@ TEST(RenderPose, ComputeBoneMatrices_NameDedupeAndCap) {
     int n = ComputeBoneMatrices(groups, 1, names, 1, pal, nullptr, nullptr);
     CHECK_EQ(n, 1);
     CHECK_EQ(pal[0].count, 2);
-    // accT = (4 + 4) = 8 in x; average is only applied to the rotation rows, not accT.
-    CHECK(feq(pal[0].accT[0], 8.0f));
+    // gilde.exe 0x5cc0d0 existing-record path: delta = lerp - CURRENT accT (not
+    // refT), accT += w*delta. First track: accT = 0 + 1*(4-0) = 4; second track:
+    // delta = 4-4 = 0, accT stays 4. Old pin 8 assumed refT-based accumulation.
+    CHECK(feq(pal[0].accT[0], 4.0f));
 }
 
 // ================== Object morph / lighting vertex walks ===================

@@ -1,7 +1,11 @@
 #include "render/agf_loader.h"
 
+#include <array>
 #include <cmath>
 #include <cstring>
+#include <vector>
+
+#include "util/math.h"   // TriangleNormal / VectorNormalize (0x5cb824 / 0x5cb148)
 
 // gilde.exe — .BGF "AGF" token-script reader (the shipped Objects.BIN format).
 //
@@ -118,8 +122,15 @@ void StripExt(std::string& s) {
 void H_ReadByte4(Cursor& c, ParseState& s) { if (!c.Skip(4)) s.ok = false; }
 // 0x5E4414 VIBE_ModelIo_ReadZeroedDword — ReadDword into a discarded local.
 void H_ReadDword(Cursor& c, ParseState& s) { u32 v; if (!c.ReadU32(&v)) s.ok = false; }
-// 0x5E43CC VIBE_ModelIo_ReadFlagBits — 1 byte (two flag bits, discarded here).
-void H_ReadFlagByte(Cursor& c, ParseState& s) { u8 b; if (!c.ReadByte(&b)) s.ok = false; }
+// 0x5E43CC VIBE_ModelIo_ReadFlagBits — 1 byte split into two flag bits stored at
+// parse-ctx+0 / ctx+1 (`*ctx = b & 1; ctx[1] = (b >> 1) & 1`). ctx+1 gates the
+// vertex-dedup stage in LoadBgfFile @0x5d2348 (`if (!v145[1]) ...dedup...`).
+void H_ReadFlagByte(Cursor& c, ParseState& s) {
+    u8 b;
+    if (!c.ReadByte(&b)) { s.ok = false; return; }
+    s.m->parseFlag0 = b & 1;
+    s.m->parseFlag1 = (b >> 1) & 1;
+}
 // 0x5E43A8 VIBE_ModelIo_ReadNameString — ReadString into a discarded local.
 void H_ReadNameStr(Cursor& c, ParseState& s) { std::string t; if (!c.ReadString(t)) s.ok = false; }
 // 0x5E43BC VIBE_ModelIo_ReadDwordField — ReadDword (discarded).
@@ -435,60 +446,116 @@ bool LoadAgfModel(const u8* data, size_t size, BgfModel& out) {
 }
 
 // gilde.exe 0x5D1B54 — VIBE_Mesh_ComputeBoundingExtents.
+// Faithful transcription of the binary's observable outputs over the BgfModel
+// view (the slack-slot corner writes over the raw engine Mesh record live in
+// render/mesh_postprocess.cpp — same address, same math, verified together):
+//   pass 1: radius2 (+468) = max over vertices of sqrt(x²+y²+z²) (double sqrt
+//           compared against the float accumulator; float store on update);
+//           radius (+472) initially the same value; centroid zeroed.
+//   pass 2 (count > 0): AABB accumulators seeded ±1e10 with the binary's mixed
+//           `<` / `>=` / `<=` compare directions; radius (+472) OVERWRITTEN with
+//           the AABB diagonal; centroid = sum of the 8 corners * 0.125
+//           (flt_628FC0), i.e. the AABB midpoints.
 BgfBounds ComputeBoundingExtents(const BgfModel& m) {
     BgfBounds b;
-    if (m.vertices.empty()) return b;
-    b.min[0] = b.max[0] = m.vertices[0].pos[0];
-    b.min[1] = b.max[1] = m.vertices[0].pos[1];
-    b.min[2] = b.max[2] = m.vertices[0].pos[2];
-    float maxR = 0.0f;
     const u32 n = m.vertexCount ? m.vertexCount : (u32)m.vertices.size();
-    for (u32 i = 0; i < n && i < m.vertices.size(); ++i) {
+    const u32 lim = (n < m.vertices.size()) ? n : (u32)m.vertices.size();
+
+    // ---- pass 1: max-|vertex| radius (i seeded 0.0) ----
+    float maxR = 0.0f;
+    for (u32 i = 0; i < lim; ++i) {
         const float* v = m.vertices[i].pos;
-        float r = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-        if (r > maxR) maxR = r;
-        for (int k = 0; k < 3; ++k) {
-            if (v[k] < b.min[k]) b.min[k] = v[k];
-            if (v[k] > b.max[k]) b.max[k] = v[k];
-        }
+        double r = std::sqrt((double)v[0] * v[0] + (double)v[1] * v[1]
+                             + (double)v[2] * v[2]);
+        if (r > (double)maxR) maxR = (float)r;
     }
-    b.radius = maxR;
+    b.radius2 = maxR;    // +468 = +472 (copy)
+    b.radius  = maxR;    // +472 before the diagonal overwrite
+    b.centroid[0] = b.centroid[1] = b.centroid[2] = 0.0f;   // +104/108/112
+
+    if (lim == 0) return b;
+
+    // ---- pass 2: AABB (accumulators seeded ±1e10; binary compare directions) --
+    float minX = 1.0e10f, minY = 1.0e10f, minZ = 1.0e10f;    // v38/v40/v42
+    float maxX = -1.0e10f, maxY = -1.0e10f, maxZ = -1.0e10f; // v31/v33/v35
+    for (u32 i = 0; i < lim; ++i) {
+        const float* v = m.vertices[i].pos;
+        minX = (minX < (double)v[0]) ? minX : v[0];
+        minY = (minY >= (double)v[1]) ? v[1] : minY;
+        minZ = (minZ >= (double)v[2]) ? v[2] : minZ;
+        maxX = (maxX <= (double)v[0]) ? v[0] : maxX;
+        maxY = (maxY <= (double)v[1]) ? v[1] : maxY;
+        maxZ = (maxZ <= (double)v[2]) ? v[2] : maxZ;
+    }
+    b.min[0] = minX; b.min[1] = minY; b.min[2] = minZ;
+    b.max[0] = maxX; b.max[1] = maxY; b.max[2] = maxZ;
+
+    // ---- diagonal overwrites +472 (float subs stored, double sqrt, fstp) ----
+    float dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;  // v32/v34/v36
+    b.radius = (float)std::sqrt((double)dx * dx + (double)dy * dy + (double)dz * dz);
+
+    // ---- centroid = (corner sum) * 0.125 ----
+    // The binary sums the 8 written corner vertices IN SLOT ORDER on the FPU
+    // stack (80-bit, no intermediate stores) and multiplies by flt_628FC0
+    // (0.125) with one float store per axis — modeled with double accumulation
+    // in the same order. Corner slot k has x = (k&1 ? max : min), y = (k&2 ?
+    // max : min), z = (k&4 ? max : min).
+    double sx = 0.0, sy = 0.0, sz = 0.0;
+    for (int k = 0; k < 8; ++k) {
+        sx += (k & 1) ? (double)maxX : (double)minX;
+        sy += (k & 2) ? (double)maxY : (double)minY;
+        sz += (k & 4) ? (double)maxZ : (double)minZ;
+    }
+    b.centroid[0] = (float)(sx * 0.125);
+    b.centroid[1] = (float)(sy * 0.125);
+    b.centroid[2] = (float)(sz * 0.125);
     return b;
 }
 
 // gilde.exe 0x5D1A6C — VIBE_Mesh_ComputeVertexNormals.
+//   Pass 1: per polygon, VIBE_Math_TriangleNormal @0x5cb824 computes the
+//   NORMALIZED face normal into the poly record (+44/+48/+52).
+//   Pass 2: per vertex, sum the (already normalized) face normals of every
+//   referencing polygon (float adds in poly order), then VIBE_Math_VectorNormalize
+//   @0x5cb148 (bit-test zero guard + reciprocal multiply) into the vertex normal.
+// (The engine-Mesh-record form of the same address lives in
+// render/mesh_postprocess.cpp; this is the BgfModel view of the same math.)
 void ComputeVertexNormals(BgfModel& m) {
     const u32 nv = m.vertexCount ? m.vertexCount : (u32)m.vertices.size();
     if (nv == 0 || m.vertices.empty()) return;
+    const u32 lim = (nv < m.vertices.size()) ? nv : (u32)m.vertices.size();
 
-    // Accumulate face normals onto each vertex (VIBE_Math_TriangleNormal then the
-    // per-vertex sum the engine performs over the polys that reference it).
-    for (auto& v : m.vertices) { v.normal[0] = v.normal[1] = v.normal[2] = 0.0f; }
-
-    for (const BgfPolygon& p : m.polygons) {
+    // ----- pass 1: per-poly NORMALIZED face normals (poly +44/+48/+52) -----
+    std::vector<std::array<float, 3>> face(m.polygons.size(), {0.0f, 0.0f, 0.0f});
+    for (size_t n = 0; n < m.polygons.size(); ++n) {
+        const BgfPolygon& p = m.polygons[n];
         if (p.vtx[0] >= m.vertices.size() || p.vtx[1] >= m.vertices.size() ||
             p.vtx[2] >= m.vertices.size())
-            continue;
-        const float* a = m.vertices[p.vtx[0]].pos;
-        const float* b = m.vertices[p.vtx[1]].pos;
-        const float* cc = m.vertices[p.vtx[2]].pos;
-        float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
-        float e2[3] = {cc[0] - a[0], cc[1] - a[1], cc[2] - a[2]};
-        float fn[3] = {
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-        };
-        for (int k = 0; k < 3; ++k) {
-            m.vertices[p.vtx[0]].normal[k] += fn[k];
-            m.vertices[p.vtx[1]].normal[k] += fn[k];
-            m.vertices[p.vtx[2]].normal[k] += fn[k];
-        }
+            continue;   // memory-safety only; parsed models are in range
+        float a[3] = {m.vertices[p.vtx[0]].pos[0], m.vertices[p.vtx[0]].pos[1],
+                      m.vertices[p.vtx[0]].pos[2]};
+        float b[3] = {m.vertices[p.vtx[1]].pos[0], m.vertices[p.vtx[1]].pos[1],
+                      m.vertices[p.vtx[1]].pos[2]};
+        float c[3] = {m.vertices[p.vtx[2]].pos[0], m.vertices[p.vtx[2]].pos[1],
+                      m.vertices[p.vtx[2]].pos[2]};
+        guild::util::TriangleNormal(a, b, c, face[n].data());
     }
-    for (u32 i = 0; i < nv && i < m.vertices.size(); ++i) {
-        float* nrm = m.vertices[i].normal;
-        float len = std::sqrt(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]);
-        if (len > 1e-12f) { nrm[0] /= len; nrm[1] /= len; nrm[2] /= len; }
+
+    // ----- pass 2: per-vertex gather + VectorNormalize ----------------------
+    for (u32 i = 0; i < lim; ++i) {
+        float acc[3] = {0.0f, 0.0f, 0.0f};   // v15/v16/v17
+        for (size_t n = 0; n < m.polygons.size(); ++n) {
+            const BgfPolygon& p = m.polygons[n];
+            if (i == p.vtx[0] || i == p.vtx[1] || i == p.vtx[2]) {
+                acc[0] += face[n][0];
+                acc[1] += face[n][1];
+                acc[2] += face[n][2];
+            }
+        }
+        guild::util::VectorNormalize(acc);
+        m.vertices[i].normal[0] = acc[0];
+        m.vertices[i].normal[1] = acc[1];
+        m.vertices[i].normal[2] = acc[2];
     }
 }
 

@@ -35,7 +35,7 @@ namespace guild::render { struct SceneHeader; } // scene_load.h (read-only hando
 //       r' = lerp(rowA.r, rowB.r, t) * scale
 //       g' = lerp(rowA.g, rowB.g, t) * scale
 //       b' = lerp(rowA.b, rowB.b, t) * scale
-//       luma = b'*0.59 + g'*0.30 + r'*0.11   (flt_62872C/28/30 = .30/.59/.11)
+//       luma = g'*0.59 + r'*0.30 + b'*0.11   (flt_628728=.59 G, flt_62872C=.30 R, flt_628730=.11 B)
 //   * each of the 6 fog/shade colour triples is a per-channel lerp where the
 //     16-bit signed channels are blended with weights (1-t) and t, then
 //     truncated toward zero (VIBE_Coord_ConvertX).

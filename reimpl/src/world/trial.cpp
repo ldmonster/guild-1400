@@ -49,19 +49,23 @@ TrialScore TrialComputeEvidenceScore(const CrimeRecord* crimes, int count,
 
     const float weight = TrialWantedWeight(wantedLevel);
 
-    // --- score pass (v36 loop): sum penalty*weight over every collected crime.
-    double score = 0.0;
+    // --- score pass: sum penalty*weight over every collected crime.
+    // PRECISION (0x4a0eb8): the accumulator v318 is a 32-bit FLOAT stack slot
+    // ([esp+B4Ch]); each `v318 = (double)v304 * v319 + v318` is computed on the
+    // x87 in extended precision, then stored back through `fstp dword` — the
+    // running sum is re-rounded to float every iteration.
+    float score = 0.0f;  // v318
     for (int i = 0; i < count; ++i) {
         LawRecord law;
         if (lawLookup && lawLookup(TrialCrimeLawType(crimes[i]), &law, ctx)) {
-            // v351 = law penalty read as int (+24 word, sign-extended by the
-            // original via (double)v351); LawRecord::penalty is the i16 at +16,
-            // but the trial reads the +24 dword field as the score term. The
-            // accumulated form uses the law-record's penalty magnitude.
-            score += static_cast<double>(law.penalty) * static_cast<double>(weight);
+            // v304 = law penalty read as int (FILD on the record dword), times
+            // the float weight v319, added to the float accumulator.
+            score = static_cast<float>(static_cast<double>(law.penalty)
+                                           * static_cast<double>(weight)
+                                       + score);
         }
     }
-    out.score = static_cast<float>(score);
+    out.score = score;
 
     // --- dedup pass (v383/v381 loop): count distinct law-type groups.
     // A small consumed[] mirror of the v322 "consumed" marker (==-1 means merged).

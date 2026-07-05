@@ -74,8 +74,11 @@ constexpr int kRoadTopMargin     = 16;   // Y base offset / bottom-margin reserv
 struct RoadNode {                  // sizeof == 44 in the original
     u16 childType;     // +0x00 word_12CDD68 — entry type id ([rec+165] copy)
     u16 reserved02;    // +0x02 word_12CDD6A — init 0xFFFF (parent index scratch)
-    i32 coordX;        // +0x04 dword_12CDD6C — laid-out X (final placement)
-    i32 coordY;        // +0x08 dword_12CDD70 — laid-out Y (filled by BuildUpgradeTree)
+    i32 coordX;        // +0x04 dword_12CDD6C — RAW slot; node j's laid-out X is
+                       //   stored one record up (abs 0x30+44j, aliasing `cost`);
+                       //   the consumer 0x59361c reads LOWORD(dword_12CDD98[11j])
+    i32 coordY;        // +0x08 dword_12CDD70 — RAW slot; node j's laid-out Y is
+                       //   one record up (abs 0x34+44j, LOWORD(dword_12CDD9C[11j]))
     i32 link10;        // +0x10 dword_12CDD78 — init -1 (scratch link slot)
     i32 link14;        // +0x14 dword_12CDD7C — init -1
     i32 link18;        // +0x18 dword_12CDD80 — init -1

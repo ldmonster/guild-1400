@@ -15,12 +15,6 @@ constexpr float kHalf   = 0.5f;
 
 // Shared empty span for out-of-range frame requests.
 const std::vector<float> kEmptyPoints;
-
-inline int ClampIdx(int v, int lo, int hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
 } // namespace
 
 const std::vector<float>& AnimClip::FramePoints(int f) const {
@@ -40,42 +34,70 @@ bool LoadAnimation(const u8* data, size_t size, const char* name, AnimClip& out,
 }
 
 // gilde.exe 0x5c9394 — VIBE_Anim_ComputeMorphWeights.
-//   The engine computes v = phase / segDuration (seg = frame[from].duration, read at
-//   frame+4), optionally cosine-eases v at the clip extremes (flag bit 4), then
-//   returns *a2 = 1 - v ("from" weight) and *a3 = v ("to" weight). Here `ease`
-//   selects the inner-segment vs end-segment cosine shaping; the linear path (no
-//   ease) is v = phase/seg straight.
+//   Object state mapped to parameters: obj+0x00 -> fromFrame, obj+0x04 -> toFrame,
+//   obj+0x08 -> phase, obj+0x64 -> offset, obj+0x6D bit1 (0x2) -> reverse, bit2
+//   (0x4) -> ease. Frames live at clip+0x15C (192-byte stride, duration at +4);
+//   frameCount at clip+0x148. All frame/count comparisons are SIGNED (jg/jle/jl).
+//
+//   Forward branch (flags&2 == 0, disasm 0x5c9475..0x5c9505):
+//     inv = (float)(1.0 / (double)frames[fromFrame].dur)      (fstp @0x5c9496)
+//     v   = (float)((double)phase * inv)                      (fstp @0x5c949f)
+//     ease (flags&4):
+//       tiny clip  (fc<=2 && fromFrame+1 >= fc-1): v = 1-(cos(v*pi)+1)*0.5
+//       trailing   (fc-1 <= toFrame):              v = 1-(cos((v+1)*pi/2)+1)
+//       leading    (fromFrame <= 0):               v = 1-cos(v*pi/2)
+//       otherwise: no shaping (branch @0x5c9528 -> 0x5c94d9)
+//     wTo (*a2) = (float)((double)inv*offset + v)  (fstp @0x5c94e7)
+//     wFrom (*a3) = (float)(1.0 - wTo)
+//   Reverse branch (flags&2, disasm 0x5c93af..0x5c944e) uses frames[toFrame].dur,
+//   tests tiny/leading on toFrame and trailing on fromFrame, and yields
+//     wFrom (*a3) = (float)(v - (double)inv*offset), wTo (*a2) = 1 - wFrom.
+//   There is NO [0,1] clamp and NO zero-duration guard in the original.
 MorphWeights ComputeMorphWeights(const AnimClip& clip, int fromFrame, int toFrame,
-                                 int phase, bool ease) {
+                                 int phase, bool ease, float offset, bool reverse) {
     MorphWeights w;
     if (!clip.valid || clip.FrameCount() <= 0) return w;
-    int fc = clip.FrameCount();
-    fromFrame = ClampIdx(fromFrame, 0, fc - 1);
-    toFrame   = ClampIdx(toFrame, 0, fc - 1);
+    const int fc = clip.FrameCount();
+    const auto& frames = clip.anim.frames;
+    // Memory-safety bound only (the original indexes raw memory); no value clamps.
+    const int durIdx = reverse ? toFrame : fromFrame;
+    if (durIdx < 0 || durIdx >= (int)frames.size()) return w;
 
-    // seg = the "from" frame's segment duration (engine: *(192*from + frames + 4)).
-    int seg = clip.anim.frames.empty() ? 0 : clip.anim.frames[(size_t)fromFrame].duration;
-    float v;
-    if (seg <= 0) {
-        v = 0.0f;
+    // fild dur; fld1; fdivrp -> 80-bit reciprocal, fstp to float.
+    float inv = (float)(1.0 / (double)frames[(size_t)durIdx].duration);
+    // fild phase; fmul inv -> 80-bit product, fstp to float.
+    float v = (float)((double)phase * inv);
+
+    if (reverse) {
+        if (ease) {
+            if (fc <= 2 && toFrame <= 0)          // 0x5c93e5/0x5c93ee -> 0x5c944f
+                v = (float)(1.0 - (std::cos((double)v * kPi) + 1.0) * kHalf);
+            else if (toFrame <= 0)                // 0x5c93f4 -> 0x5c9467
+                v = (float)(1.0 - std::cos((double)v * kHalfPi));
+            else if (fc - 1 <= fromFrame)         // 0x5c9403 -> 0x5c9407
+                v = (float)(1.0 - (std::cos(((double)v + 1.0) * kHalfPi) + 1.0));
+        }
+        // fmul offset; fsubr v -> v - inv*offset at 80-bit, fstp float (0x5c9430).
+        float vFrom = (float)((double)v - (double)inv * offset);
+        w.wFrom = vFrom;
+        w.wTo   = (float)(1.0 - vFrom);
     } else {
-        v = (float)phase / (float)seg;
+        if (ease) {
+            if (fc > 2 || fromFrame + 1 < fc - 1) {   // 0x5c94ae/0x5c94b7
+                if (fc - 1 <= toFrame)                // 0x5c9510 -> 0x5c9514
+                    v = (float)(1.0 - (std::cos(((double)v + 1.0) * kHalfPi) + 1.0));
+                else if (fromFrame <= 0)              // 0x5c9528 -> 0x5c952d
+                    v = (float)(1.0 - std::cos((double)v * kHalfPi));
+                // else: no shaping
+            } else {                                  // tiny clip -> 0x5c94bb
+                v = (float)(1.0 - (std::cos((double)v * kPi) + 1.0) * kHalf);
+            }
+        }
+        // fmul offset; fadd v -> inv*offset + v at 80-bit, fstp float (0x5c94e7).
+        float vTo = (float)((double)inv * offset + v);
+        w.wTo   = vTo;
+        w.wFrom = (float)(1.0 - vTo);
     }
-
-    if (ease) {
-        // The engine cosine-eases the blend so it is C1 across segment joins:
-        //   end-of-clip hold     -> (cos(v*pi)+1)*0.5
-        //   leading half-segment -> cos(v*pi/2)
-        //   trailing half-segment-> 1 - (cos((v+1)*pi/2)+1)
-        // We use the symmetric mid-segment form (smoothstep-like) which matches the
-        // common interior case ComputeMorphWeights takes for v in [0,1].
-        v = (std::cos((v + 1.0f) * kPi) + 1.0f) * kHalf;
-        (void)kHalfPi;
-    }
-    if (v < 0.0f) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
-    w.wTo = v;
-    w.wFrom = 1.0f - v;
     return w;
 }
 

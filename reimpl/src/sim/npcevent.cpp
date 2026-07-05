@@ -15,7 +15,8 @@ static inline void StampClock(GameTime& dst) { dst = NpcClock(); }
 HeRecord* NpcEvent_RestorePoseReset(HeRecord* h) {
     He_ApptTime(h) = He_SavedTime(h);   // +82 <- +68 (14-byte copy)
     He_State(h) = 0;                    // +112
-    He_WaitCounter(h) = 0;              // +180
+    // 0x4d5790: mov dword ptr [eax+0B4h], 0 — full DWORD store at +180.
+    He_ScanStep(h) = 0;                 // +180 (dword)
     return h;
 }
 
@@ -23,7 +24,8 @@ HeRecord* NpcEvent_RestorePoseReset(HeRecord* h) {
 int NpcEvent_RestorePoseSetRandom(HeRecord* h) {
     He_ApptTime(h) = He_SavedTime(h);                 // +82 <- +68
     int r = static_cast<u16>(util::RandomModulo(6));  // pose index 0..5
-    He_WaitCounter(h) = static_cast<u16>(r);          // +180
+    // 0x4d63d6/0x4d63db: and eax,0FFFFh; mov [edx+0B4h], eax — DWORD store.
+    He_ScanStep(h) = r;                               // +180 (dword)
     return r;
 }
 
@@ -41,9 +43,10 @@ HeRecord* NpcEvent_SetupDuration10Reset(HeRecord* h) {
     He_ApptTime(h).hour   = 10;        // +86 := 10
     He_ApptTime(h).minute = 0;         // +88
     He_ApptTime(h).second = 0;         // +92
-    He_Counter(h) = 0;                 // +172
-    He_Deadline(h).day = 0;            // +176
-    He_WaitCounter(h) = 0;             // +180
+    // 0x4d760b/0x4d7615/0x4d761f: three DWORD stores of 0 at +172/+176/+180.
+    He_Counter172(h) = 0;              // +172 (dword)
+    He_Deadline(h).day = 0;            // +176 (dword)
+    He_ScanStep(h) = 0;                // +180 (dword)
     return h;
 }
 
@@ -52,8 +55,9 @@ HeRecord* NpcEvent_InitRandomDurationEntity(HeRecord* h) {
     if ((He_Flags(h) & kHeAlreadySpawned) == 0) {
         const auto& hooks = GetNpcLeafHooks();
         i32 baseTextId = hooks.lawBaseTextId ? hooks.lawBaseTextId() : 51;
-        He_WaitCounter(h) = static_cast<u16>(-1);     // +180 := -1
-        He_Counter(h) = static_cast<u16>(baseTextId); // +172
+        // 0x4d6674: mov dword ptr [ecx+0B4h], 0FFFFFFFFh — DWORD -1 at +180.
+        He_ScanStep(h) = -1;                          // +180 := -1 (dword)
+        He_Counter(h) = static_cast<u16>(baseTextId); // +172 (word store, 0x4d6683)
         StampClock(He_ApptTime(h));                   // +82 <- clock
         i32 handle = hooks.queueRequestEntity29
                        ? hooks.queueRequestEntity29(0, h) : 0;

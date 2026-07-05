@@ -34,10 +34,10 @@ u16 FrameDataInterpolate(int x, int y, const u8* frame, const FrameBlitState& st
         clipped = true;
     } else {
         if (x > st.clipX1)
-            return (u16)y;                  // original returns a1 (== x register) here
+            return (u16)x;                  // original returns a1 (the x register)
         int xEnd = x + width;
         if (xEnd < st.clipX0)
-            return (u16)y;
+            return (u16)x;
         if (xEnd > st.clipX1) {
             clipped = true;
             rightSkip = xEnd - st.clipX1;
@@ -48,7 +48,7 @@ u16 FrameDataInterpolate(int x, int y, const u8* frame, const FrameBlitState& st
     // ---- Y clip (against [clipY0, clipY1)) ----
     if (y >= st.clipY0) {
         if (y > st.clipY1 || y + height < st.clipY0)
-            return (u16)y;
+            return (u16)x;                  // a1 (possibly already left-clipped)
         if (y + height > st.clipY1) {
             clipped = true;
             height = st.clipY1 - y;
@@ -141,16 +141,17 @@ RlePreamble RleSetup(int x, int y, const u8* frame, const FrameBlitState& st) {
     const u8* rowTable = frame + rowTableOff;
 
     int rows = height;             // dword_64AAxx (visible-row count)
-    int firstByteOff = (int)frame_off::kPayload;  // default: rowTable[0] but the
-    // original indexes rowTable by the clipped top, reading the stored byte offset.
+    // gilde.exe 0x5FC200/0x5FBC10/0x5FBFD4/0x5FBB24: the first-row byte offset
+    // DEFAULTS to 50 (the payload start: `dword_64AAC0 = 50`); the row table is
+    // consulted ONLY when the top is clipped (`if (clipY0 - y > 0) dword_64AAC0 =
+    // *(rowTable + 4*top)`). It is NOT read in the unclipped case.
+    int firstByteOff = (int)frame_off::kPayload;  // 50
     int yy = y;
     int top = st.clipY0 - y;
     if (top > 0) {
         firstByteOff = (int)GetU32(rowTable + 4 * top);   // *(rowTable + 4*top)
         rows -= top;
         yy = st.clipY0;
-    } else {
-        firstByteOff = (int)GetU32(rowTable + 0);
     }
     int bottom = (y + height) - st.clipY1;                 // overflow past clipY1
     if (bottom > 0)
@@ -205,7 +206,10 @@ void FrameTableValidate(int x, int y, const u8* frame, const FrameBlitState& st)
                         std::memcpy(d, &dd, 4);
                         d += 2;
                     }
-                    c = save + 2u * n;     // skip the n source words
+                    // gilde.exe 0x5FC200 case 2: the source skip re-reads the
+                    // run count as a 16-bit word (`mov cx, [esi-4]; shl; add`),
+                    // so only the LOW 16 bits of n advance the cursor.
+                    c = save + 2u * (n & 0xFFFFu);
                     break;
                 }
                 case 3: {  // palette remap of the existing dst pixels
@@ -213,7 +217,7 @@ void FrameTableValidate(int x, int y, const u8* frame, const FrameBlitState& st)
                         u16 dv = *d;
                         *d++ = st.remapTable ? st.remapTable[dv] : dv;
                     }
-                    c += 2u * n;           // consume the n source words
+                    c += 2u * (n & 0xFFFFu);  // 16-bit count re-read (see case 2)
                     break;
                 }
                 case 5: {  // solid fill
@@ -223,7 +227,7 @@ void FrameTableValidate(int x, int y, const u8* frame, const FrameBlitState& st)
                         std::memcpy(d, &fc, 2); std::memcpy(d + 1, &fc, 2);
                         d += 2;
                     }
-                    c += 2u * n;
+                    c += 2u * (n & 0xFFFFu);  // 16-bit count re-read (see case 2)
                     break;
                 }
                 default: { // mode 0: straight copy
@@ -261,7 +265,7 @@ void FrameTableNext(int x, int y, const u8* frame, const FrameBlitState& st) {
             int skipBytes = GetI32(c);
             u32 n = GetU32(c + 4);
             d = (u16*)((u8*)d + skipBytes);
-            xCur += skipBytes >> 1;       // advance X by skip pixels
+            xCur += (int)((u32)skipBytes >> 1);  // shr (UNSIGNED) skip/2 pixels
             c += 8;
             if (mode == 0 || mode > 5) {
                 for (u32 i = 0; i < n; ++i) {
@@ -279,7 +283,7 @@ void FrameTableNext(int x, int y, const u8* frame, const FrameBlitState& st) {
                     }
                     d += 2; ++xCur;
                 }
-                c += 2u * n;
+                c += 2u * (n & 0xFFFFu);  // 16-bit count re-read (mov cx,[esi-4])
             } else if (mode == 3) {
                 for (u32 i = 0; i < n; ++i) {
                     if (xCur > st.clipX0 && xCur < st.clipX1) {
@@ -288,14 +292,14 @@ void FrameTableNext(int x, int y, const u8* frame, const FrameBlitState& st) {
                     }
                     ++xCur; ++d;
                 }
-                c += 2u * n;
+                c += 2u * (n & 0xFFFFu);  // 16-bit count re-read
             } else if (mode == 5) {
                 for (u32 i = 0; i < n; ++i) {
                     if (xCur > st.clipX0 && xCur < st.clipX1)
                         *d = st.fillColor16;
                     ++xCur; ++d;
                 }
-                c += 2u * n;
+                c += 2u * (n & 0xFFFFu);  // 16-bit count re-read
             } else { // modes 1 and 4: additive blend (no X-clip in the original)
                 if (n & 1) { *d = (u16)(GetU16(c) + (((*d) >> 1) & 0x3DEF)); c += 2; ++d; }
                 for (u32 i = n >> 1; i; --i) {
@@ -337,6 +341,9 @@ void FrameTableBounds(int x, int y, const u8* frame, const FrameBlitState& st) {
                     }
                 }
             } else if (mode == 2) {
+                // gilde.exe 0x5FBFD4 case 2: the darken masks are the IMMEDIATES
+                // 0x3DEF / 0x3DEFBDEF here (NOT the word_1406944/dword_1406930
+                // globals that Validate/Next use).
                 int skipBytes = GetI32(c); u32 n = GetU32(c + 4); c += 8;
                 d = (u16*)((u8*)d + skipBytes);
                 if (n) {
@@ -346,7 +353,7 @@ void FrameTableBounds(int x, int y, const u8* frame, const FrameBlitState& st) {
                         dd = (dd >> 1) & 0x3DEFBDEFu;
                         std::memcpy(d, &dd, 4); d += 2;
                     }
-                    c += 2u * n;
+                    c += 2u * (n & 0xFFFFu);  // 16-bit count re-read
                 }
             } else if (mode == 3) {
                 int skipBytes = GetI32(c); u32 n = GetU32(c + 4); c += 8;
@@ -356,13 +363,16 @@ void FrameTableBounds(int x, int y, const u8* frame, const FrameBlitState& st) {
                         u16 dv = *d;
                         *d++ = st.remapTable ? st.remapTable[dv] : dv;
                     }
-                    c += 2u * n;
+                    c += 2u * (n & 0xFFFFu);  // 16-bit count re-read
                 }
             } else {
                 // default (incl. mode 0): 8bpp index -> 16bpp via indexTable; here
-                // a run carries `n` BYTE indices (1 byte each).
+                // a run carries `n` BYTE indices (1 byte each). The run's skip
+                // field counts PIXELS in THIS path: gilde.exe 0x5fc0c6 doubles it
+                // (`mov ecx,[esi]; shl ecx,1; add edi,ecx`), unlike modes 1/2/3
+                // which add the raw byte skip.
                 int skipBytes = GetI32(c); u32 n = GetU32(c + 4); c += 8;
-                d = (u16*)((u8*)d + skipBytes);
+                d = (u16*)((u8*)d + 2 * (ptrdiff_t)skipBytes);
                 for (u32 i = 0; i < n; ++i) {
                     u8 idx = *c++;
                     *d++ = st.indexTable ? st.indexTable[idx] : idx;
@@ -374,39 +384,67 @@ void FrameTableBounds(int x, int y, const u8* frame, const FrameBlitState& st) {
 }
 
 // gilde.exe 0x5FBB24 — VIBE_FrameTable_Index. The plain (no X-clip) copy path.
+// UNLIKE the other three blitters this one addresses an 8bpp destination: the
+// binary computes dest = surface + y*stride + x with NO doubling anywhere
+// (`v8 = a1 + a4; v15 = v9 * dword_64A1C8 + v8`) and the between-row step is
+// stride - width BYTES (`LOWORD(v7) = dword_64A1C8 - a3[3]`, not shifted).
+// Pixels are BYTES here (odd: one byte; pairs: a 16-bit word = 2 pixels).
 void FrameTableIndex(int x, int y, const u8* frame, const FrameBlitState& st) {
-    RlePreamble p = RleSetup(x, y, frame, st);
-    if (!p.draw)
+    int width  = GetU16(frame + frame_off::kWidth);   // a3[3]
+    int height = GetU16(frame + frame_off::kHeight);  // a3[5]
+    if (!(height + y > st.clipY0 && y < st.clipY1))
         return;
-    const u8* c = p.cursor;
-    u16* d = p.dst;
-    const int stepPx = p.destStep;
 
-    for (int r = 0; r < p.rows; ++r) {
+    const int stepBytes = st.destStridePx - width;    // v7 (byte step, NOT doubled)
+    int rows = height;                                // dword_64AA98
+    int firstByteOff = (int)frame_off::kPayload;      // dword_64AA94 = 50 default
+    int yy = y;
+    int top = st.clipY0 - y;
+    if (top > 0) {
+        const u8* rowTable = frame + GetU32(frame + frame_off::kRowTableOff);
+        firstByteOff = (int)GetU32(rowTable + 4 * top);
+        rows -= top;
+        yy = st.clipY0;
+    }
+    int bottom = (y + height) - st.clipY1;
+    if (bottom > 0)
+        rows -= bottom;
+    if (rows <= 0)
+        return;
+
+    const u8* c = frame + firstByteOff;
+    u8* d = (u8*)st.dest + (static_cast<ptrdiff_t>(st.destStridePx) * yy + x);
+
+    for (int r = 0; r < rows; ++r) {
         int runCount = (int)Take32(c);
         for (int run = 0; run < runCount; ++run) {
             int skipBytes = GetI32(c); u32 n = GetU32(c + 4); c += 8;
-            d = (u16*)((u8*)d + skipBytes);
+            d += skipBytes;
             if (n) {
-                if (n & 1) { *(u8*)d = *c; d = (u16*)((u8*)d + 1); ++c; }
-                for (u32 i = n >> 1; i; --i) { *d = GetU16(c); c += 2; ++d; }
+                if (n & 1) { *d = *c; ++d; ++c; }
+                for (u32 i = n >> 1; i; --i) {
+                    std::memcpy(d, c, 2);
+                    c += 2; d += 2;
+                }
             }
         }
-        d += stepPx;
+        d += stepBytes;
     }
 }
 
-// gilde.exe 0x5D781C — VIBE_FrameData_Process. Dispatcher.
-//   compFlag(+0x26) == -1  => uncompressed Interpolate path (mode 0/1/2 only).
-//   else RLE: the global edge selectors choose Index / Bounds / Next / Validate.
-//   We expose those selectors through FrameBlitState's clip values plus the
-//   `xClipped`/`bounds` flags derived the way the original derived them:
-//     - if y < clipY0 OR (y + frameHeight) overflows clipY1 -> a clipped path
-//     - HIBYTE(dword_1406947) selected the Bounds (index->16) path.
-//   For a faithful, testable surface we replicate the structural choice: when no
-//   X clip is needed and the frame fits, Validate; when X clip is needed, Next.
+// gilde.exe 0x5D781C — VIBE_FrameData_Process. Dispatcher (1:1 flow):
+//   if (byte_140694B) return 0;                             (global disable gate)
+//   compFlag(+0x26) == -1 => colorDepth 0 -> 0; <=1 -> Interpolate; ==2 -> 1.
+//   else RLE: X early-outs (x > clipX1 / x+width < clipX0 -> 0), install the
+//   dest stride (dword_64A1C8 = surface+16), then dispatch on colorDepth(+0x0C):
+//     0  -> HIBYTE(dword_1406947) ? Bounds (8bpp index->16) : Index (8bpp dest)
+//     1  -> x < clipX0 ? Next : (x+width <= clipX1 ? Validate : Next)
+//     2  -> return 1 with no blit
+//     >2 -> restore stride, return 0
 bool FrameDataProcess(int x, int y, const u8* frame, const FrameBlitState& st) {
     if (!frame)
+        return false;
+    if (st.disabled)                       // byte_140694B
         return false;
 
     i32 compFlag = GetI32(frame + frame_off::kCompFlag);
@@ -421,14 +459,35 @@ bool FrameDataProcess(int x, int y, const u8* frame, const FrameBlitState& st) {
         return depth == 2;
     }
 
+    // RLE path X early-outs (gilde.exe 0x5d7863..: `if (a1 > dword_64A1BC)
+    // return 0; if (a1 + width < dword_64A1B4) return 0;`).
+    if (x > st.clipX1)
+        return false;
     int width = GetU16(frame + frame_off::kWidth);
-    // Y-range gate identical to the original's (a1>clipX1 / x+w<clipX0 early-outs
-    // are checked inside each blitter via RleSetup).
-    bool xClipNeeded = (x < st.clipX0) || (x + width > st.clipX1);
-    if (xClipNeeded)
+    if (x + width < st.clipX0)
+        return false;
+
+    u8 depth = frame[frame_off::kColorDepth];
+    if (depth == 0) {
+        // 8bpp shape: HIBYTE(dword_1406947) selects the index->16 Bounds path.
+        if (st.index16Sel)
+            FrameTableBounds(x, y, frame, st);
+        else
+            FrameTableIndex(x, y, frame, st);
+        return true;
+    }
+    if (depth > 1)
+        return depth == 2;   // 2 => handled (no blit); >2 => not drawn
+
+    // depth == 1 (16bpp RLE).
+    if (x < st.clipX0) {
         FrameTableNext(x, y, frame, st);
-    else
+        return true;
+    }
+    if (x + width <= st.clipX1)
         FrameTableValidate(x, y, frame, st);
+    else
+        FrameTableNext(x, y, frame, st);
     return true;
 }
 

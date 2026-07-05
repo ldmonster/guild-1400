@@ -687,18 +687,12 @@ int GroundSpanTextured(render::Surface* fb, const render::Polygon& tri) {
                 rv[i].y = vp[i]->screenY;
                 rv[i].u = (kCellUV[i][0] + sU) * w;
                 rv[i].v = (kCellUV[i][1] + sV) * w;
-                // The ENGINE's per-vertex RGB terrain light (BuildTileVertex:
-                // scale*l + ambient at +66/+65/+64) consumed as the D3D vertex
-                // diffuse with the era-standard MODULATE2X. Row 62 = the raw
-                // texture; the RGB modulate carries ALL illumination + the
-                // day-cycle colour (live-validated: noon amb (79,63,38), night
-                // (26,17,69) -> the purple night ground).
-                rv[i].light = 62;
-                u32 lr = 2u * vp[i]->lightIdx, lg = 2u * vp[i]->_pad41,
-                    lb = 2u * vp[i]->color0;
-                rv[i].shadeR = (u8)(lr > 255u ? 255u : lr);
-                rv[i].shadeG = (u8)(lg > 255u ? 255u : lg);
-                rv[i].shadeB = (u8)(lb > 255u ? 255u : lb);
+                // The tile's per-vertex illumination (BuildTileVertex +66): the
+                // span palette row is avg(+66 bytes) (dword_13FC5E0, the leaf
+                // @0x5F6C30 computes (v0.+66 + v1.+66 + v2.+66)/3 << 8). Pure
+                // LUMA HiColTab ramp — no per-pixel RGB modulate (software path).
+                u32 L = vp[i]->lightIdx;
+                rv[i].light = (u8)(L > 62u ? 62u : L);
                 SeedSpanFogFactor(rv[i], *vp[i]);   // W7-FOGPIX
             }
             if (render::RasterizeTexturedTriangleRgbz(fb, rv, *rec, palBase, tri.flags38))
@@ -755,13 +749,10 @@ int GroundSpanTextured(render::Surface* fb, const render::Polygon& tri) {
                     // HiColTab has 63 ramp rows, so clamp the row to [0,62] (a row
                     // beyond the ramp count is the engine's degenerate region; the
                     // block only provisions 63 rows + the direct row at 0x7E00).
-                    // Engine per-vertex RGB terrain light, MODULATE2X (above).
-                    rv[i].light = 62;
-                    u32 lr = 2u * vp[i]->lightIdx, lg = 2u * vp[i]->_pad41,
-                        lb = 2u * vp[i]->color0;
-                    rv[i].shadeR = (u8)(lr > 255u ? 255u : lr);
-                    rv[i].shadeG = (u8)(lg > 255u ? 255u : lg);
-                    rv[i].shadeB = (u8)(lb > 255u ? 255u : lb);
+                    // Pure LUMA HiColTab ramp: span row = avg(+66 bytes), the
+                    // leaf @0x5F6C30 ((v0.+66+v1.+66+v2.+66)/3 << 8). No RGB.
+                    u32 L = vp[i]->lightIdx;
+                    rv[i].light = (u8)(L > 62u ? 62u : L);
                     SeedSpanFogFactor(rv[i], *vp[i]);   // W7-FOGPIX
                 }
                 if (render::RasterizeTexturedTriangleRgbz(fb, rv, *rec, palBase,
@@ -872,16 +863,13 @@ bool GroundFrame::Bind(const FloorGround* g) {
     floor_.mask     = g->size * g->size - 1;
     floor_.heights  = g->heights.data();
     floor_.texSrc   = g->texGrid.data();
-    // Floor+0x1C per-cell LIGHT bytes. LIVE-CAPTURED from gilde.exe in-city
-    // (frida, Floor+0x1C dump): a smoothed HILLSHADE over the heightfield —
-    // flat ground ~26, sun-facing slopes to ~100, computed at load (the
-    // shipped .cty light layer is all-zero; the exact builder is the
-    // remaining named gap). HOST MODEL fitted against the capture:
-    //   l = clamp(26.19 + 0.698*dH/dx - 0.341*dH/dy, 0, 127)
-    // over a 3-pass box-smoothed height grid (base/coefs = the lstsq fit; the
-    // city's flat interior — the visible ground — reproduces exactly).
-    GroundFrame::BuildTerrainLightMap(g->heights.data(), g->size, lightBytes_);
-    floor_.types    = lightBytes_.data();
+    // Floor+0x1C type/shadow bytes (the tile type grid). NOTE: the curve-fit
+    // hillshade "lightmap" (BuildTerrainLightMap, l = 26.19 + 0.698*dH/dx - ...)
+    // was a lstsq APPROXIMATION, not a reconstruction of the engine's light
+    // builder — a Rule-8 cheap analogue that shifted the white-default grey
+    // levels (broke terrain_texturing + materials_w4c). Reverted to the type
+    // grid; the real per-cell light builder is a deferred hardening task.
+    floor_.types    = g->texGrid.data();
     for (int l = 0; l < 4; ++l)
         floor_.mipTexSrc[l] = g->texGrid.data();
     floor_.tiles = tiles_.data();
@@ -892,11 +880,10 @@ bool GroundFrame::Bind(const FloorGround* g) {
     // +7281 low nibble (minimum LOD): the loader writes byte_64A02D & 0xF
     // (@0x5bd4c8..0x5bd4e4), a TextureCache_Setup runtime byte — seed 0.
     floor_.minLodNibble = 0;
-    // Floor+208/212/216 — LIVE-READ from gilde.exe in-city (flt_13FD510/4/8):
-    // (1.0, 0.7086, 0.2969) — the warm sun colour scaling the tile type term.
-    floor_.lightSunScale[0] = 1.0f;
-    floor_.lightSunScale[1] = 0.708627462f;
-    floor_.lightSunScale[2] = 0.296862751f;
+    // Floor+208/212/216 — named gap (host 1.0 per channel, the green baseline;
+    // the coloured warm-sun scaling was part of the reverted gouraud analogue).
+    for (int c = 0; c < 3; ++c)
+        floor_.lightSunScale[c] = 1.0f;
 
     // Per-tile min/max elevation summary (ComputeSlopeFlags @0x5bbdb0 third pass)
     // — feeds the 8-corner tile bound the LOD pick uses.

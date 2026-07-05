@@ -54,6 +54,12 @@ TEST(RenderE2E, DrawSaveReloadRoundtrip24) {
 
     // 3. save to BMP bytes, 4. reload.
     std::vector<u8> file = BmpSave24Bit(W, H, rgb.data());
+    // Engine Save24 (gilde.exe 0x5f18f4) writes pixel data at 58; the loader
+    // (0x5f0ce4) seeks the standard 0x36 like real tool-authored assets use.
+    // Convert the synthetic fixture to standard layout before reloading.
+    file.erase(file.begin() + 54, file.begin() + 58);
+    file[10] = 54;
+    for (int k = 0; k < 4; ++k) file[2 + k] = (u8)(file.size() >> (8 * k));
     int w, h;
     std::vector<u8> back = BmpLoadBuffer(file, 24, w, h);
     CHECK_EQ(w, W);

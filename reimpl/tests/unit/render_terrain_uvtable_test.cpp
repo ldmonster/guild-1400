@@ -57,17 +57,17 @@ TEST(TerrainUvTable, SubTexIdStride) {
 
 // ----- the per-cell sub-texture id selector (byte_13DCE58 gate @0x5c1f78) -----
 TEST(TerrainUvTable, SubTexIdSelector) {
-    // cellFlag without 0x40 -> always 0 (no sub-texture).
-    CHECK_EQ(TerrainSubTexId(0x80, nullptr, 5), 0u);
+    // cellFlag without 0x40 -> always 0 (no sub-texture). (cellV=0 -> idx = cellU&0xFF.)
+    CHECK_EQ(TerrainSubTexId(0x80, nullptr, 5, 0), 0u);
     // 0x40 set but null table (the all-zero shipped image) -> 0.
-    CHECK_EQ(TerrainSubTexId(0x40, nullptr, 5), 0u);
-    // 0x40 set + a runtime table -> low 6 bits of byte_13DCE58[(quad&0xFF)].
+    CHECK_EQ(TerrainSubTexId(0x40, nullptr, 5, 0), 0u);
+    // 0x40 set + a runtime table -> low 6 bits of byte_13DCE58[(cellV&0xFF)<<8|(cellU&0xFF)].
     u8 tab[256] = {};
     tab[5] = 0xC3;   // 0xC3 & 0x3F == 0x03
-    CHECK_EQ(TerrainSubTexId(0x40, tab, 5), 3u);
-    // quad index masked by 0xFF (the engine's `and eax, 0FFh`).
+    CHECK_EQ(TerrainSubTexId(0x40, tab, 5, 0), 3u);
+    // cellU masked by 0xFF (the engine's `and eax, 0FFh`); cellV=0 keeps idx in [0,255].
     tab[7] = 0x11;
-    CHECK_EQ(TerrainSubTexId(0x40, tab, 0x107), 0x11u);
+    CHECK_EQ(TerrainSubTexId(0x40, tab, 0x107, 0), 0x11u);
 }
 
 // ----- the seam-UV midpoint blend (flt_628B48 = 0.5, @0x5bfd27 / @0x5c2348) ---

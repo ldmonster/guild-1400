@@ -1,7 +1,6 @@
 #include "render/bgf_loader.h"
 
 #include <cstring>
-#include <map>
 
 // gilde.exe d3_io_fl.c — .BGF fast-chunk binary loader.
 //
@@ -231,83 +230,43 @@ MeshGeometry* BgfGeometry::View() {
 }
 
 bool BuildGeometry(const BgfModel& m, BgfGeometry& out) {
-    // The engine's runtime vertex (80-byte record) carries ONE (u,v) pair, but the
-    // on-disk poly stores per-CORNER uv rows. The original loader's vertex-dedup
-    // step therefore splits a position-shared corner whose UV differs into its own
-    // runtime vertex (and merges corners whose (index, u, v) coincide). Without
-    // this, meshes that reuse a position with different UVs per face (every
-    // fachwerk wall / roof) smear their textures (last-written UV wins).
-    // One runtime vertex per unique (on-disk index, u-bits, v-bits) triple;
-    // polygon ORDER stays 1:1 with the model (consumers map poly i -> model poly i).
-    struct Key {
-        u32 idx, ub, vb;
-        bool operator<(const Key& o) const {
-            if (idx != o.idx) return idx < o.idx;
-            if (ub != o.ub) return ub < o.ub;
-            return vb < o.vb;
-        }
-    };
-    std::map<Key, u32> remap;
-    std::vector<u32> corner((std::size_t)m.polygons.size() * 3, 0u);
-    std::vector<Key> order;                    // creation order -> Key
-    order.reserve(m.polygons.size() * 3);
-    for (size_t i = 0; i < m.polygons.size(); ++i) {
-        const BgfPolygon& q = m.polygons[i];
-        for (int k = 0; k < 3; ++k) {
-            if (q.vtx[k] >= m.vertices.size()) return false;
-            u32 ub, vb;
-            std::memcpy(&ub, &q.uv0[k], 4);
-            std::memcpy(&vb, &q.uv1[k], 4);
-            const Key key{q.vtx[k], ub, vb};
-            auto it = remap.find(key);
-            u32 ri;
-            if (it == remap.end()) {
-                ri = (u32)order.size();
-                remap.emplace(key, ri);
-                order.push_back(key);
-            } else {
-                ri = it->second;
-            }
-            corner[i * 3 + (std::size_t)k] = ri;
-        }
-    }
-
-    out.vertices.assign(order.size(), Vertex{});
-    for (size_t i = 0; i < order.size(); ++i) {
-        const Key& key = order[i];
+    out.vertices.assign(m.vertices.size(), Vertex{});
+    for (size_t i = 0; i < m.vertices.size(); ++i) {
         Vertex& v = out.vertices[i];
-        v.x = m.vertices[key.idx].pos[0];
-        v.y = m.vertices[key.idx].pos[1];
-        v.z = m.vertices[key.idx].pos[2];
-        std::memcpy(&v.u, &key.ub, 4);
-        std::memcpy(&v.v, &key.vb, 4);
+        v.x = m.vertices[i].pos[0];
+        v.y = m.vertices[i].pos[1];
+        v.z = m.vertices[i].pos[2];
     }
 
     out.polygons.assign(m.polygons.size(), Polygon{});
     for (size_t i = 0; i < m.polygons.size(); ++i) {
         const BgfPolygon& q = m.polygons[i];
         Polygon& p = out.polygons[i];
-        p.v0 = &out.vertices[corner[i * 3 + 0]];
-        p.v1 = &out.vertices[corner[i * 3 + 1]];
-        p.v2 = &out.vertices[corner[i * 3 + 2]];
+        // Resolve vertex indices into the engine-stride vertex array.
+        if (q.vtx[0] >= out.vertices.size() ||
+            q.vtx[1] >= out.vertices.size() ||
+            q.vtx[2] >= out.vertices.size())
+            return false;
+        p.v0 = &out.vertices[q.vtx[0]];
+        p.v1 = &out.vertices[q.vtx[1]];
+        p.v2 = &out.vertices[q.vtx[2]];
         p.uvX = q.uv0[0];
         p.uvY = q.uv0[1];
         p.uvZ = q.uv0[2];
         p.flags36 = 0;
         p.flags38 = 0;
-        // TWO-SIDED material (+194 bit 1, the loader's "flag0 BYTE2 |= 2" alpha/
-        // no-cull route): the crossed-plane foliage/fence polys draw from BOTH
-        // sides — poly +36 bit 4 exempts them from the projection backface cull
-        // (ProjectObjectVertices keeps + marks 0x40), and +38 bit 2 makes the
-        // raster reverse the vertex load for back-wound tris (the 0x5f6f16
-        // winding branch). Without these, half of every crossed-plane tree
-        // crown culls away (sparse trees).
-        if (q.matIndex >= 0 && (size_t)q.matIndex < m.materials.size() &&
-            (m.materials[(size_t)q.matIndex].b2 & 2)) {
-            p.flags36 |= 0x10;
-            p.flags38 |= 0x04;
-        }
         p.matIndex = q.matIndex;   // carry the material index for texture binding
+    }
+
+    // Carry the per-corner UV0 onto each polygon's vertex u/v (the engine stores
+    // them on the vertex; for a freshly loaded mesh the UVs are taken from uv0/1/2).
+    for (size_t i = 0; i < m.polygons.size(); ++i) {
+        const BgfPolygon& q = m.polygons[i];
+        Vertex* vs[3] = {out.polygons[i].v0, out.polygons[i].v1, out.polygons[i].v2};
+        for (int k = 0; k < 3; ++k) {
+            vs[k]->u = q.uv0[k];
+            vs[k]->v = q.uv1[k];
+        }
     }
     return true;
 }

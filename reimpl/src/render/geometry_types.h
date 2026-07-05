@@ -41,9 +41,10 @@ struct Vertex {
     u8    _pad41;     // +0x41  per-vertex render-flag byte (the +65 *(j-15) write)
     u8    lightIdx;   // +0x42  (+66) light/shade table index (768 * idx offset)
     u8    _pad43;     // +0x43
-    u8    shadeB;     // +0x44  (+68) per-vertex RGB diffuse shade bytes — the
-    u8    shadeG;     // +0x45  (+69) software COLOUR branch of FinalizeVertexShade
-    u8    shadeR;     // +0x46  (+70) @0x5c8218 (B/G/R order == the +68/69/70 writes)
+    u8    shadeB = 255;  // +0x44 (+68) per-vertex RGB diffuse shade bytes — the
+    u8    shadeG = 255;  // +0x45 (+69) software COLOUR branch of FinalizeVertexShade
+    u8    shadeR = 255;  // +0x46 (+70) @0x5c8218 (B/G/R order == +68/69/70 writes).
+                         // Default 255 == engine's v30=255 neutral (modulate off).
     u8    _pad47[5];  // +0x47 .. +0x4B
     u8    clipFlags;  // +0x4C  (+76) per-vertex frustum outcode (bits0..5) | bit7
     u8    _pad4d[3];  // +0x4D .. +0x4F  (pads record to 80 bytes)

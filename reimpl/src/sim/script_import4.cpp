@@ -443,20 +443,21 @@ i32 RunWithArgs(u8* ctx, int argc, const i32* firstArgs, i32* runRecord,
         return 0;                                         /*0x443b87*/
     }
 
-    // Bind args by per-arg type byte *(fn + 37 + i).
+    // Bind args by per-arg type byte *(fn + 37 + i). The string-scratch cursor
+    // (v16 = unk_7675E0) advances 96 bytes on EVERY argument (0x443b06 loop
+    // tail: `v16 += 96` unconditionally), so a string arg lands at
+    // 96 * argIndex — matching EnterFunction's per-arg 96-stride readback.
     int v6 = 0;          // dword-buffer offset (stride 4)
-    int slot = 0;        // string-scratch slot (stride 96 chars)
     for (int v15 = 0; v15 < static_cast<int>(*reinterpret_cast<u8*>(fn + 36)); ++v15) { /*0x443b06*/
         u8 type = *reinterpret_cast<u8*>(fn + 37 + v15); /*0x443b0c*/
         i32 raw = firstArgs ? firstArgs[v15] : 0;
         switch (type) {                                  /*0x443b15*/
-            case 6: { // copy a UTF-16 string into the scratch ring (96 stride).
+            case 6: { // copy a UTF-16 string into the scratch window (96*i).
                 if (strScratch) {
                     const char* s = reinterpret_cast<const char*>(
                         static_cast<std::intptr_t>(raw));
-                    if (s) CopyUtf16(strScratch + 96 * slot, s); /*0x443b21..0x443b37*/
+                    if (s) CopyUtf16(strScratch + 96 * v15, s); /*0x443b21..0x443b37*/
                 }
-                ++slot;
                 break;
             }
             case 1: // dword

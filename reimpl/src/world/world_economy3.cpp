@@ -107,11 +107,16 @@ int GuildLevel3ContactStatusId(unsigned defKind) {
 // VIBE_Guild_ShowLevel2JoinDialog 0x520838 — guild-join fee.
 // ---------------------------------------------------------------------------
 int GuildLevel2JoinFee(int totalWealth) {
-    // gilde.exe 0x520880:
-    //   if ((double)wealth * 0.01 > 160.0) fee = wealth * 0.01; else fee = 160.0;
-    //   v19 = (int)fee;  (truncation toward zero via cvttss/cvttsd)
+    // gilde.exe 0x52086e..0x520880: fild wealth; fmul flt_62235C(0.01f);
+    //   fcomp flt_622360(160.0f); ja 0x520A5B.
+    // 0x520A5B (> branch): recomputes wealth*0.01f and *fstp*s it into the 4-byte
+    //   float var_10 — the fee is rounded to SINGLE precision before truncation.
+    // fall-through: mov var_10, 43200000h (160.0f).
+    // 0x520898..0x5208aa: fld dword var_10; Coord_ConvertX; fistp -> (int) trunc.
+    // e.g. wealth 1'000'000: 9999.99978 (double) -> 10000.0f -> fee 10000, NOT 9999.
     double scaled = static_cast<double>(totalWealth) * kGuildJoinFeeRate;
-    double fee = (scaled > kGuildJoinFeeFloor) ? scaled : kGuildJoinFeeFloor;
+    float fee = (scaled > kGuildJoinFeeFloor) ? static_cast<float>(scaled)
+                                              : 160.0f;
     return static_cast<int>(fee);
 }
 

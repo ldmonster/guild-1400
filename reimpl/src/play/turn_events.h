@@ -67,12 +67,13 @@ struct EventTrigger {
 };
 
 // The MeisterAi event-slot ring (VIBE_MeisterAi_ExpireEventSlots @0x4c7004).
-// The original walks byte_11CB624 in 41-dword strides over 10496 bytes (== 64
-// slots of 41 dwords), decrementing the lead byte and zeroing the slot's first
-// dword (dword_11CB620) when it hits 0. We model the observable counters: a
-// lead-byte countdown per slot + a payload dword cleared on expiry.
-constexpr int kEventSlotCount   = 64;   // 10496 / 41 / 4  (stride 41 dwords)
-constexpr int kApEventSlotCount = 64;   // 5120  / 20 / 4  (stride 20 dwords)
+// The original's loop counter runs 0..10496 step 41 (== 256 iterations); the
+// lead byte is addressed at byte_11CB624[counter*4] (a 164-byte slot stride)
+// and the payload at dword_11CB620[counter]. Per slot: decrement the lead byte,
+// and zero the payload dword when it hits 0. We model the observable counters:
+// a lead-byte countdown per slot + a payload dword cleared on expiry.
+constexpr int kEventSlotCount   = 256;  // 10496 / 41  (0x4c7004 loop iterations)
+constexpr int kApEventSlotCount = 256;  // 5120  / 20  (0x4c70c0 loop iterations)
 
 struct EventSlotRing {
     u8  lead[kEventSlotCount]   = {};   // byte_11CB624 lead-byte countdown per slot

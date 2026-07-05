@@ -41,7 +41,9 @@ TEST(TutCh345, Chapter3IntroOutro) {
     CHECK_EQ(intro.word54, (guild::i16)7680);
 
     const TutorialNodeSpecEx& outro = c[9];
-    CHECK_EQ(outro.kind, 7);                       // outro marker
+    // Binary-verified (hardening): the chapter-3 outro writes the CHAPTER number
+    // as the kind (`*(_DWORD *)v87 = 3` at the 0x598fc4 tail), not 7. Old pin: 7.
+    CHECK_EQ(outro.kind, 3);
     CHECK(std::strcmp(outro.name, "3rtu") == 0);
     CHECK_EQ(outro.nameByte8, (guild::u8)3);       // builder: v87[8] = 3
     CHECK_EQ(outro.mainTextId, 7480);

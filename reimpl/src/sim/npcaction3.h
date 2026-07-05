@@ -156,8 +156,9 @@ struct NpcAction3Hooks {
     // VIBE_Recruit_CheckRecruitProximity(idA, idB): -1024/-1025/-1026 (abort),
     //   -1027 (refused), 0 (out of range), 1 (in-range/progress), other (waiting).
     i32  (*recruitProximity)(i32 idA, i32 idB);
-    // VIBE_Recruit_ComputeRecruitmentCost(kind, idB) -> required-visit count byte.
-    u8   (*recruitCost)(int kind, i32 idB);
+    // VIBE_Recruit_ComputeRecruitmentCost(idA@eax, idB@edx) -> required-visit
+    // count byte (disasm 0x4cd46d/0x4cd473: eax=+172 FilterA, edx=+176 FilterB).
+    u8   (*recruitCost)(i32 idA, i32 idB);
     // VIBE_NpcAction_ComputeWanderPathCoords(h, recordA) — arm the wander walk.
     void (*computeWanderPath)(HeRecord* h, void* recordA);
 

@@ -223,7 +223,10 @@ int PersonCollectRelatedNpcs(Person* refRec, u32 capacity, int filter,
         for (Person* cand = &g_persons[0];
              slotIdx < 768 && static_cast<u32>(v5) < capacity;
              ++slotIdx, ++cand) {
-            if (cand == refRec || cand->marker == -1 || PByte(cand, 2) >= 10)
+            // 0x55504a: `*((char*)v19 + 2) < 10` — SIGNED char compare of the
+            // kind byte (kind >= 0x80 passes in the binary).
+            if (cand == refRec || cand->marker == -1
+                || static_cast<i8>(PByte(cand, 2)) >= 10)
                 continue;
 
             const i32 candId = PDword(cand, 4);           // *((DWORD*)v19 + 1)
@@ -297,7 +300,9 @@ int PersonCollectRelatedNpcs(Person* refRec, u32 capacity, int filter,
     const u8  refClass = PByte(refRec, 88);
     for (int slotIdx = 0; slotIdx < 768; ++slotIdx) {
         Person* cand = &g_persons[slotIdx];
-        if (cand == refRec || cand->marker == -1 || PByte(cand, 2) >= 10)
+        // 0x554ebf: signed char compare (see filled path).
+        if (cand == refRec || cand->marker == -1
+            || static_cast<i8>(PByte(cand, 2)) >= 10)
             continue;
         const i32 candId = PDword(cand, 4);
         bool matched = false;

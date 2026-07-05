@@ -14,10 +14,12 @@ namespace guild::render {
 
 // gilde.exe 0x5caa4c — VIBE_Math_VectorWithinTolerance.
 //   return fabs(b[0]-a[0])<=t && fabs(b[1]-a[1])<=t && fabs(b[2]-a[2])<=t;
+// x87: each difference stays at 80-bit through fabs and the compare — modeled
+// with double (no float rounding of the difference before the compare).
 bool VectorWithinTolerance(const float* a, const float* b, float tol) {
-    return std::fabs(b[0] - a[0]) <= tol &&
-           std::fabs(b[1] - a[1]) <= tol &&
-           std::fabs(b[2] - a[2]) <= tol;
+    return std::fabs((double)b[0] - a[0]) <= (double)tol &&
+           std::fabs((double)b[1] - a[1]) <= (double)tol &&
+           std::fabs((double)b[2] - a[2]) <= (double)tol;
 }
 
 // gilde.exe 0x5d2425..0x5d254d — STAGE 1: vertex dedup.
@@ -103,11 +105,18 @@ void BakeMorphRotation(BgfModel& m) {
 }
 
 // Byte-record equality of two materials — the faithful equivalent of the engine's
-// memcmp(&mat[i], &mat[j], 224) at 0x5d27a5 (render::BgfMaterial carries the same
-// information as the 224-byte record: three names + the format/flag bytes).
+// memcmp(&mat[i], &mat[j], 224) at 0x5d27a5. The 224-byte runtime record holds
+// the DECODED flag fields, not the raw stream bytes: the token-0x0b handler
+// @0x5e3eb4 splits its byte into +194 (bit0), +197 (bit1), +198 (bits2..5) and
+// +195 (bit6) — BIT 7 IS DROPPED and never reaches the record, so two materials
+// differing only in that bit memcmp as EQUAL. The token-0x0c handler @0x5e3f54
+// keeps all 8 bits (+196 = bit0, +199 = byte & 0xFE), so raw b3 equality is
+// exact. render::BgfMaterial stores the raw stream bytes (both loaders agree on
+// that representation); mask b2's bit 7 here to match the memcmp.
 static bool MaterialsEqual(const BgfMaterial& a, const BgfMaterial& b) {
     return a.name0 == b.name0 && a.name1 == b.name1 && a.name2 == b.name2 &&
-           a.flag == b.flag && a.b1 == b.b1 && a.b2 == b.b2 &&
+           a.flag == b.flag && a.b1 == b.b1 &&
+           (a.b2 & 0x7F) == (b.b2 & 0x7F) &&
            a.b3 == b.b3 && a.b4 == b.b4 && a.b5 == b.b5;
 }
 
@@ -207,9 +216,11 @@ u32 DeduplicateMaterials(BgfModel& m) {
 
 // Engine order inside VIBE_Mesh_LoadBgfFile: vertex dedup, morph bake, material
 // dedup/compact/reorder. (UV-transform + texture/dummy stages are out of scope —
-// see header banner.)
+// see header banner.) The vertex dedup runs ONLY when the token-0x02 flag bit at
+// parse-ctx+1 is clear (gilde.exe 0x5d2348: `if (!v145[1]) { ...dedup... }`).
 void PostProcessModel(BgfModel& m) {
-    DeduplicateVertices(m);
+    if (!m.parseFlag1)
+        DeduplicateVertices(m);
     BakeMorphRotation(m);
     DeduplicateMaterials(m);
 }

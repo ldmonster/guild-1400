@@ -10,8 +10,9 @@ namespace guild {
 namespace play {
 
 // --- weight tables (exact bytes from gilde.exe) ---------------------------
-// 0x577954: 0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,2
-const i32 kEventWeightTableA[16] = {0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,2};
+// 0x577954: 0,0,1,1,1,1,1,1,1,2,2,2,2,2,2,2  (get_bytes-verified: index 8 is
+// 1, not 2 — the old transcription had eight 2s; the binary has seven)
+const i32 kEventWeightTableA[16] = {0,0,1,1,1,1,1,1,1,2,2,2,2,2,2,2};
 // 0x577994: 0,0,0,0,0,0,0,1,1,2,2,2,2,2,2,2
 const i32 kEventWeightTableB[16] = {0,0,0,0,0,0,0,1,1,2,2,2,2,2,2,2};
 // 0x5779d4: 0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2
@@ -145,11 +146,16 @@ bool GameTick_AdvanceTurnTimer(TurnTimerState& st, const TurnTimerEnv& env,
     }
 
     // Normal path: accumulate.  v7 = rand()*rate + base + accum
+    // x87 (@0x579674..0x579690): fmul/fadd/fadd keep the sum at register
+    // width; `fst var_28` narrows the STORED accum to float but the following
+    // `fcomp var_24` compares the still-wide st0 against the threshold.
+    // Model the wide intermediate with double; compare BEFORE narrowing.
     float r = env.randomFloatScaled ? env.randomFloatScaled() : 0.0f;
-    float v = r * st.rate + st.base + st.accum;
-    st.accum = v;                       // v30[5] = v7
+    double v = static_cast<double>(r) * static_cast<double>(st.rate) +
+               static_cast<double>(st.base) + static_cast<double>(st.accum);
+    st.accum = static_cast<float>(v);   // v30[5] = (float)v7  (fst @0x579689)
 
-    if (v > st.threshold) {             // v7 > v30[6]
+    if (v > static_cast<double>(st.threshold)) { // v7 > v30[6] (fcomp @0x579690)
         // SetGrayColorThunk(0,248,&v15) — visual flash; recorded via emitEvent? no.
         st.timestamp = 0;               // v30[2] = qword_13CE852 lo (game time)
         ++st.counter;                   // ++v30[1]

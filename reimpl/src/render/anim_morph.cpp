@@ -112,7 +112,10 @@ static void BuildQuantizedMorph(MorphAnim& rec, const float* srcPts,
     rec.frameF(200)[0] = minX;                            // 0x5cf92c
     rec.frameF(204)[0] = minY;                            // 0x5cf940
     rec.frameF(208)[0] = minZ;                            // 0x5cf954
-    rec.frameF(212)[0] = rangeX * kInv255;               // v61  0x5cf96a
+    // x87: the X scale multiplies the UNROUNDED 80-bit difference (v61 =
+    // (v103 - v106) * flt_628E60, sub never stored); Y and Z multiply the
+    // float-rounded ranges (v93/v94 stored first).
+    rec.frameF(212)[0] = (float)(((double)maxX - minX) * kInv255); // v61 0x5cf96a
     rec.frameF(216)[0] = rangeY * kInv255;               // v63  0x5cf97a
     rec.frameF(220)[0] = kInv255 * rangeZ;               // v60*v94  0x5cf986
 
@@ -130,10 +133,11 @@ static void BuildQuantizedMorph(MorphAnim& rec, const float* srcPts,
 
 u8 MorphQuantizeByte(float delta, float minV, float range) {
     // (delta - min) * 255.0 / range, truncated toward zero, low byte stored.
-    // The binary computes ((delta - min) * 255) / range in float regs; the /range
-    // is the f-divide just before the ConvertX. Op order preserved.
-    float num = (delta - minV) * k255;
-    int q = ConvertXTrunc((double)(num / range));
+    // x87 (disasm 0x5cf9ae..0x5cf9d4): the whole chain stays on the FPU stack —
+    // fld delta; fsub min; fmul 255; fdiv range; ConvertX(RC=11)+fistp — with NO
+    // intermediate float store on ANY axis. Modeled as one double expression with
+    // a single truncation.
+    int q = ConvertXTrunc(((double)delta - minV) * (double)k255 / (double)range);
     return (u8)q;
 }
 

@@ -32,8 +32,12 @@ static std::vector<u8> HexToBytes(const char* h) {
 
 // RLE frame (gold2.py): width 4, height 2, mode 0; row0 skip 1px + [R,G];
 // row1 [B] then skip 1px + [Y]. Per-row offset table at +0x2A.
+// colorDepth (+0x0C) = 1: gilde.exe 0x5D781C dispatches RLE frames on the depth
+// byte (0 -> the 8bpp Index/Bounds blitters; 1 -> the 16bpp Validate/Next pair);
+// this synthetic 16bpp frame therefore carries depth 1 (old bytes had 0, which
+// predates the 1:1 depth dispatch).
 static const char* kRleFrameHex =
-    "0000000000000400000002000000000000000000000000000000000000000000000000000000"
+    "0000000000000400000002000100000000000000000000000000000000000000000000000000"
     "000000005a0000000000000001000000020000000200000000f8e0070200000000000000"
     "010000001f000200000001000000e0ff3200000042000000";
 

@@ -68,14 +68,17 @@ std::string MoneyFormatWithSeparators(i32 amount, i32 rate) {
     if (rate == 0)
         rate = 1;  // original guarantees rate != 0 (dword_649A88 entry)
 
-    // v25 = |amount|; v6 = (double)v25 / rate + 0.5; (int)v6 with trunc-toward-zero
+    // v25 = abs32(a1) read back as a SIGNED dword (0x58f7ab: the abs result is
+    // stored and reloaded via SLODWORD(v25)), so INT_MIN stays INT_MIN.
+    // v6 = (double)mag / rate + 0.5; (int)v6 with trunc-toward-zero
     // == round-half-up of |amount|/rate.
-    const std::uint32_t mag32 =
-        static_cast<std::uint32_t>(std::abs(static_cast<long long>(amount)));
+    const std::int32_t mag32 = static_cast<std::int32_t>(
+        amount < 0 ? 0u - static_cast<std::uint32_t>(amount)
+                   : static_cast<std::uint32_t>(amount));
     const double scaled = static_cast<double>(mag32) / static_cast<double>(rate)
                         + kMoneyFormatRoundBias;
-    const std::uint32_t v24 =
-        static_cast<std::uint32_t>(std::trunc(scaled));  // VIBE_Coord_ConvertX
+    const std::int32_t v24 =
+        static_cast<std::int32_t>(std::trunc(scaled));  // VIBE_Coord_ConvertX
 
     std::string out;
     if (v24 == 0) {

@@ -166,6 +166,12 @@ struct NpcDailyHooks {
                                       int flag, const char* name);
     void (*queueRequestArgs25)(i32 personId, i32 fieldOffset, int a, int b, int value);
 
+    // --- global pause gate ---
+    // pauseFlag80(): (word_63C740 & 0x80) != 0 — checked at state-1 entry
+    // (decompile 0x4e7e88: `if ((word_63C740 & 0x80u) != 0) goto LABEL_2`),
+    // BEFORE the saved-day compare; nonzero frees the handler entry.
+    bool (*pauseFlag80)();
+
     // --- free / completion ---
     i32  (*freeHandlerEntry)(HeRecord* h);
 };

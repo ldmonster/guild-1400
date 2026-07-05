@@ -59,20 +59,34 @@ TEST(Bmp, ReadHeaderInfoValid) {
     CHECK_EQ(info.bitCount, 24);
 }
 
-TEST(Bmp, Save24ThenLoadRoundTrip) {
-    // 2x2 RGB image, top-down R,G,B input.
+TEST(Bmp, Save24BinaryLayout) {
+    // gilde.exe 0x5f18f4: the info block is written as 44 bytes (40-byte
+    // BITMAPINFOHEADER + 4 zero pad), dataOffset = 58, fileSize = 3*w*h + 58,
+    // pixel rows bottom-up as B,G,R. (The old test round-tripped through
+    // BmpLoadBuffer, but the BINARY's loader reads 24-bit data at 0x36=54 —
+    // 4 bytes before where its own saver puts it — so save/load are not a
+    // symmetric pair in the original; pin the on-disk layout instead.)
     u8 px[2 * 2 * 3] = {
         10,20,30,  40,50,60,
         70,80,90,  100,110,120,
     };
     std::vector<u8> file = BmpSave24Bit(2, 2, px);
-    int w = 0, h = 0;
-    std::vector<u8> rgb = BmpLoadBuffer(file, 24, w, h);
-    CHECK_EQ(w, 2);
-    CHECK_EQ(h, 2);
-    CHECK_EQ((int)rgb.size(), 2 * 2 * 3);
-    // round-trips back to the original top-down RGB pixels.
-    CHECK(std::memcmp(rgb.data(), px, sizeof(px)) == 0);
+    CHECK_EQ((int)file.size(), 58 + 12);
+    auto rd32 = [&](size_t o) {
+        return (u32)(file[o] | (file[o+1] << 8) | (file[o+2] << 16) | (file[o+3] << 24));
+    };
+    CHECK_EQ((int)rd32(2), 3 * 2 * 2 + 58);   // fileSize
+    CHECK_EQ((int)rd32(10), 58);              // dataOffset (v45)
+    CHECK_EQ((int)rd32(14), 40);              // info size
+    CHECK_EQ((int)rd32(54), 0);               // the 4 zero pad bytes
+    // First stored row = LAST input row (bottom-up), B,G,R swapped.
+    CHECK_EQ((int)file[58], 90);   // B of px row1 pixel0
+    CHECK_EQ((int)file[59], 80);   // G
+    CHECK_EQ((int)file[60], 70);   // R
+    // Second stored row = first input row.
+    CHECK_EQ((int)file[64], 30);
+    CHECK_EQ((int)file[65], 20);
+    CHECK_EQ((int)file[66], 10);
 }
 
 TEST(Bmp, SaveIndexedThenLoad8) {

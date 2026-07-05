@@ -47,18 +47,21 @@ TEST(SimProdSlotsE2E, WorkshopCycle) {
     ProdSlotCollect agg;
     int rc = InventoryCollectProductionSlots(slots, agg);
     CHECK_EQ(rc, 1);
-    CHECK_EQ(agg.count, 3);
-    // capacities: level table {1->20, 2->40, 4->80}.
+    CHECK_EQ(agg.count, 2);              // slots[0] is the ROOT (0x59231d)
+    // 0x59234d/0x5923e1: every slot's capacity comes from the ROOT node's
+    // {type, level} — root {300,1} -> 20*1 = 20 for both child slots.
     CHECK_EQ(agg.caps[0], 20);
-    CHECK_EQ(agg.caps[1], 40);
-    CHECK_EQ(agg.caps[2], 80);
-    CHECK_EQ(agg.capTotal, 140);
-    CHECK_EQ(agg.levTotal, 7);
-    // worth equals the real price model weighted by level.
-    double wantWorth = Building_ComputeMarketPrice(300, 100) * 1.0
-                     + Building_ComputeMarketPrice(301, 100) * 2.0
-                     + Building_ComputeMarketPrice(302, 100) * 4.0;
-    CHECK(agg.worth == wantWorth);
+    CHECK_EQ(agg.caps[1], 20);
+    CHECK_EQ(agg.capTotal, 40);
+    CHECK_EQ(agg.levTotal, 6);           // child levels 2 + 4
+    // worth: int accumulation with per-iteration truncation (0x5923b8), level
+    // narrowed to float (0x59239e).
+    int w = 0;
+    w = static_cast<int>(Building_ComputeMarketPrice(301, 100) *
+                             static_cast<double>(2.0f) + static_cast<double>(w));
+    w = static_cast<int>(Building_ComputeMarketPrice(302, 100) *
+                             static_cast<double>(4.0f) + static_cast<double>(w));
+    CHECK(agg.worth == static_cast<double>(w));
 
     // --- Phase 2: run a work order's timer to completion. ---------------------
     ProductionOrder order;

@@ -611,9 +611,11 @@ TEST(PlayableFlowE2E, WheelZoomChangesCamera3D) {
                 zoomed.wheelNotches);
 
     CHECK_EQ(base.wheelNotches, 0);
-    CHECK(base.zoomEnd == 0.0f);               // no wheel -> zoom stays 0
+    // City-enter boot anchor is zoom 0.33 (gilde.exe 0x506fe9: push 0.33f;
+    // call Camera_AnchorToTerrain@0x4b2900). No wheel -> stays at the boot 0.33.
+    CHECK(std::fabs(base.zoomEnd - 0.33f) < 1e-5f);
     CHECK_EQ(zoomed.wheelNotches, 2);
-    CHECK(std::fabs(zoomed.zoomEnd - 0.2f) < 1e-5f);   // 2 notches -> 0.2
+    CHECK(std::fabs(zoomed.zoomEnd - 0.53f) < 1e-5f);  // boot 0.33 + 2 notches*0.1
 
     play::SdlSessionTrace zoomed2 = run(2);    // deterministic across reruns
     CHECK(zoomed2.zoomEnd == zoomed.zoomEnd);

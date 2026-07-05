@@ -241,10 +241,10 @@ InfoWindowLayout RenderCityInfoWindow(render::Surface* fb, int fbW, int fbH,
     int bh = (face && face->height > 0) ? face->height : 33;
     if (bh > stripH - 4) bh = stripH - 4;
     int bw = (int)(150 * sx);
-    // Button centered on the X axis within the strip (frida: the choose button is
-    // centered, not right-aligned).
-    const int bx = stripX + (stripW - bw) / 2, by = stripY + (stripH - bh) / 2;
-    (void)0;
+    // Choose/"Дальше" button on the bottom-right of the info strip (the choose-
+    // city _AUSWAHL confirm slot). A centered variant was an unverified frida
+    // claim that broke the confirm hit-target; keep the right-aligned baseline.
+    const int bx = stripX + stripW - bw - (int)(6 * sx), by = stripY + (stripH - bh) / 2;
     if (face) {
         const int capW = (capL && capL->width > 0) ? (capL->width * bh / (face->height ? face->height : bh)) : 0;
         const int capWR = (capR && capR->width > 0) ? (capR->width * bh / (face->height ? face->height : bh)) : 0;

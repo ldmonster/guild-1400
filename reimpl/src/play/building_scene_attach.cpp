@@ -681,6 +681,14 @@ const u8* BuildingLoadAndAlignGebaeudeModel(i8 buildingType, char* outPath,
         return nullptr;                                    // jz loc_50D2F7
 
     // --- collect free Bauplätze + plant the wimpels @0x50d370..0x50d546 -----
+    // KNOWN DIVERGENCE (root out of this module): the binary passes v79
+    // (typeNameBuf, from LookupTypeName @0x50d359) as the walk's wanted-name —
+    // CollectFreeBauplatzCandidate @0x50c7b0 matches plot names against it and
+    // only falls back to the "bk_" prefix when the name is NULL. The reimpl's
+    // sim::Building_FilterBlockedBauplatze (building5.cpp) takes i32 and drops
+    // the name (g_bauplatzWant hardcoded nullptr), so every plot is collected
+    // instead of only the type-matching ones. Blocked on the sim/building5 API
+    // (out-of-chunk); see progress/harden/play_00.md.
     const i32 plotCount = sim::Building_FilterBlockedBauplatze(0, plots, 256);
     placeEuler[0] = placeEuler[1] = placeEuler[2] = 0;
     env.bauplatzGlobal = plots;                            // dword_123343C = v72

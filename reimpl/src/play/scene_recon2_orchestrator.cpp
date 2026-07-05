@@ -247,14 +247,17 @@ i32 Scene_RunMainFrameLoop(SceneState& s, const SceneHooks& h) {
             // if (!(building.flags90 & 1)) {
             //   if (IsProductionType(b) && InvokeHandlerSlot60(27,b)==1)
             //       EnterForeignShop(b);
-            //   else if (!IsStorageType(b)) {
+            //   else if (!IsStorageType(b)) {          // ALSO reached when the
+            //       // op-27 invoke fails (jnz loc_50F57C @0x50f32e)
             //       if (InvokeHandlerSlot60(25,b,...)==1) EnterAndDispatch(b);
             //   }
             // }
             bool isProd = h.BuildingIsProductionType ? h.BuildingIsProductionType(b) : false;
-            if (isProd) {
-                i32 r = h.InteractionInvokeHandlerSlot60 ? h.InteractionInvokeHandlerSlot60(27, b) : 0;
-                if (r == 1) call(h.BuildingEnterForeignShop, b);
+            i32 r27 = 0;
+            if (isProd)
+                r27 = h.InteractionInvokeHandlerSlot60 ? h.InteractionInvokeHandlerSlot60(27, b) : 0;
+            if (isProd && r27 == 1) {
+                call(h.BuildingEnterForeignShop, b);
             } else {
                 bool isStore = h.BuildingIsStorageType ? h.BuildingIsStorageType(b) : false;
                 if (!isStore) {
@@ -470,15 +473,23 @@ i32 Scene_SyncDecorObjects(const SceneHooks& h) {
                 for (int v5 = 0; v5 < 8; ++v5) {
                     i16 id = (v5 < 4) ? ids[v5] : 0;
                     if (!id) continue;
-                    // person.type==30 path vs else path differ only in flags;
-                    // both emit a primary Request17 (delegated).
-                    call(h.CommandQueueRequest17, o255, -1, 2, id);
-                    if (v5 == 0) {
-                        // random-modulo wait id on the secondary object
-                        i32 r = h.MathRandomModulo ? h.MathRandomModulo(0x14) : 0;
-                        call(h.CommandQueueRequest17, o254, -1, r + 20, 0);
+                    // mode arg = 2 - (v5 != 0)  (0x501e85; the type-30 primary
+                    // @0x501d4e passes the constant 2).
+                    const i32 mode = (v5 == 0) ? 2 : 1;
+                    if (seasonType == 30) {          // *i == 30 @0x501d27
+                        call(h.CommandQueueRequest17, o255, -1, 2, (i32)id);
+                    } else {
+                        call(h.CommandQueueRequest17, o255, -1, mode, (i32)id);
+                        if (v5 == 0) {
+                            // random-modulo wait id on the secondary object
+                            // (only on the NON-30 path, @0x501e8c..0x501eb9;
+                            //  the id word rides along as arg4).
+                            i32 r = h.MathRandomModulo ? h.MathRandomModulo(0x14) : 0;
+                            call(h.CommandQueueRequest17, o254, -1, r + 20, (i32)id);
+                        }
                     }
-                    // switch(id) -> secondary id, then another Request17.
+                    // switch(id) -> secondary id, then another Request17 with
+                    // mode 2-(v5!=0) and the secondary id (@0x501d7b).
                     i16 sec = 0;
                     switch (id) {
                         case 439: sec = 458; break;
@@ -492,13 +503,16 @@ i32 Scene_SyncDecorObjects(const SceneHooks& h) {
                         case 448: sec = 467; break;
                         default:  sec = 0;   break;
                     }
-                    if (sec) call(h.CommandQueueRequest17, o255, -1, sec, 0);
+                    if (sec) call(h.CommandQueueRequest17, o255, -1, mode, (i32)sec);
                 }
             }
             ++v18;
         } while (v18 < 4 && kDecorSeasonList[v18]);
     }
-    return lastHandle & 0xFFFF;
+    // return (__int16)Begin @0x501ddb — the iterator variable is exhausted (0)
+    // on every exit path, so the original always returns 0.
+    (void)lastHandle;
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -704,21 +718,23 @@ i32 Scene_SyncWorldOnEnter(SceneState& s, const SceneHooks& h,
 // matching meshes, the "!bk_" / 3-char prefix filter, and the spawn/reparent
 // pass are delegated to hooks.
 // ---------------------------------------------------------------------------
-// Pure bbox merge: given 20 source verts (xyz, stride 20 floats) merge into an
-// accumulator [minXYZ(64..72), maxXYZ(80..88)] seeded from src vert 0.
-void SpawnBuildingMesh_MergeBBox(const float* srcVerts /*[20*20]*/,
+// Pure bbox merge: 8 source verts of stride 20 floats (80 bytes). The seed
+// reads vert 0 (*(v10), +4, +8 @0x50383e..0x503860); the merge loop runs
+// v16 = v10+80 .. v10+640 step 80 bytes (@0x503821/0x503838/0x503977) — verts
+// 1..7 — into the accumulator [minXYZ(+64..72), maxXYZ(+80..88)].
+void SpawnBuildingMesh_MergeBBox(const float* srcVerts /*[8*20]*/,
                                  float outMin[3], float outMax[3]) {
     // seed: min=max=vert0.xyz
     outMin[0] = outMax[0] = srcVerts[0];
     outMin[1] = outMax[1] = srcVerts[1];
     outMin[2] = outMax[2] = srcVerts[2];
-    // for each of the 20 verts (stride 20 floats): clamp min down / max up.
-    for (int i = 0; i < 20; ++i) {
+    // verts 1..7 (stride 20 floats): clamp min down / max up.
+    for (int i = 1; i < 8; ++i) {
         const float* v = srcVerts + i * 20;
         for (int c = 0; c < 3; ++c) {
-            // min: if (v[c] >= cur) keep cur else take v[c]
+            // min: if (v[c] >= cur) keep cur else take v[c]  (@0x503876)
             if (!(v[c] >= outMin[c])) outMin[c] = v[c];
-            // max: if (v[c] <= cur) keep cur else take v[c]
+            // max: if (v[c] <= cur) keep cur else take v[c]  (@0x5038fd)
             if (!(v[c] <= outMax[c])) outMax[c] = v[c];
         }
     }
@@ -819,7 +835,11 @@ u8 Scene_HandleDebugKeyToggle(DebugKeyState& s, const DebugKeyHooks& h) {
                     if (key == 21 && h.RenderSetZEnable)
                         h.RenderSetZEnable(s.byte_64A351 == 0);
                 } else {                  // key == 0x14 (20): wireframe toggle
-                    s.dword_649D7D = ((u8)s.dword_649D7D == 0) ? 1 : (s.dword_649D7D & ~0xFFu);
+                    // LOBYTE(dword_649D7D) = ((_BYTE)dword_649D7D == 0)
+                    // @0x5e88dd — only the LOW byte is rewritten; the upper
+                    // three bytes are preserved in BOTH directions.
+                    s.dword_649D7D = (i32)((u32)s.dword_649D7D & ~0xFFu)
+                                   | (((u8)s.dword_649D7D == 0) ? 1 : 0);
                 }
             }
             // LABEL_8: if (!v13) return 0; else APPLY()
